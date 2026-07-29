@@ -21,7 +21,12 @@ struct AlertsView: View {
                                         app.openProfile(actor)
                                     }
                                 } label: {
-                                    AloAvatar(name: item.actor?.name ?? "A", url: item.actor?.avatarUrl ?? "", size: 50)
+                                    AloAvatar(
+                                        name: item.actor?.name ?? "A",
+                                        url: item.actor?.avatarUrl ?? "",
+                                        size: 50,
+                                        colorSeed: item.actor.map { String($0.id) }
+                                    )
                                 }
                                 .buttonStyle(.plain)
 

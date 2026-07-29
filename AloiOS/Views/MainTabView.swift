@@ -46,7 +46,11 @@ struct MainTabView: View {
                     .zIndex(20)
             }
         }
-        .background(AloTheme.background.ignoresSafeArea())
+        .ignoresSafeArea(
+            app.activeTab == .messages && app.activeConversation != nil ? .keyboard : [],
+            edges: .bottom
+        )
+        .background(AloTheme.background.ignoresSafeArea(.container))
         .animation(.spring(response: 0.34, dampingFraction: 0.9), value: app.selectedProfile?.id)
         .animation(.spring(response: 0.24, dampingFraction: 0.9), value: app.isProfileLoading)
         .alert("Alo", isPresented: errorBinding) {
@@ -59,8 +63,7 @@ struct MainTabView: View {
                 .environmentObject(app)
         }
         .onChange(of: app.activeTab) { _, tab in
-            guard tab == .feed || tab == .profile || tab == .search || tab == .alerts else { return }
-            Task { await app.loadBootstrap() }
+            app.refreshForTabIfNeeded(tab)
         }
     }
 

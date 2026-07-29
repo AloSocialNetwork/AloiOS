@@ -45,7 +45,7 @@ struct FeedView: View {
         VStack(spacing: 12) {
             HStack(spacing: 12) {
                 if let me = app.bootstrap?.me {
-                    AloAvatar(name: me.name, url: me.avatarUrl, size: 44)
+                    AloAvatar(name: me.name, url: me.avatarUrl, size: 44, colorSeed: String(me.id))
                 }
                 TextField("Что нового?", text: $app.composeText, axis: .vertical)
                     .foregroundStyle(AloTheme.text)
@@ -345,7 +345,12 @@ private struct CommentRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Button(action: onAuthor) {
-                AloAvatar(name: comment.author.name, url: comment.author.avatarUrl, size: 46)
+                AloAvatar(
+                    name: comment.author.name,
+                    url: comment.author.avatarUrl,
+                    size: 46,
+                    colorSeed: String(comment.author.id)
+                )
             }
             .buttonStyle(.plain)
 

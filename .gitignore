@@ -1,0 +1,17 @@
+Pods/
+DerivedData/
+.DS_Store
+*.xcuserstate
+xcuserdata/
+build/
+.build/
+.env
+.env.*
+!.env.example
+*.p8
+*.p12
+*.pem
+*.key
+*.mobileprovision
+*.xcconfig.local
+GoogleService-Info.plist

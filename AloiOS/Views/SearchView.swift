@@ -38,7 +38,12 @@ struct SearchView: View {
                                 app.openProfile(item)
                             } label: {
                                 HStack(spacing: 12) {
-                                    AloAvatar(name: item.name, url: item.avatarUrl, size: 56)
+                                    AloAvatar(
+                                        name: item.name,
+                                        url: item.avatarUrl,
+                                        size: 56,
+                                        colorSeed: String(item.id)
+                                    )
                                     VStack(alignment: .leading, spacing: 3) {
                                         HStack(spacing: 5) {
                                             Text(item.name)
@@ -221,7 +226,12 @@ private struct SearchRelationListScreen: View {
                                     app.openProfile(item)
                                 } label: {
                                     HStack(spacing: 12) {
-                                        AloAvatar(name: item.name, url: item.avatarUrl, size: 58)
+                                        AloAvatar(
+                                            name: item.name,
+                                            url: item.avatarUrl,
+                                            size: 58,
+                                            colorSeed: String(item.id)
+                                        )
 
                                         VStack(alignment: .leading, spacing: 4) {
                                             HStack(spacing: 5) {

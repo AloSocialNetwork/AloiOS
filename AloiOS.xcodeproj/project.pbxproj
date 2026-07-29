@@ -6,14 +6,62 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		17649299801EC54862C895E3 /* Pods_AloiOS.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B0F12BFF16B6692433BAB910 /* Pods_AloiOS.framework */; };
+		C0A2F5E0267D48776A9CD818 /* Pods_AloiOSTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CAEF924781DCCFF880B8DC13 /* Pods_AloiOSTests.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A10A00000000000000000007 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 7A0010020000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 7A0010090000000000000001;
+			remoteInfo = AloiOS;
+		};
+		A10B00000000000000000007 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 7A0010020000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 7A0010090000000000000001;
+			remoteInfo = AloiOS;
+		};
+		A10E2EE00000000000000005 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A10E2EE00000000000000001 /* Pods/Pods.xcodeproj */;
+			proxyType = 1;
+			remoteGlobalIDString = D34050F99008B215373D81777E651FEC;
+			remoteInfo = "Pods-AloiOS";
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		094F213620383690D5EABDF6 /* Pods-AloiOSTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-AloiOSTests.debug.xcconfig"; path = "Target Support Files/Pods-AloiOSTests/Pods-AloiOSTests.debug.xcconfig"; sourceTree = "<group>"; };
 		7A00100A0000000000000001 /* AloiOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AloiOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10A00000000000000000001 /* AloiOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AloiOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10B00000000000000000001 /* AloiOSUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AloiOSUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10E2EE00000000000000001 /* Pods/Pods.xcodeproj */ = {isa = PBXFileReference; explicitFileType = "wrapper.pb-project"; path = Pods/Pods.xcodeproj; sourceTree = "<group>"; };
+		B0F12BFF16B6692433BAB910 /* Pods_AloiOS.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_AloiOS.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		CAEF924781DCCFF880B8DC13 /* Pods_AloiOSTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_AloiOSTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		D1B9AFC7EB6066290B53ECBF /* Pods-AloiOSTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-AloiOSTests.release.xcconfig"; path = "Target Support Files/Pods-AloiOSTests/Pods-AloiOSTests.release.xcconfig"; sourceTree = "<group>"; };
+		D2A3505E703C97C3E12822BC /* Pods-AloiOS.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-AloiOS.debug.xcconfig"; path = "Target Support Files/Pods-AloiOS/Pods-AloiOS.debug.xcconfig"; sourceTree = "<group>"; };
+		DBF556B7F5A7453153410471 /* Pods-AloiOS.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-AloiOS.release.xcconfig"; path = "Target Support Files/Pods-AloiOS/Pods-AloiOS.release.xcconfig"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		7A00100C0000000000000001 /* AloiOS */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = AloiOS;
+			sourceTree = "<group>";
+		};
+		A10A00000000000000000002 /* AloiOSTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = AloiOSTests;
+			sourceTree = "<group>";
+		};
+		A10B00000000000000000002 /* AloiOSUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = AloiOSUITests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -23,17 +71,58 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				17649299801EC54862C895E3 /* Pods_AloiOS.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10A00000000000000000005 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C0A2F5E0267D48776A9CD818 /* Pods_AloiOSTests.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10B00000000000000000005 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		15CCCB60E61D936919050364 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				B0F12BFF16B6692433BAB910 /* Pods_AloiOS.framework */,
+				CAEF924781DCCFF880B8DC13 /* Pods_AloiOSTests.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		55FD2EA3F17A5B38CB127311 /* Pods */ = {
+			isa = PBXGroup;
+			children = (
+				D2A3505E703C97C3E12822BC /* Pods-AloiOS.debug.xcconfig */,
+				DBF556B7F5A7453153410471 /* Pods-AloiOS.release.xcconfig */,
+				094F213620383690D5EABDF6 /* Pods-AloiOSTests.debug.xcconfig */,
+				D1B9AFC7EB6066290B53ECBF /* Pods-AloiOSTests.release.xcconfig */,
+			);
+			path = Pods;
+			sourceTree = "<group>";
+		};
 		7A0010010000000000000001 = {
 			isa = PBXGroup;
 			children = (
 				7A00100C0000000000000001 /* AloiOS */,
+				A10A00000000000000000002 /* AloiOSTests */,
+				A10B00000000000000000002 /* AloiOSUITests */,
+				A10E2EE00000000000000001 /* Pods/Pods.xcodeproj */,
 				7A00100B0000000000000001 /* Products */,
+				55FD2EA3F17A5B38CB127311 /* Pods */,
+				15CCCB60E61D936919050364 /* Frameworks */,
 			);
 			sourceTree = "<group>";
 		};
@@ -41,6 +130,15 @@
 			isa = PBXGroup;
 			children = (
 				7A00100A0000000000000001 /* AloiOS.app */,
+				A10A00000000000000000001 /* AloiOSTests.xctest */,
+				A10B00000000000000000001 /* AloiOSUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A10E2EE00000000000000002 /* Products */ = {
+			isa = PBXGroup;
+			children = (
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -52,23 +150,67 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 7A0010250000000000000001 /* Build configuration list for PBXNativeTarget "AloiOS" */;
 			buildPhases = (
+				BBB4E539DA4A743DB892C54A /* [CP] Check Pods Manifest.lock */,
 				7A0010060000000000000001 /* Sources */,
 				7A0010070000000000000001 /* Frameworks */,
 				7A0010080000000000000001 /* Resources */,
+				E4FEFA8DF0311FFDA0F79040 /* [CP] Embed Pods Frameworks */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				A10E2EE00000000000000006 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				7A00100C0000000000000001 /* AloiOS */,
 			);
 			name = AloiOS;
-			packageProductDependencies = (
-			);
 			productName = AloiOS;
 			productReference = 7A00100A0000000000000001 /* AloiOS.app */;
 			productType = "com.apple.product-type.application";
+		};
+		A10A00000000000000000003 /* AloiOSTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10A0000000000000000000B /* Build configuration list for PBXNativeTarget "AloiOSTests" */;
+			buildPhases = (
+				B1EF1201369155924A014395 /* [CP] Check Pods Manifest.lock */,
+				A10A00000000000000000004 /* Sources */,
+				A10A00000000000000000005 /* Frameworks */,
+				A10A00000000000000000006 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A10A00000000000000000008 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				A10A00000000000000000002 /* AloiOSTests */,
+			);
+			name = AloiOSTests;
+			productName = AloiOSTests;
+			productReference = A10A00000000000000000001 /* AloiOSTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		A10B00000000000000000003 /* AloiOSUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10B0000000000000000000B /* Build configuration list for PBXNativeTarget "AloiOSUITests" */;
+			buildPhases = (
+				A10B00000000000000000004 /* Sources */,
+				A10B00000000000000000005 /* Frameworks */,
+				A10B00000000000000000006 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A10B00000000000000000008 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				A10B00000000000000000002 /* AloiOSUITests */,
+			);
+			name = AloiOSUITests;
+			productName = AloiOSUITests;
+			productReference = A10B00000000000000000001 /* AloiOSUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 /* End PBXNativeTarget section */
 
@@ -82,6 +224,15 @@
 				TargetAttributes = {
 					7A0010090000000000000001 = {
 						CreatedOnToolsVersion = 26.2;
+						ProvisioningStyle = Automatic;
+					};
+					A10A00000000000000000003 = {
+						CreatedOnToolsVersion = 26.2;
+						TestTargetID = 7A0010090000000000000001;
+					};
+					A10B00000000000000000003 = {
+						CreatedOnToolsVersion = 26.2;
+						TestTargetID = 7A0010090000000000000001;
 					};
 				};
 			};
@@ -98,9 +249,17 @@
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 7A00100B0000000000000001 /* Products */;
 			projectDirPath = "";
+			projectReferences = (
+				{
+					ProductGroup = A10E2EE00000000000000002 /* Products */;
+					ProjectRef = A10E2EE00000000000000001 /* Pods/Pods.xcodeproj */;
+				},
+			);
 			projectRoot = "";
 			targets = (
 				7A0010090000000000000001 /* AloiOS */,
+				A10A00000000000000000003 /* AloiOSTests */,
+				A10B00000000000000000003 /* AloiOSUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -113,7 +272,89 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A10A00000000000000000006 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10B00000000000000000006 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		B1EF1201369155924A014395 /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-AloiOSTests-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+		BBB4E539DA4A743DB892C54A /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-AloiOS-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+		E4FEFA8DF0311FFDA0F79040 /* [CP] Embed Pods Frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-AloiOS/Pods-AloiOS-frameworks-${CONFIGURATION}-input-files.xcfilelist",
+			);
+			inputPaths = (
+			);
+			name = "[CP] Embed Pods Frameworks";
+			outputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-AloiOS/Pods-AloiOS-frameworks-${CONFIGURATION}-output-files.xcfilelist",
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-AloiOS/Pods-AloiOS-frameworks.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		7A0010060000000000000001 /* Sources */ = {
@@ -123,7 +364,39 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A10A00000000000000000004 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10B00000000000000000004 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A10A00000000000000000008 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 7A0010090000000000000001 /* AloiOS */;
+			targetProxy = A10A00000000000000000007 /* PBXContainerItemProxy */;
+		};
+		A10B00000000000000000008 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 7A0010090000000000000001 /* AloiOS */;
+			targetProxy = A10B00000000000000000007 /* PBXContainerItemProxy */;
+		};
+		A10E2EE00000000000000006 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = "Pods-AloiOS";
+			targetProxy = A10E2EE00000000000000005 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		7A0010230000000000000001 /* Debug */ = {
@@ -173,7 +446,14 @@
 		};
 		7A0010260000000000000001 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = D2A3505E703C97C3E12822BC /* Pods-AloiOS.debug.xcconfig */;
 			buildSettings = {
+				ALO_API_BASE_URL = "http://192.168.0.19:3000/";
+				ALO_CERTIFICATE_PINS = "";
+				APS_ENVIRONMENT = development;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_ENABLE_EXPLICIT_MODULES = NO;
+				CODE_SIGN_ENTITLEMENTS = "Support/AloiOS-Local.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "";
@@ -190,6 +470,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_ENABLE_EXPLICIT_MODULES = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -198,7 +479,14 @@
 		};
 		7A0010270000000000000001 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = DBF556B7F5A7453153410471 /* Pods-AloiOS.release.xcconfig */;
 			buildSettings = {
+				ALO_API_BASE_URL = "";
+				ALO_CERTIFICATE_PINS = "";
+				APS_ENVIRONMENT = production;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_ENABLE_EXPLICIT_MODULES = NO;
+				CODE_SIGN_ENTITLEMENTS = Support/AloiOS.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "";
@@ -213,11 +501,87 @@
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.alo.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) ALO_PUSH_NOTIFICATIONS";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_ENABLE_EXPLICIT_MODULES = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		A10A00000000000000000009 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 094F213620383690D5EABDF6 /* Pods-AloiOSTests.debug.xcconfig */;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CLANG_ENABLE_EXPLICIT_MODULES = NO;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = F77L64N84M;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.alo.ios.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_ENABLE_EXPLICIT_MODULES = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AloiOS.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/AloiOS";
+			};
+			name = Debug;
+		};
+		A10A0000000000000000000A /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = D1B9AFC7EB6066290B53ECBF /* Pods-AloiOSTests.release.xcconfig */;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CLANG_ENABLE_EXPLICIT_MODULES = NO;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = F77L64N84M;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.alo.ios.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ENABLE_EXPLICIT_MODULES = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AloiOS.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/AloiOS";
+			};
+			name = Release;
+		};
+		A10B00000000000000000009 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_EXPLICIT_MODULES = NO;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = F77L64N84M;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.alo.ios.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_ENABLE_EXPLICIT_MODULES = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = AloiOS;
+			};
+			name = Debug;
+		};
+		A10B0000000000000000000A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_EXPLICIT_MODULES = NO;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = F77L64N84M;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.alo.ios.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ENABLE_EXPLICIT_MODULES = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = AloiOS;
 			};
 			name = Release;
 		};
@@ -238,6 +602,24 @@
 			buildConfigurations = (
 				7A0010260000000000000001 /* Debug */,
 				7A0010270000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10A0000000000000000000B /* Build configuration list for PBXNativeTarget "AloiOSTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10A00000000000000000009 /* Debug */,
+				A10A0000000000000000000A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10B0000000000000000000B /* Build configuration list for PBXNativeTarget "AloiOSUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10B00000000000000000009 /* Debug */,
+				A10B0000000000000000000A /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

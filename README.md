@@ -23,3 +23,23 @@
 1.  **Клонируйте репозиторий:**
     ```bash
     git clone https://github.com/kirushkinmisha445533-debug/AloiOS.git
+    cd AloiOS
+    pod install
+    ```
+
+Открывайте `AloiOS.xcworkspace`. Debug использует локальный HTTP API. Release
+намеренно требует HTTPS и хотя бы один SHA-256 certificate pin:
+
+```text
+ALO_API_BASE_URL=https://api.example.com/
+ALO_CERTIFICATE_PINS=sha256/CURRENT_PIN,sha256/NEXT_PIN
+```
+
+Без этих значений production-сборка не запускает сетевой клиент. Настройка APNs,
+PushKit, TURN и ротации pin описана на сервере в
+`docs/production-mobile-setup.md`.
+
+## Архитектура
+
+Назначение классов, моделей, хранилищ, экранов и подсистем клиента описано в
+[`docs/IOS_CLASS_GUIDE.md`](docs/IOS_CLASS_GUIDE.md).

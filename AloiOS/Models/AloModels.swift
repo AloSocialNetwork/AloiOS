@@ -90,6 +90,13 @@ struct AloMediaItem: Identifiable, Equatable {
     let posterUrl: String
     let caption: String
 
+    init(type: String, url: String, posterUrl: String = "", caption: String = "") {
+        self.type = type
+        self.url = url
+        self.posterUrl = posterUrl
+        self.caption = caption
+    }
+
     init(_ json: [String: Any]) {
         type = json.string("type")
         url = json.string("url")
@@ -127,6 +134,7 @@ struct AloMessageAttachment: Identifiable, Equatable {
     let name: String
     let posterUrl: String
     let waveform: [CGFloat]
+    let mediaEncryption: [String: String]
 
     init(_ json: [String: Any]) {
         type = json.string("type")
@@ -134,7 +142,21 @@ struct AloMessageAttachment: Identifiable, Equatable {
         name = json.string("name")
         posterUrl = json.string("posterUrl")
         waveform = Self.normalizedWaveform(json["waveform"])
+        let encryption = json.object("mediaEncryption").isEmpty ? json.object("e2ee") : json.object("mediaEncryption")
+        mediaEncryption = encryption.reduce(into: [String: String]()) { result, pair in
+            result[pair.key] = String(describing: pair.value)
+        }
         id = url.ifBlank(name.ifBlank(UUID().uuidString))
+    }
+
+    init(local attachment: AloLocalAttachment) {
+        type = attachment.type
+        url = attachment.dataUrl
+        name = attachment.name
+        posterUrl = attachment.type == "image" ? attachment.dataUrl : ""
+        waveform = attachment.waveform
+        mediaEncryption = [:]
+        id = attachment.id.uuidString
     }
 
     private static func normalizedWaveform(_ value: Any?) -> [CGFloat] {
@@ -237,6 +259,12 @@ struct AloMessageReaction: Identifiable, Equatable {
         emoji = json.string("emoji")
         count = max(0, json.int("count"))
         reactedByMe = json.bool("reactedByMe")
+    }
+
+    init(emoji: String, count: Int, reactedByMe: Bool) {
+        self.emoji = emoji
+        self.count = max(0, count)
+        self.reactedByMe = reactedByMe
     }
 }
 
@@ -393,6 +421,31 @@ struct AloChatMessage: Identifiable, Equatable {
         sender = json.optionalObject("sender").map(AloConversationPeer.init)
     }
 
+    init(
+        localId: Int,
+        senderId: Int,
+        recipientId: Int,
+        body: String,
+        createdAt: String,
+        attachments: [AloMessageAttachment] = [],
+        forwardFrom: AloForwardMeta? = nil
+    ) {
+        id = localId
+        self.senderId = senderId
+        self.recipientId = recipientId
+        self.body = body
+        attachmentUrl = attachments.first?.url ?? ""
+        attachmentType = attachments.first?.type ?? ""
+        attachmentName = attachments.first?.name ?? ""
+        self.attachments = attachments
+        editedAt = ""
+        readAt = ""
+        self.forwardFrom = forwardFrom
+        self.createdAt = createdAt
+        reactions = []
+        sender = nil
+    }
+
     private init(
         id: Int,
         senderId: Int,
@@ -462,12 +515,44 @@ struct AloChatMessage: Identifiable, Equatable {
             sender: sender
         )
     }
+
+    func acknowledgingDelivery(id: Int, createdAt: String) -> AloChatMessage {
+        AloChatMessage(
+            id: id > 0 ? id : self.id,
+            senderId: senderId,
+            recipientId: recipientId,
+            body: body,
+            attachmentUrl: attachmentUrl,
+            attachmentType: attachmentType,
+            attachmentName: attachmentName,
+            attachments: attachments,
+            editedAt: editedAt,
+            readAt: readAt,
+            forwardFrom: forwardFrom,
+            createdAt: createdAt.isEmpty ? self.createdAt : createdAt,
+            reactions: reactions,
+            sender: sender
+        )
+    }
+}
+
+extension AloChatMessage {
+    var isCallLogMessage: Bool {
+        if attachmentType == "call" {
+            return true
+        }
+        return [attachmentName, body, attachmentUrl].contains { raw in
+            let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.contains("\"kind\"") && value.contains("\"call\"") || value.contains("\"callType\"")
+        }
+    }
 }
 
 struct AloConversationDetail {
     let peerId: Int
     let kind: String
     let roomId: Int
+    let entityType: String
     let title: String
     let subtitle: String
     let avatarUrl: String
@@ -483,6 +568,7 @@ struct AloConversationDetail {
         peerId: Int,
         kind: String,
         roomId: Int,
+        entityType: String = "",
         title: String,
         subtitle: String,
         avatarUrl: String,
@@ -497,6 +583,7 @@ struct AloConversationDetail {
         self.peerId = peerId
         self.kind = kind
         self.roomId = roomId
+        self.entityType = entityType
         self.title = title
         self.subtitle = subtitle
         self.avatarUrl = avatarUrl
@@ -513,8 +600,11 @@ struct AloConversationDetail {
         peerId = summary.peerId
         kind = summary.kind
         roomId = summary.roomId
-        title = summary.peer.name
-        subtitle = summary.kind == "group"
+        entityType = summary.peer.entityType
+        title = summary.peer.entityType == "saved" ? "Избранное" : summary.peer.name
+        subtitle = summary.peer.entityType == "saved"
+            ? "Личное облако"
+            : summary.kind == "group"
             ? "\(summary.memberCount) участников"
             : (summary.peer.online ? "в сети" : AloFormatters.lastSeenLabel(summary.peer.lastSeenAt))
         avatarUrl = summary.peer.avatarUrl
@@ -533,8 +623,11 @@ struct AloConversationDetail {
         self.peerId = peerId
         kind = room.isEmpty ? "direct" : "group"
         roomId = room.int("id")
-        title = room.string("title").ifBlank(peer.name)
-        subtitle = room.isEmpty ? (peer.online ? "в сети" : AloFormatters.lastSeenLabel(peer.lastSeenAt)) : "\(room.int("memberCount")) участников"
+        entityType = room.isEmpty ? peer.entityType : "group"
+        title = peer.entityType == "saved" ? "Избранное" : room.string("title").ifBlank(peer.name)
+        subtitle = peer.entityType == "saved"
+            ? "Личное облако"
+            : room.isEmpty ? (peer.online ? "в сети" : AloFormatters.lastSeenLabel(peer.lastSeenAt)) : "\(room.int("memberCount")) участников"
         avatarUrl = room.string("avatarEmoji").ifBlank(peer.avatarUrl)
         canManageGroup = room.bool("canManage")
         groupMemberRole = room.string("memberRole")
@@ -545,11 +638,31 @@ struct AloConversationDetail {
         items = json.array("items").map(AloChatMessage.init)
     }
 
+    func replacingItems(_ items: [AloChatMessage]) -> AloConversationDetail {
+        AloConversationDetail(
+            peerId: peerId,
+            kind: kind,
+            roomId: roomId,
+            entityType: entityType,
+            title: title,
+            subtitle: subtitle,
+            avatarUrl: avatarUrl,
+            canManageGroup: canManageGroup,
+            groupMemberRole: groupMemberRole,
+            groupMembers: groupMembers,
+            online: online,
+            lastSeenAt: lastSeenAt,
+            isTyping: isTyping,
+            items: items
+        )
+    }
+
     func replacingMessage(_ message: AloChatMessage) -> AloConversationDetail {
         AloConversationDetail(
             peerId: peerId,
             kind: kind,
             roomId: roomId,
+            entityType: entityType,
             title: title,
             subtitle: subtitle,
             avatarUrl: avatarUrl,
@@ -666,6 +779,95 @@ struct AloPrivacySettings: Equatable {
     }
 }
 
+struct AloNotificationSettings: Equatable {
+    var likesEnabled: Bool
+    var commentsEnabled: Bool
+    var repostsEnabled: Bool
+    var followsEnabled: Bool
+    var messagesEnabled: Bool
+    var friendRequestsEnabled: Bool
+    var friendAcceptsEnabled: Bool
+    var channelSubscriptionsEnabled: Bool
+    var commentLikesEnabled: Bool
+
+    init(
+        likesEnabled: Bool,
+        commentsEnabled: Bool,
+        repostsEnabled: Bool,
+        followsEnabled: Bool,
+        messagesEnabled: Bool,
+        friendRequestsEnabled: Bool,
+        friendAcceptsEnabled: Bool,
+        channelSubscriptionsEnabled: Bool,
+        commentLikesEnabled: Bool
+    ) {
+        self.likesEnabled = likesEnabled
+        self.commentsEnabled = commentsEnabled
+        self.repostsEnabled = repostsEnabled
+        self.followsEnabled = followsEnabled
+        self.messagesEnabled = messagesEnabled
+        self.friendRequestsEnabled = friendRequestsEnabled
+        self.friendAcceptsEnabled = friendAcceptsEnabled
+        self.channelSubscriptionsEnabled = channelSubscriptionsEnabled
+        self.commentLikesEnabled = commentLikesEnabled
+    }
+
+    init(_ json: [String: Any]) {
+        likesEnabled = json["likesEnabled"] == nil ? true : json.bool("likesEnabled")
+        commentsEnabled = json["commentsEnabled"] == nil ? true : json.bool("commentsEnabled")
+        repostsEnabled = json["repostsEnabled"] == nil ? true : json.bool("repostsEnabled")
+        followsEnabled = json["followsEnabled"] == nil ? true : json.bool("followsEnabled")
+        messagesEnabled = json["messagesEnabled"] == nil ? true : json.bool("messagesEnabled")
+        friendRequestsEnabled = json["friendRequestsEnabled"] == nil ? true : json.bool("friendRequestsEnabled")
+        friendAcceptsEnabled = json["friendAcceptsEnabled"] == nil ? true : json.bool("friendAcceptsEnabled")
+        channelSubscriptionsEnabled = json["channelSubscriptionsEnabled"] == nil ? true : json.bool("channelSubscriptionsEnabled")
+        commentLikesEnabled = json["commentLikesEnabled"] == nil ? true : json.bool("commentLikesEnabled")
+    }
+
+    static let `default` = AloNotificationSettings([:])
+
+    var requestBody: [String: Any] {
+        [
+            "likesEnabled": likesEnabled,
+            "commentsEnabled": commentsEnabled,
+            "repostsEnabled": repostsEnabled,
+            "followsEnabled": followsEnabled,
+            "messagesEnabled": messagesEnabled,
+            "friendRequestsEnabled": friendRequestsEnabled,
+            "friendAcceptsEnabled": friendAcceptsEnabled,
+            "channelSubscriptionsEnabled": channelSubscriptionsEnabled,
+            "commentLikesEnabled": commentLikesEnabled
+        ]
+    }
+}
+
+struct AloSecuritySession: Identifiable, Equatable {
+    let id: Int
+    let current: Bool
+    let createdAt: String
+    let lastSeenAt: String
+    let expiresAt: String
+    let ip: String
+    let isSuspicious: Bool
+    let deviceLabel: String
+    let platform: String
+    let deviceType: String
+
+    init(_ json: [String: Any]) {
+        let device = json.object("device")
+        id = json.int("id")
+        current = json.bool("current")
+        createdAt = json.string("createdAt")
+        lastSeenAt = json.string("lastSeenAt")
+        expiresAt = json.string("expiresAt")
+        ip = json.string("ip")
+        isSuspicious = json.bool("isSuspicious")
+        deviceLabel = device.string("label").ifBlank("Неизвестное устройство")
+        platform = device.string("platform")
+        deviceType = device.string("deviceType")
+    }
+}
+
 struct AloUserProfile: Identifiable, Equatable {
     let id: Int
     let user: AloCurrentUser
@@ -710,6 +912,7 @@ struct AloBootstrapData {
     let feedPopular: [AloPost]
     let feedSubscriptions: [AloPost]
     let notifications: [AloNotificationItem]
+    let notificationSettings: AloNotificationSettings
     let searchUsers: [AloEntitySummary]
     let searchChannels: [AloEntitySummary]
     let profileStats: AloProfileStats
@@ -724,6 +927,7 @@ struct AloBootstrapData {
         feedPopular: [AloPost],
         feedSubscriptions: [AloPost],
         notifications: [AloNotificationItem],
+        notificationSettings: AloNotificationSettings,
         searchUsers: [AloEntitySummary],
         searchChannels: [AloEntitySummary],
         profileStats: AloProfileStats,
@@ -737,6 +941,7 @@ struct AloBootstrapData {
         self.feedPopular = feedPopular
         self.feedSubscriptions = feedSubscriptions
         self.notifications = notifications
+        self.notificationSettings = notificationSettings
         self.searchUsers = searchUsers
         self.searchChannels = searchChannels
         self.profileStats = profileStats
@@ -757,6 +962,7 @@ struct AloBootstrapData {
         feedPopular = feed.array("popular").map(AloPost.init)
         feedSubscriptions = feed.array("subs").map(AloPost.init)
         notifications = data.array("notifications").map(AloNotificationItem.init)
+        notificationSettings = AloNotificationSettings(data.object("notificationSettings"))
         searchUsers = search.array("users").map(AloEntitySummary.init)
         searchChannels = search.array("channels").map(AloEntitySummary.init)
         profileStats = AloProfileStats(profile.object("stats"))
@@ -845,6 +1051,31 @@ enum AloFormatters {
         return timeFormatter.string(from: date)
     }
 
+    static func messageDateLabel(_ raw: String) -> String {
+        guard let date = parseIsoDate(raw) else {
+            return String(raw.prefix(10))
+        }
+
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) {
+            return "Сегодня"
+        }
+        if calendar.isDateInYesterday(date) {
+            return "Вчера"
+        }
+        if calendar.component(.year, from: date) == calendar.component(.year, from: Date()) {
+            return messageDayMonthFormatter.string(from: date)
+        }
+        return messageFullDateFormatter.string(from: date)
+    }
+
+    static func messageDayKey(_ raw: String) -> String {
+        guard let date = parseIsoDate(raw) else {
+            return String(raw.prefix(10))
+        }
+        return messageDayKeyFormatter.string(from: date)
+    }
+
     private static func parseIsoDate(_ raw: String) -> Date? {
         isoDateFormatter.date(from: raw) ?? isoDateFormatterWithoutFraction.date(from: raw)
     }
@@ -872,6 +1103,28 @@ enum AloFormatters {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "ru_RU")
         formatter.setLocalizedDateFormatFromTemplate("d MMM")
+        return formatter
+    }()
+
+    private static let messageDayMonthFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ru_RU")
+        formatter.setLocalizedDateFormatFromTemplate("d MMMM")
+        return formatter
+    }()
+
+    private static let messageFullDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ru_RU")
+        formatter.setLocalizedDateFormatFromTemplate("d MMMM yyyy")
+        return formatter
+    }()
+
+    private static let messageDayKeyFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.dateFormat = "yyyy-MM-dd"
         return formatter
     }()
 }

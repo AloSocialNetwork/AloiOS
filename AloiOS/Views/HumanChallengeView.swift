@@ -45,6 +45,8 @@ private struct TurnstileWebView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .default()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.userContentController.add(context.coordinator, name: "aloTurnstile")
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.backgroundColor = .clear

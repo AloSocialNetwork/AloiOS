@@ -1,0 +1,30 @@
+PODS:
+  - LibSignalClient (0.97.1)
+  - WebRTC-SDK (144.7559.10)
+
+DEPENDENCIES:
+  - LibSignalClient (from `https://github.com/signalapp/libsignal.git`, tag `v0.97.1`)
+  - WebRTC-SDK (from `https://raw.githubusercontent.com/webrtc-sdk/Specs/144.7559.10/WebRTC-SDK.podspec`)
+
+EXTERNAL SOURCES:
+  LibSignalClient:
+    :git: https://github.com/signalapp/libsignal.git
+    :tag: v0.97.1
+  WebRTC-SDK:
+    :podspec: https://raw.githubusercontent.com/webrtc-sdk/Specs/144.7559.10/WebRTC-SDK.podspec
+
+CHECKOUT OPTIONS:
+  LibSignalClient:
+    :git: https://github.com/signalapp/libsignal.git
+    :tag: v0.97.1
+  WebRTC-SDK:
+    :git: https://github.com/webrtc-sdk/Specs.git
+    :tag: 144.7559.10
+
+SPEC CHECKSUMS:
+  LibSignalClient: 2409cadf9a29658b12a495f404038bba315cb5a3
+  WebRTC-SDK: 1d7fc2ae91da6edd63e25f3882ff24f86a8d9d8b
+
+PODFILE CHECKSUM: 15b0ab99d02f398346b63c474307fd8bf3f22645
+
+COCOAPODS: 1.17.0
