@@ -22,7 +22,7 @@
 ## 🚀 Быстрый старт (для разработчиков)
 1.  **Клонируйте репозиторий:**
     ```bash
-    git clone https://github.com/kirushkinmisha445533-debug/AloiOS.git
+    git clone https://github.com/AloSocialNetwork/AloiOS.git
     cd AloiOS
     pod install
     ```
