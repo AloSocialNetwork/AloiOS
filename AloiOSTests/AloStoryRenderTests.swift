@@ -35,6 +35,28 @@ final class AloStoryRenderTests: XCTestCase {
         print("STORYRENDER", url.path)
     }
 
+    func testTurnsSnapStraightNearRightAngles() {
+        XCTAssertEqual(AloStoryRotation.snapped(.degrees(87)).degrees, 90)
+        XCTAssertEqual(AloStoryRotation.snapped(.degrees(-3)).degrees, 0)
+        XCTAssertEqual(AloStoryRotation.snapped(.degrees(183)).degrees, 180)
+        XCTAssertEqual(AloStoryRotation.snapped(.degrees(-268)).degrees, 90)
+        XCTAssertEqual(AloStoryRotation.snapped(.degrees(40)).degrees, 40, accuracy: 0.001)
+        XCTAssertEqual(AloStoryRotation.normalized(370), 10, accuracy: 0.001)
+    }
+
+    func testEveryPlateKeepsTheTextReadable() {
+        for plate in AloStoryTextStyle.Plate.allCases {
+            var style = AloStoryTextStyle()
+            style.plate = plate
+            style.colorIndex = 0
+            if plate == .solid || plate == .light {
+                XCTAssertEqual(style.textColor, .black, "white text on a white plate: \(plate)")
+            }
+            XCTAssertEqual(style.hasPlate, plate != .none)
+            XCTAssertFalse(plate.title.isEmpty)
+        }
+    }
+
     private func pixel(_ image: CGImage, x: Int, y: Int) -> (red: Int, green: Int, blue: Int) {
         var bytes = [UInt8](repeating: 0, count: 4)
         let context = CGContext(data: &bytes, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,

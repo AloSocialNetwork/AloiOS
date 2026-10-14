@@ -58,7 +58,19 @@ struct AloStoryPageEdits: Equatable {
 /// The look of a text story, chosen with the text tools.
 struct AloStoryTextStyle: Equatable {
     enum Typeface: CaseIterable { case bold, serif, typewriter }
-    enum Plate: CaseIterable { case none, soft, solid }
+    enum Plate: CaseIterable {
+        case none, soft, solid, light, outline
+
+        var title: String {
+            switch self {
+            case .none: return "Без подложки"
+            case .soft: return "Тёмная подложка"
+            case .solid: return "Цветная подложка"
+            case .light: return "Светлая подложка"
+            case .outline: return "Подложка-рамка"
+            }
+        }
+    }
 
     var typeface: Typeface = .bold
     var colorIndex = 0
@@ -86,17 +98,44 @@ struct AloStoryTextStyle: Equatable {
 
     var textColor: Color {
         let base = Self.colors[colorIndex]
-        // On a solid plate the plate takes the colour and the text turns white or black.
-        if plate == .solid { return colorIndex == 0 ? .black : .white }
-        return base
+        switch plate {
+        // A coloured plate takes the colour; the text turns white, or black on white.
+        case .solid: return colorIndex == 0 ? .black : .white
+        // White text would vanish on the light plate.
+        case .light: return colorIndex == 0 ? .black : base
+        case .none, .soft, .outline: return base
+        }
     }
 
-    var plateColor: Color? {
+    var hasPlate: Bool { plate != .none }
+
+    var plateFill: Color? {
         switch plate {
-        case .none: return nil
+        case .none, .outline: return nil
         case .soft: return .black.opacity(0.38)
         case .solid: return Self.colors[colorIndex]
+        case .light: return .white.opacity(0.88)
         }
+    }
+
+    /// The outline plate is a frame in the text's colour.
+    var plateStroke: Color? { plate == .outline ? Self.colors[colorIndex] : nil }
+}
+
+/// The plate behind text at a given size: nothing, a fill or an outline.
+struct AloStoryPlate: ViewModifier {
+    let style: AloStoryTextStyle
+    var scale: CGFloat = 1
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 12 * scale, style: .continuous)
+        content
+            .padding(.horizontal, style.hasPlate ? 14 * scale : 0)
+            .padding(.vertical, style.hasPlate ? 8 * scale : 0)
+            .background {
+                if let fill = style.plateFill { shape.fill(fill) }
+                if let stroke = style.plateStroke { shape.strokeBorder(stroke, lineWidth: 2.5 * scale) }
+            }
     }
 }
 
@@ -320,15 +359,14 @@ struct AloStoryEditorScreen: View {
             let placeholder = attachments.isEmpty ? "Что происходит?" : "Текст"
             ZStack {
                 // The plate hugs the words, as it will on the placed item.
-                if let plate = textStyle.plateColor {
+                if textStyle.hasPlate {
                     AloStoryTextWrap(width: wrap) {
                         Text(draftText.isEmpty ? placeholder : draftText)
                             .font(textStyle.font(size: AloStoryStickerContent.textSize))
                             .multilineTextAlignment(.center)
                             .hidden()
                     }
-                    .padding(.horizontal, 14).padding(.vertical, 8)
-                    .background(plate, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .modifier(AloStoryPlate(style: textStyle))
                 }
                 TextField("", text: $draftText,
                           prompt: Text(placeholder).foregroundStyle(textStyle.textColor.opacity(0.6)),
@@ -466,6 +504,12 @@ struct AloStoryEditorScreen: View {
                     Spacer()
                     doneButton { mode = .none }
                 case .text:
+                    if attachments.isEmpty {
+                        AloChatCircleButton(systemImage: "paintpalette", label: "Фон") {
+                            textStyle.gradientIndex = (textStyle.gradientIndex + 1) % AloStoryTextStyle.gradients.count
+                        }
+                        .accessibilityIdentifier("alo.story.background")
+                    }
                     Spacer()
                     doneButton { commitText() }
                 case .sticker:
@@ -501,19 +545,14 @@ struct AloStoryEditorScreen: View {
     /// Typeface, plate and colour of the text being typed; on a text story also its background.
     private var textStyleBar: some View {
         VStack(spacing: 10) {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 styleButton(systemImage: "textformat.alt", label: "Шрифт") {
                     let all = AloStoryTextStyle.Typeface.allCases
                     textStyle.typeface = all[(all.firstIndex(of: textStyle.typeface)! + 1) % all.count]
                 }
-                styleButton(systemImage: textStyle.plate == .none ? "character" : "character.textbox", label: "Подложка") {
-                    let all = AloStoryTextStyle.Plate.allCases
-                    textStyle.plate = all[(all.firstIndex(of: textStyle.plate)! + 1) % all.count]
-                }
-                if attachments.isEmpty {
-                    styleButton(systemImage: "paintpalette", label: "Фон") {
-                        textStyle.gradientIndex = (textStyle.gradientIndex + 1) % AloStoryTextStyle.gradients.count
-                    }
+                Rectangle().fill(.white.opacity(0.3)).frame(width: 1, height: 26).padding(.horizontal, 2)
+                ForEach(AloStoryTextStyle.Plate.allCases, id: \.self) { plate in
+                    plateChip(plate)
                 }
             }
             HStack(spacing: 8) {
@@ -533,6 +572,28 @@ struct AloStoryEditorScreen: View {
         }
         .padding(.horizontal, 10)
         .accessibilityIdentifier("alo.story.text-tools")
+    }
+
+    /// A sample of a plate in the current typeface and colour; the chosen one is ringed.
+    private func plateChip(_ plate: AloStoryTextStyle.Plate) -> some View {
+        var sample = textStyle
+        sample.plate = plate
+        let isChosen = textStyle.plate == plate
+        let tile = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        return Button { textStyle.plate = plate } label: {
+            Text("А")
+                .font(sample.font(size: 15))
+                .foregroundStyle(sample.textColor)
+                .modifier(AloStoryPlate(style: sample, scale: 0.42))
+                .frame(width: 40, height: 40)
+                .modifier(AloChatGlass(interactive: false, role: .chrome))
+                .overlay(tile.strokeBorder(.white, lineWidth: isChosen ? 2 : 0))
+                .contentShape(tile)
+        }
+        .buttonStyle(AloControlPressStyle())
+        .accessibilityLabel(plate.title)
+        .accessibilityAddTraits(isChosen ? .isSelected : [])
+        .accessibilityIdentifier("alo.story.plate.\(plate)")
     }
 
     private func styleButton(systemImage: String, label: String, action: @escaping () -> Void) -> some View {
@@ -805,9 +866,7 @@ struct AloStoryStickerContent: View {
                     .foregroundStyle(style.textColor)
                     .multilineTextAlignment(.center)
             }
-            .padding(.horizontal, style.plateColor == nil ? 0 : 14 * scale)
-            .padding(.vertical, style.plateColor == nil ? 0 : 8 * scale)
-            .background(style.plateColor ?? .clear, in: RoundedRectangle(cornerRadius: 12 * scale, style: .continuous))
+            .modifier(AloStoryPlate(style: style, scale: scale))
         }
     }
 }
@@ -826,6 +885,30 @@ private struct AloStoryTextWrap: Layout {
     }
 }
 
+/// Angles of turned items: folded into -180…180 and snapped straight near a right angle.
+enum AloStoryRotation {
+    /// Within this many degrees of a right angle an item snaps straight.
+    static let snapDegrees = 5.0
+
+    static func normalized(_ degrees: Double) -> Double {
+        var value = degrees.truncatingRemainder(dividingBy: 360)
+        if value > 180 { value -= 360 }
+        if value <= -180 { value += 360 }
+        return value
+    }
+
+    static func isNearRightAngle(_ angle: Angle) -> Bool {
+        let degrees = normalized(angle.degrees)
+        return abs(degrees - (degrees / 90).rounded() * 90) < snapDegrees
+    }
+
+    static func snapped(_ angle: Angle) -> Angle {
+        let degrees = normalized(angle.degrees)
+        guard isNearRightAngle(angle) else { return .degrees(degrees) }
+        return .degrees(normalized((degrees / 90).rounded() * 90))
+    }
+}
+
 /// One item on the page, as in Instagram: drag to move, pinch or pull a corner to stretch, twist to
 /// rotate. A tap selects it (a square dashed frame with corner handles); a second tap edits text.
 /// Dropped on the trash, it is removed.
@@ -841,8 +924,11 @@ private struct AloStoryStickerView: View {
     @State private var pinch: CGFloat = 1
     @State private var twist: Angle = .zero
     @State private var size: CGSize = .zero
+    @State private var globalFrame: CGRect = .zero
     /// The item's size when a handle was grabbed; the stretch is measured against it.
     @State private var stretchBase: CGSize?
+    @State private var isSnapped = false
+
 
     var body: some View {
         let origin = CGPoint(x: sticker.position.x * canvasSize.width, y: sticker.position.y * canvasSize.height)
@@ -850,10 +936,11 @@ private struct AloStoryStickerView: View {
                                scale: AloStorySticker.clamped(sticker.scale * pinch))
             .padding(10)
             .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { globalFrame = $0 }
             .overlay {
                 if isSelected { selectionFrame() }
             }
-            .rotationEffect(sticker.rotation + twist)
+            .rotationEffect(AloStoryRotation.snapped(sticker.rotation + twist))
             .position(x: origin.x + offset.width, y: origin.y + offset.height)
             // The tap goes first, so a quick touch selects instead of starting a move.
             .gesture(TapGesture().onEnded(onTap).exclusively(before:
@@ -879,18 +966,16 @@ private struct AloStoryStickerView: View {
                             onCommit(updated, nil)
                         })
                     .simultaneously(with: RotateGesture()
-                        .onChanged { twist = $0.rotation }
-                        .onEnded { value in
-                            var updated = sticker
-                            updated.rotation = sticker.rotation + value.rotation
-                            twist = .zero
-                            onCommit(updated, nil)
-                        })
+                        .onChanged { turn(to: $0.rotation) }
+                        .onEnded { finishTurn($0.rotation) })
             ))
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(sticker.accessibilityLabel)
             .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+            .accessibilityValue(rotationDescription)
             .accessibilityHint("Смахните вверх или вниз, чтобы изменить размер")
+            .accessibilityAction(named: "Повернуть по часовой стрелке") { rotateBy(15) }
+            .accessibilityAction(named: "Повернуть против часовой стрелки") { rotateBy(-15) }
             .accessibilityAdjustableAction { direction in
                 var updated = sticker
                 switch direction {
@@ -910,7 +995,60 @@ private struct AloStoryStickerView: View {
             .overlay(alignment: .topTrailing) { handle(x: 1, y: -1) }
             .overlay(alignment: .bottomLeading) { handle(x: -1, y: 1) }
             .overlay(alignment: .bottomTrailing) { handle(x: 1, y: 1) }
+            .overlay(alignment: .top) { rotationHandle }
     }
+
+    /// A round arrow above the frame: drag it around the item to turn it with one finger.
+    private var rotationHandle: some View {
+        Image(systemName: "arrow.clockwise")
+            .font(.system(size: 11, weight: .bold))
+            .foregroundStyle(.black)
+            .frame(width: 24, height: 24)
+            .background(.white, in: Circle())
+            .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
+            .frame(width: 40, height: 40)
+            .contentShape(Rectangle())
+            .offset(y: -38)
+            .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                .onChanged { turn(to: angleTurned($0)) }
+                .onEnded { finishTurn(angleTurned($0)) })
+            .accessibilityHidden(true)
+    }
+
+    /// How far the finger has gone round the item's centre since it touched the handle.
+    private func angleTurned(_ drag: DragGesture.Value) -> Angle {
+        let center = CGPoint(x: globalFrame.midX, y: globalFrame.midY)
+        let start = atan2(drag.startLocation.y - center.y, drag.startLocation.x - center.x)
+        let now = atan2(drag.location.y - center.y, drag.location.x - center.x)
+        return .radians(Double(now - start))
+    }
+
+    private func turn(to angle: Angle) {
+        twist = angle
+        let snappedNow = AloStoryRotation.isNearRightAngle(sticker.rotation + angle)
+        if snappedNow, !isSnapped { AloHaptics.selection() }
+        isSnapped = snappedNow
+    }
+
+    private func finishTurn(_ angle: Angle) {
+        var updated = sticker
+        updated.rotation = AloStoryRotation.snapped(sticker.rotation + angle)
+        twist = .zero
+        isSnapped = false
+        onCommit(updated, nil)
+    }
+
+    private func rotateBy(_ degrees: Double) {
+        var updated = sticker
+        updated.rotation = AloStoryRotation.snapped(.degrees(sticker.rotation.degrees + degrees))
+        onCommit(updated, nil)
+    }
+
+    private var rotationDescription: String {
+        let degrees = Int(AloStoryRotation.normalized(sticker.rotation.degrees).rounded())
+        return degrees == 0 ? "" : "Поворот \(degrees)°"
+    }
+
 
     /// A corner knob: pulling it away from the centre stretches the item, pushing it in shrinks it.
     /// Measured from the finger's travel, which no transform of the growing item can disturb.
