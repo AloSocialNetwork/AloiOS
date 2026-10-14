@@ -7,12 +7,16 @@ struct SearchView: View {
     @State private var localMessageHits = [AloOfflineMessageSearchHit]()
     @State private var settingsPresented = false
     @State private var incomingRequest: AloEntitySummary?
+    /// People the server found for the current query, beyond the suggestions already loaded.
+    @State private var remoteUsers: [AloEntitySummary] = []
 
     private var users: [AloEntitySummary] {
         let query = app.searchQuery.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         let all = (app.bootstrap?.searchUsers ?? []) + (app.bootstrap?.searchChannels ?? [])
         guard !query.isEmpty else { return all }
-        return all.filter { $0.name.lowercased().contains(query) || $0.username.lowercased().contains(query) }
+        let local = all.filter { $0.name.lowercased().contains(query) || $0.username.lowercased().contains(query) }
+        let known = Set(local.map(\.id))
+        return local + remoteUsers.filter { !known.contains($0.id) }
     }
 
     var body: some View {
@@ -97,6 +101,17 @@ struct SearchView: View {
                 Button("Отклонить", role: .destructive) { app.respondFriendRequest(requestId: relation.incomingRequestId, accept: false) }
             }
             Button("Отмена", role: .cancel) {}
+        }
+        .task(id: "people:\(app.searchQuery)") {
+            // Server people search, debounced; local suggestions stay first.
+            let query = app.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard query.replacingOccurrences(of: "@", with: "").count >= 2 else {
+                remoteUsers = []
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled, let found = try? await app.api.searchUsers(query: query), !Task.isCancelled else { return }
+            remoteUsers = found
         }
         .task(id: "\(app.searchQuery):\(app.bootstrap?.me.id ?? 0)") {
             let query = app.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
