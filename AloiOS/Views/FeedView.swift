@@ -133,8 +133,8 @@ struct FeedView: View {
             AloStoryEditorScreen()
                 .environmentObject(app)
         }
-        .sheet(item: $selectedStoryGroup) { group in
-            StoryViewerSheet(group: group)
+        .fullScreenCover(item: $selectedStoryGroup) { group in
+            AloStoryViewer(groups: app.stories, startGroupID: group.id)
                 .environmentObject(app)
         }
         .navigationDestination(isPresented: $settingsPresented) {
@@ -249,93 +249,6 @@ struct FeedView: View {
         }
     }
 
-}
-
-private struct StoryViewerSheet: View {
-    @EnvironmentObject private var app: AloAppModel
-    @Environment(\.dismiss) private var dismiss
-    let group: AloStoryGroup
-    @State private var currentIndex = 0
-
-    private var story: AloStory? {
-        group.stories.indices.contains(currentIndex) ? group.stories[currentIndex] : nil
-    }
-
-    var body: some View {
-        ZStack {
-            AloTheme.background.ignoresSafeArea()
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(spacing: 10) {
-                    AloAvatar(name: group.user.name, url: group.user.avatarUrl, size: 38, colorSeed: String(group.user.id))
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(group.user.name)
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundStyle(AloTheme.text)
-                        Text("История · 24 часа")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(AloTheme.muted)
-                    }
-                    Spacer()
-                    Button { dismiss() } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundStyle(AloTheme.text)
-                            .frame(width: 38, height: 38)
-                            .background(Circle().fill(AloTheme.surfaceRaised))
-                    }
-                    .buttonStyle(.plain)
-                }
-
-                if let story {
-                    if let media = story.media.first,
-                       let url = app.api.absoluteURL(media.url) {
-                        AloAsyncImage(url: url) { phase in
-                            switch phase {
-                            case .success(let image):
-                                image.resizable().scaledToFill()
-                            default:
-                                ProgressView().tint(AloTheme.accent)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 300, maxHeight: 500)
-                        .background(AloTheme.surfaceRaised)
-                        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-                    }
-                    if !story.body.isEmpty {
-                        Text(story.body)
-                            .font(.system(size: 21, weight: .semibold))
-                            .foregroundStyle(AloTheme.text)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-
-                Spacer()
-
-                if group.stories.count > 1 {
-                    HStack(spacing: 8) {
-                        ForEach(group.stories.indices, id: \.self) { index in
-                            Button {
-                                currentIndex = index
-                                if let selected = story { app.markStoryViewed(selected) }
-                            } label: {
-                                Capsule()
-                                    .fill(index == currentIndex ? AloTheme.accent : AloTheme.border)
-                                    .frame(maxWidth: .infinity, minHeight: 4)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-            }
-            .padding(20)
-        }
-        .onAppear {
-            if let story { app.markStoryViewed(story) }
-        }
-        .onChange(of: currentIndex) { _, _ in
-            if let story { app.markStoryViewed(story) }
-        }
-    }
 }
 
 /// Shared preparation for public feed media. The server accepts JPEG/MP4, not
@@ -683,6 +596,7 @@ struct FeedAttachmentPreview: View {
     let attachment: AloLocalAttachment
     var side: CGFloat? = 86
     var maxPixelSize = 512
+    var showsPlayBadge = true
     @State private var thumbnail: UIImage?
 
     var body: some View {
@@ -697,7 +611,7 @@ struct FeedAttachmentPreview: View {
                     .font(.system(size: 24, weight: .bold))
                     .foregroundStyle(AloTheme.muted)
             }
-            if attachment.type == "video" {
+            if attachment.type == "video", showsPlayBadge {
                 Image(systemName: "play.fill")
                     .font(.system(size: 16, weight: .bold)).foregroundStyle(.white)
                     .frame(width: 40, height: 40)
@@ -712,6 +626,9 @@ struct FeedAttachmentPreview: View {
         .task(id: attachment.id) {
             if attachment.type == "image" {
                 thumbnail = try? await AloImageCache.draftImage(attachment, maxPixelSize: maxPixelSize)
+            } else if attachment.type == "video" {
+                // A real first frame instead of a grey tile, so drawing on a video lines up.
+                thumbnail = await AloStoryVideoComposer.posterFrame(of: attachment, maxPixelSize: CGFloat(maxPixelSize))
             }
         }
     }

@@ -1,3 +1,5 @@
+import AVFoundation
+import CoreImage
 import PencilKit
 import PhotosUI
 import SwiftUI
@@ -186,8 +188,14 @@ struct AloStoryEditorScreen: View {
             } else {
                 TabView(selection: $page) {
                     ForEach(Array(attachments.enumerated()), id: \.element.id) { index, attachment in
-                        FeedAttachmentPreview(attachment: attachment, side: nil, maxPixelSize: 1_440)
-                            .tag(index)
+                        Group {
+                            if attachment.type == "video" {
+                                AloStoryLoopingVideo(attachment: attachment, isActive: index == page)
+                            } else {
+                                FeedAttachmentPreview(attachment: attachment, side: nil, maxPixelSize: 1_440)
+                            }
+                        }
+                        .tag(index)
                     }
                 }
                 .tabViewStyle(.page(indexDisplayMode: attachments.count > 1 && mode == .none ? .automatic : .never))
@@ -292,18 +300,16 @@ struct AloStoryEditorScreen: View {
                     AloChatCircleButton(systemImage: "xmark", label: "Закрыть редактор истории") { dismiss() }
                         .disabled(app.isCreatingStory)
                     Spacer()
-                    if !currentIsVideo {
-                        AloChatCircleButton(systemImage: "scribble", label: "Рисовать") {
-                            isTextFocused = false
-                            mode = .draw
-                        }
-                        .accessibilityIdentifier("alo.story.draw")
-                        AloChatCircleButton(systemImage: "face.smiling", label: "Стикеры") {
-                            isTextFocused = false
-                            isStickerSheetPresented = true
-                        }
-                        .accessibilityIdentifier("alo.story.stickers")
+                    AloChatCircleButton(systemImage: "scribble", label: "Рисовать") {
+                        isTextFocused = false
+                        mode = .draw
                     }
+                    .accessibilityIdentifier("alo.story.draw")
+                    AloChatCircleButton(systemImage: "face.smiling", label: "Стикеры") {
+                        isTextFocused = false
+                        isStickerSheetPresented = true
+                    }
+                    .accessibilityIdentifier("alo.story.stickers")
                     if attachments.isEmpty {
                         AloChatCircleButton(systemImage: "textformat", label: "Стиль текста") {
                             mode = .text
@@ -439,6 +445,7 @@ struct AloStoryEditorScreen: View {
             .buttonStyle(AloControlPressStyle())
             .disabled(app.isCreatingStory)
             .accessibilityLabel("Медиа")
+            .accessibilityIdentifier("alo.story.gallery")
             if UIImagePickerController.isSourceTypeAvailable(.camera) {
                 Button { isCameraPresented = true } label: {
                     Image(systemName: "camera")
@@ -493,6 +500,11 @@ struct AloStoryEditorScreen: View {
             } else {
                 for attachment in attachments {
                     let pageEdits = edits[attachment.id] ?? AloStoryPageEdits()
+                    if attachment.type == "video", !pageEdits.isEmpty {
+                        guard let composed = await composeVideo(attachment, canvasSize: canvasSize) else { return }
+                        media.append(composed)
+                        continue
+                    }
                     if attachment.type == "image", !pageEdits.isEmpty,
                        let image = try? await AloImageCache.draftImage(attachment, maxPixelSize: 2_048),
                        let rendered = await render(background: image, pageID: attachment.id, canvasSize: canvasSize,
@@ -505,6 +517,35 @@ struct AloStoryEditorScreen: View {
             }
             app.createStory(body: body, localAttachments: media, lifetimeHours: lifetimeHours)
             AloHaptics.impact(.light)
+        }
+    }
+
+    /// Burns the page's drawing and stickers into its video as a 720 × 1280 story.
+    private func composeVideo(_ attachment: AloLocalAttachment, canvasSize: CGSize) async -> AloLocalAttachment? {
+        let pageEdits = edits[attachment.id] ?? AloStoryPageEdits()
+        let renderSize = CGSize(width: 720, height: 1_280)
+        let scale = renderSize.width / canvasSize.width
+        let drawingImage = pageEdits.drawing.strokes.isEmpty ? nil
+            : pageEdits.drawing.image(from: CGRect(origin: .zero, size: canvasSize), scale: scale)
+        let overlayView = AloStoryRenderedPage(background: nil, gradient: [], text: "", textStyle: textStyle,
+                                               drawing: drawingImage, stickers: pageEdits.stickers, size: canvasSize,
+                                               transparent: true)
+        let renderer = ImageRenderer(content: overlayView)
+        renderer.scale = scale
+        renderer.isOpaque = false
+        guard let overlay = renderer.cgImage else {
+            importError = "Не удалось подготовить видео."
+            return nil
+        }
+        do {
+            let source = try AloStoryVideoComposer.plaintextCopy(of: attachment)
+            defer { try? FileManager.default.removeItem(at: source) }
+            let composed = try await AloStoryVideoComposer.compose(videoAt: source, overlay: overlay, renderSize: renderSize)
+            defer { try? FileManager.default.removeItem(at: composed) }
+            return try await AloFeedMediaImport.prepare(source: composed, video: true)
+        } catch {
+            importError = "Не удалось подготовить видео: \(error.localizedDescription)"
+            return nil
         }
     }
 
@@ -559,13 +600,15 @@ private struct AloStoryRenderedPage: View {
     let drawing: UIImage?
     let stickers: [AloStorySticker]
     let size: CGSize
+    /// Only the drawing and stickers, on transparency: the overlay laid over a video.
+    var transparent = false
 
     var body: some View {
         ZStack {
             if let background {
                 Image(uiImage: background).resizable().scaledToFill()
                     .frame(width: size.width, height: size.height).clipped()
-            } else {
+            } else if !transparent {
                 LinearGradient(colors: gradient, startPoint: .topLeading, endPoint: .bottomTrailing)
             }
             if !text.isEmpty {
@@ -754,5 +797,117 @@ private struct AloStoryCamera: UIViewControllerRepresentable {
         }
 
         func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { onFinish(nil, false) }
+    }
+}
+
+/// A video page in the editor plays silently on a loop under the drawing; its first frame shows
+/// until the player has one.
+private struct AloStoryLoopingVideo: View {
+    let attachment: AloLocalAttachment
+    let isActive: Bool
+    @State private var player = AVQueuePlayer()
+    @State private var looper: AVPlayerLooper?
+
+    var body: some View {
+        ZStack {
+            FeedAttachmentPreview(attachment: attachment, side: nil, maxPixelSize: 1_440, showsPlayBadge: false)
+            if looper != nil {
+                AloPlayerLayerView(player: player) { layer in
+                    layer.videoGravity = .resizeAspectFill
+                    layer.backgroundColor = UIColor.clear.cgColor
+                }
+            }
+        }
+        .task(id: isActive) {
+            guard isActive, let url = attachment.localPlaybackURL else {
+                player.pause()
+                return
+            }
+            if looper == nil {
+                player.isMuted = true
+                looper = AVPlayerLooper(player: player,
+                                        templateItem: AVPlayerItem(asset: AloSecureMediaStore.shared.makeAsset(url: url)))
+            }
+            player.play()
+        }
+        .onDisappear { player.pause() }
+        .accessibilityHidden(true)
+    }
+}
+
+/// Video work for stories: a protected plaintext copy of an encrypted draft, a poster frame, and
+/// the overlay burned in over an aspect-filled 9:16 frame (what the editor showed).
+enum AloStoryVideoComposer {
+    enum Failure: LocalizedError {
+        case noVideoTrack, exportFailed
+        var errorDescription: String? {
+            switch self {
+            case .noVideoTrack: return "в файле нет видео"
+            case .exportFailed: return "экспорт не удался"
+            }
+        }
+    }
+
+    /// Decrypts a draft to a temporary file protected until first unlock. The caller deletes it.
+    static func plaintextCopy(of attachment: AloLocalAttachment) throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("alo-story-\(UUID().uuidString).mp4")
+        let data: Data
+        if let playback = attachment.localPlaybackURL {
+            data = try AloSecureMediaStore.shared.payload(for: playback).data
+        } else {
+            data = attachment.data
+        }
+        try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        return url
+    }
+
+    /// Read through the secure resource loader, so no plaintext copy touches the disk.
+    static func posterFrame(of attachment: AloLocalAttachment, maxPixelSize: CGFloat) async -> UIImage? {
+        guard let playback = attachment.localPlaybackURL else { return nil }
+        let generator = AVAssetImageGenerator(asset: AloSecureMediaStore.shared.makeAsset(url: playback))
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: maxPixelSize, height: maxPixelSize)
+        guard let image = try? await generator.image(at: CMTime(seconds: 0.1, preferredTimescale: 600)).image else { return nil }
+        return UIImage(cgImage: image)
+    }
+
+    /// Core Image per-frame composition: unlike `AVVideoCompositionCoreAnimationTool` it also renders
+    /// in the Simulator, and the export session carries the audio over by itself.
+    static func compose(videoAt source: URL, overlay: CGImage, renderSize: CGSize) async throws -> URL {
+        let asset = AVURLAsset(url: source)
+        guard try await !asset.loadTracks(withMediaType: .video).isEmpty else { throw Failure.noVideoTrack }
+        let frame = CGRect(origin: .zero, size: renderSize)
+        // CIImage(cgImage:) keeps the picture upright in Core Image's bottom-left space, so the
+        // overlay's top-left corner lands on the frame's top-left corner.
+        let overlayImage = CIImage(cgImage: overlay).transformed(by: CGAffineTransform(
+            scaleX: renderSize.width / CGFloat(overlay.width), y: renderSize.height / CGFloat(overlay.height)))
+        let videoComposition = try await AVMutableVideoComposition.videoComposition(with: asset) { request in
+            // The source frame arrives upright (the track's preferred transform already applied).
+            let source = request.sourceImage
+            let extent = source.extent
+            let scale = max(renderSize.width / extent.width, renderSize.height / extent.height)
+            let filled = source
+                .transformed(by: CGAffineTransform(translationX: -extent.minX, y: -extent.minY))
+                .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+                .transformed(by: CGAffineTransform(translationX: (renderSize.width - extent.width * scale) / 2,
+                                                   y: (renderSize.height - extent.height * scale) / 2))
+            request.finish(with: overlayImage.composited(over: filled).cropped(to: frame), context: nil)
+        }
+        videoComposition.renderSize = renderSize
+        videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
+
+        let output = FileManager.default.temporaryDirectory.appendingPathComponent("alo-story-composed-\(UUID().uuidString).mp4")
+        guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality) else {
+            throw Failure.exportFailed
+        }
+        session.videoComposition = videoComposition
+        session.shouldOptimizeForNetworkUse = true
+        do {
+            try await session.export(to: output, as: .mp4)
+        } catch {
+            try? FileManager.default.removeItem(at: output)
+            throw error
+        }
+        return output
     }
 }

@@ -551,6 +551,27 @@ final class AloSocialConsistencyUITests: XCTestCase {
     }
 
 
+    func testStoryViewerPlaysTapsAndCloses() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "feed-timeline"]
+        app.launch()
+        let first = app.buttons["История: Маша"]
+        XCTAssertTrue(first.waitForExistence(timeout: 15))
+        first.tap()
+        let progress = app.descendants(matching: .any)["alo.story.viewer.progress"]
+        XCTAssertTrue(progress.waitForExistence(timeout: 4))
+        Thread.sleep(forTimeInterval: 1.5)
+        capture("v-1-story")
+        XCTAssertTrue(app.staticTexts["Маша"].exists)
+        // A tap on the right moves on: each fixture person has one story, so this is the next person.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5)).tap()
+        XCTAssertTrue(app.staticTexts["Александр"].waitForExistence(timeout: 3))
+        capture("v-2-next-person")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4))
+            .press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9)), withVelocity: .fast, thenHoldForDuration: 0)
+        XCTAssertTrue(progress.waitForNonExistence(timeout: 4), "swipe down closes the viewer")
+    }
+
     func testCaptureStoryTools() {
         let app = XCUIApplication()
         app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "feed-surface"]
@@ -596,6 +617,64 @@ final class AloSocialConsistencyUITests: XCTestCase {
         XCTAssertTrue(error.waitForExistence(timeout: 10), "the page was rendered and the upload attempted")
         print("STORYDBG", error.label)
         capture("s-5-publish-offline")
+    }
+
+    /// Needs a video in the simulator's Photos (`xcrun simctl addmedia <udid> clip.mp4`).
+    func testCaptureVideoStoryOverlay() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "feed-surface"]
+        app.launch()
+        let story = app.buttons["alo.feed.create-story"]
+        XCTAssertTrue(story.waitForExistence(timeout: 15))
+        story.tap()
+        let gallery = app.buttons["alo.story.gallery"]
+        XCTAssertTrue(gallery.waitForExistence(timeout: 4))
+        gallery.tap()
+
+        let video = app.descendants(matching: .any).matching(NSPredicate(
+            format: "(label BEGINSWITH[c] 'Video' OR label BEGINSWITH[c] 'Видео') AND NOT (label CONTAINS[c] 'Photo' OR label CONTAINS 'Фотография')")).firstMatch
+        guard video.waitForExistence(timeout: 10) else {
+            print("PICKERDBG", app.debugDescription)
+            throw XCTSkip("no video in the simulator's Photos")
+        }
+        // The picker runs in another process, so its cells report themselves as not hittable.
+        Thread.sleep(forTimeInterval: 1.0)
+        video.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let add = app.buttons.matching(NSPredicate(format: "label IN {'Add', 'Добавить', 'Готово', 'Done'}")).firstMatch
+        if add.waitForExistence(timeout: 3) { add.tap() }
+
+        // The page shows the clip's real first frame and both tools are offered on it.
+        let draw = app.buttons["alo.story.draw"]
+        XCTAssertTrue(draw.waitForExistence(timeout: 20))
+        XCTAssertTrue(app.buttons["alo.story.stickers"].exists)
+        // Media pages swap the text-style button for "remove this media".
+        XCTAssertTrue(app.buttons["Убрать это медиа"].waitForExistence(timeout: 30), "the video was imported")
+        Thread.sleep(forTimeInterval: 2.0)
+        capture("v-1-video-page")
+
+        app.buttons["alo.story.stickers"].tap()
+        XCTAssertTrue(app.buttons["✨"].waitForExistence(timeout: 3))
+        app.buttons["✨"].tap()
+        Thread.sleep(forTimeInterval: 0.8)
+
+        draw.tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.22, dy: 0.66))
+        start.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.78, dy: 0.58)),
+                    withVelocity: .slow, thenHoldForDuration: 0)
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("v-2-video-drawing")
+        app.buttons["alo.story.tool-done"].tap()
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("v-3-video-ready")
+
+        // Publishing burns the overlay into the video first; offline, the upload then fails visibly.
+        app.buttons["alo.story.publish"].tap()
+        let error = app.descendants(matching: .any).matching(identifier: "alo.story.publish-error").firstMatch
+        XCTAssertTrue(error.waitForExistence(timeout: 60), "the video was composed and the upload attempted")
+        print("STORYDBG", error.label)
+        XCTAssertFalse(error.label.contains("подготовить видео"), "composition itself must not fail: \(error.label)")
+        capture("v-4-publish-offline")
     }
 
     func testCaptureCreationEditors() {
