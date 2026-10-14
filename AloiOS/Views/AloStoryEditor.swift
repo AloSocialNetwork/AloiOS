@@ -5,13 +5,47 @@ import PhotosUI
 import SwiftUI
 import UIKit
 
-/// An emoji placed on a story page. Position is relative (0…1) so it survives any canvas size.
+/// Something placed on a story page: an emoji or a block of styled text. The position is relative
+/// (0…1) so it survives any canvas size; the size is a factor of the base font size.
 struct AloStorySticker: Identifiable, Equatable {
+    enum Content: Equatable {
+        case emoji(String)
+        case text(String, AloStoryTextStyle)
+    }
+
     let id = UUID()
-    var emoji: String
+    var content: Content
     var position = CGPoint(x: 0.5, y: 0.45)
     var scale: CGFloat = 1
     var rotation: Angle = .zero
+
+    static let scales: ClosedRange<CGFloat> = 0.35...5
+
+    init(emoji: String) {
+        content = .emoji(emoji)
+        position = CGPoint(x: 0.5, y: 0.56)
+    }
+
+    init(text: String, style: AloStoryTextStyle) {
+        content = .text(text, style)
+        position = CGPoint(x: 0.5, y: 0.4)
+    }
+
+    var isText: Bool {
+        if case .text = content { return true }
+        return false
+    }
+
+    var accessibilityLabel: String {
+        switch content {
+        case .emoji(let emoji): return "Стикер \(emoji)"
+        case .text(let text, _): return "Текст: \(text)"
+        }
+    }
+
+    static func clamped(_ scale: CGFloat) -> CGFloat {
+        min(scales.upperBound, max(scales.lowerBound, scale))
+    }
 }
 
 /// Edits that belong to one page: what was drawn and which stickers sit on it.
@@ -85,6 +119,9 @@ struct AloStoryEditorScreen: View {
     @State private var isCameraPresented = false
     @State private var draggingStickerOverTrash = false
     @State private var isDraggingSticker = false
+    @State private var selectedStickerID: UUID?
+    @State private var editingTextID: UUID?
+    @State private var draftText = ""
     @State private var lifetimeHours = 24
     @State private var publishRequested = false
     @State private var isPreparing = false
@@ -93,7 +130,7 @@ struct AloStoryEditorScreen: View {
     @State private var importTask: Task<Void, Never>?
     private var accessibility = AloVisualAccessibility()
 
-    enum Mode: Equatable { case none, draw, text }
+    enum Mode: Equatable { case none, draw, text, sticker }
 
     /// The id the text story's edits are kept under (it has no attachment).
     private static let textPageID = UUID()
@@ -104,9 +141,8 @@ struct AloStoryEditorScreen: View {
     private var currentPageID: UUID { currentAttachment?.id ?? Self.textPageID }
     private var currentIsVideo: Bool { currentAttachment?.type == "video" }
     private var isPublishDisabled: Bool {
-        isImporting || isPreparing
-            || (text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty
-                && (edits[Self.textPageID]?.isEmpty ?? true))
+        let typing = mode == .text && !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return isImporting || isPreparing || (attachments.isEmpty && (edits[Self.textPageID]?.isEmpty ?? true) && !typing)
     }
 
     var body: some View {
@@ -131,7 +167,10 @@ struct AloStoryEditorScreen: View {
         .interactiveDismissDisabled(app.isCreatingStory || isPreparing)
         .animation(accessibility.reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.88), value: mode)
         .onAppear {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { isTextFocused = true }
+            // A new story starts as a text story with the keyboard up.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                if attachments.isEmpty, mode == .none { startTextEditing(nil) }
+            }
         }
         .onChange(of: pickedItems) { _, items in
             importTask?.cancel()
@@ -151,7 +190,11 @@ struct AloStoryEditorScreen: View {
         .sheet(isPresented: $isStickerSheetPresented) {
             AloStoryStickerPicker { emoji in
                 isStickerSheetPresented = false
-                edits[currentPageID, default: AloStoryPageEdits()].stickers.append(AloStorySticker(emoji: emoji))
+                let sticker = AloStorySticker(emoji: emoji)
+                edits[currentPageID, default: AloStoryPageEdits()].stickers.append(sticker)
+                // Selected straight away: its frame shows it can be moved and stretched.
+                selectedStickerID = sticker.id
+                mode = .sticker
             }
             .presentationDetents([.medium])
             .presentationDragIndicator(.visible)
@@ -167,6 +210,7 @@ struct AloStoryEditorScreen: View {
                         let attachment = try await AloFeedMediaImport.prepare(source: url, video: isVideo)
                         attachments.append(attachment)
                         page = attachments.count - 1
+                        if attachments.count == 1 { adoptTextPage(into: attachment.id) }
                     } catch {
                         importError = error.localizedDescription
                     }
@@ -184,7 +228,6 @@ struct AloStoryEditorScreen: View {
             if attachments.isEmpty {
                 LinearGradient(colors: AloStoryTextStyle.gradients[textStyle.gradientIndex],
                                startPoint: .topLeading, endPoint: .bottomTrailing)
-                textStoryField
             } else {
                 TabView(selection: $page) {
                     ForEach(Array(attachments.enumerated()), id: \.element.id) { index, attachment in
@@ -210,8 +253,23 @@ struct AloStoryEditorScreen: View {
             .id(currentPageID)
             .allowsHitTesting(mode == .draw)
 
+            // A tap on the empty page drops the selection or, on a text story, starts typing.
+            if mode == .sticker || (mode == .none && attachments.isEmpty) {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        if mode == .sticker { deselect() } else { startTextEditing(nil) }
+                    }
+            }
+            if mode == .none, attachments.isEmpty, !(edits[Self.textPageID]?.stickers.contains(where: \.isText) ?? false) {
+                Text("Нажмите, чтобы написать")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .allowsHitTesting(false)
+            }
+
             stickerLayer(size: size)
-                .allowsHitTesting(mode == .none)
+                .allowsHitTesting(mode == .none || mode == .sticker)
 
             if !attachments.isEmpty, mode == .none {
                 VStack {
@@ -227,10 +285,13 @@ struct AloStoryEditorScreen: View {
                         .padding(.horizontal, 12).padding(.bottom, attachments.count > 1 ? 34 : 14)
                         .disabled(app.isCreatingStory)
                         .accessibilityLabel("Подпись к истории")
-                        .accessibilityIdentifier("alo.story.text")
+                        .accessibilityIdentifier("alo.story.caption")
                 }
             }
 
+            if mode == .text {
+                textEditor(canvasSize: size)
+            }
             topControls
             if isDraggingSticker {
                 VStack {
@@ -248,41 +309,118 @@ struct AloStoryEditorScreen: View {
         }
     }
 
-    private var textStoryField: some View {
-        TextField("", text: $text, prompt: Text("Что происходит?").foregroundStyle(textStyle.textColor.opacity(0.6)),
-                  axis: .vertical)
-            .font(textStyle.font(size: 28))
-            .foregroundStyle(textStyle.textColor)
-            .multilineTextAlignment(.center)
-            .lineLimit(1...8)
-            .focused($isTextFocused)
-            .padding(.horizontal, textStyle.plateColor == nil ? 0 : 14)
-            .padding(.vertical, textStyle.plateColor == nil ? 0 : 8)
-            .background(textStyle.plateColor ?? .clear, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .padding(.horizontal, 28)
-            .disabled(app.isCreatingStory || mode == .draw)
-            .onTapGesture { mode = .text; isTextFocused = true }
-            .accessibilityLabel("Текст истории")
-            .accessibilityIdentifier("alo.story.text")
+    /// Typing a text item: the page dims and the text sits above the keyboard in its style,
+    /// wrapping at the same width as the placed item so its lines don't change on "Готово".
+    private func textEditor(canvasSize: CGSize) -> some View {
+        ZStack {
+            Color.black.opacity(attachments.isEmpty ? 0.12 : 0.42)
+                .contentShape(Rectangle())
+                .onTapGesture { commitText() }
+            let wrap = canvasSize.width * AloStoryStickerContent.textWrap
+            let placeholder = attachments.isEmpty ? "Что происходит?" : "Текст"
+            ZStack {
+                // The plate hugs the words, as it will on the placed item.
+                if let plate = textStyle.plateColor {
+                    AloStoryTextWrap(width: wrap) {
+                        Text(draftText.isEmpty ? placeholder : draftText)
+                            .font(textStyle.font(size: AloStoryStickerContent.textSize))
+                            .multilineTextAlignment(.center)
+                            .hidden()
+                    }
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(plate, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                TextField("", text: $draftText,
+                          prompt: Text(placeholder).foregroundStyle(textStyle.textColor.opacity(0.6)),
+                          axis: .vertical)
+                    .font(textStyle.font(size: AloStoryStickerContent.textSize))
+                    .foregroundStyle(textStyle.textColor)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(1...8)
+                    .focused($isTextFocused)
+                    .frame(width: wrap)
+            }
+            .offset(y: -canvasSize.height * 0.1)
+                .disabled(app.isCreatingStory)
+                .accessibilityLabel("Текст истории")
+                .accessibilityIdentifier("alo.story.text")
+        }
+    }
+
+    private func startTextEditing(_ id: UUID?) {
+        if let id, let item = edits[currentPageID]?.stickers.first(where: { $0.id == id }),
+           case let .text(string, style) = item.content {
+            draftText = string
+            let gradient = textStyle.gradientIndex
+            textStyle = style
+            textStyle.gradientIndex = gradient
+        } else {
+            draftText = ""
+        }
+        editingTextID = id
+        selectedStickerID = nil
+        mode = .text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isTextFocused = true }
+    }
+
+    /// Places the typed text (or updates the one being edited) and selects it.
+    private func commitText() {
+        let string = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        isTextFocused = false
+        var pageEdits = edits[currentPageID] ?? AloStoryPageEdits()
+        var placed: UUID?
+        if let id = editingTextID, let index = pageEdits.stickers.firstIndex(where: { $0.id == id }) {
+            if string.isEmpty {
+                pageEdits.stickers.remove(at: index)
+            } else {
+                pageEdits.stickers[index].content = .text(string, textStyle)
+                placed = id
+            }
+        } else if !string.isEmpty {
+            let item = AloStorySticker(text: string, style: textStyle)
+            pageEdits.stickers.append(item)
+            placed = item.id
+        }
+        edits[currentPageID] = pageEdits
+        editingTextID = nil
+        draftText = ""
+        selectedStickerID = placed
+        mode = placed == nil ? .none : .sticker
+    }
+
+    private func deselect() {
+        selectedStickerID = nil
+        mode = .none
     }
 
     private func stickerLayer(size: CGSize) -> some View {
         ZStack {
-            ForEach(edits[currentPageID]?.stickers ?? []) { sticker in
+            ForEach((edits[currentPageID]?.stickers ?? []).filter { $0.id != editingTextID }) { sticker in
                 AloStoryStickerView(sticker: sticker, canvasSize: size,
+                    isSelected: mode == .sticker && selectedStickerID == sticker.id,
+                    onTap: {
+                        if sticker.isText, mode == .sticker, selectedStickerID == sticker.id {
+                            startTextEditing(sticker.id)
+                        } else {
+                            isTextFocused = false
+                            selectedStickerID = sticker.id
+                            mode = .sticker
+                        }
+                    },
                     onDragChanged: { location in
                         isDraggingSticker = true
                         draggingStickerOverTrash = location.y > size.height - 90 && abs(location.x - size.width / 2) < 60
                     },
-                    onCommit: { updated, location in
+                    onCommit: { updated, droppedAt in
                         isDraggingSticker = false
-                        let overTrash = location.y > size.height - 90 && abs(location.x - size.width / 2) < 60
+                        let overTrash = droppedAt.map { $0.y > size.height - 90 && abs($0.x - size.width / 2) < 60 } ?? false
                         draggingStickerOverTrash = false
                         guard var pageEdits = edits[currentPageID],
                               let index = pageEdits.stickers.firstIndex(where: { $0.id == sticker.id }) else { return }
                         if overTrash {
                             pageEdits.stickers.remove(at: index)
                             AloHaptics.impact(.medium)
+                            if selectedStickerID == sticker.id { deselect() }
                         } else {
                             pageEdits.stickers[index] = updated
                         }
@@ -296,7 +434,8 @@ struct AloStoryEditorScreen: View {
     private var topControls: some View {
         VStack {
             HStack(spacing: 8) {
-                if mode == .none {
+                switch mode {
+                case .none:
                     AloChatCircleButton(systemImage: "xmark", label: "Закрыть редактор истории") { dismiss() }
                         .disabled(app.isCreatingStory)
                     Spacer()
@@ -310,37 +449,35 @@ struct AloStoryEditorScreen: View {
                         isStickerSheetPresented = true
                     }
                     .accessibilityIdentifier("alo.story.stickers")
-                    if attachments.isEmpty {
-                        AloChatCircleButton(systemImage: "textformat", label: "Стиль текста") {
-                            mode = .text
-                            isTextFocused = true
-                        }
-                        .accessibilityIdentifier("alo.story.text-style")
-                    } else {
+                    AloChatCircleButton(systemImage: "textformat", label: "Добавить текст") { startTextEditing(nil) }
+                        .accessibilityIdentifier("alo.story.add-text")
+                    if !attachments.isEmpty {
                         AloChatCircleButton(systemImage: "trash", label: "Убрать это медиа") { removeCurrent() }
                             .disabled(app.isCreatingStory)
                     }
-                } else {
-                    if mode == .draw {
-                        AloChatCircleButton(systemImage: "arrow.uturn.backward", label: "Отменить штрих") {
-                            var drawing = edits[currentPageID]?.drawing ?? PKDrawing()
-                            guard !drawing.strokes.isEmpty else { return }
-                            drawing.strokes.removeLast()
-                            edits[currentPageID, default: AloStoryPageEdits()].drawing = drawing
-                        }
-                        .accessibilityIdentifier("alo.story.undo")
+                case .draw:
+                    AloChatCircleButton(systemImage: "arrow.uturn.backward", label: "Отменить штрих") {
+                        var drawing = edits[currentPageID]?.drawing ?? PKDrawing()
+                        guard !drawing.strokes.isEmpty else { return }
+                        drawing.strokes.removeLast()
+                        edits[currentPageID, default: AloStoryPageEdits()].drawing = drawing
                     }
+                    .accessibilityIdentifier("alo.story.undo")
                     Spacer()
-                    Button {
-                        isTextFocused = false
-                        mode = .none
-                    } label: {
-                        Text("Готово").font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
-                            .padding(.horizontal, 16).frame(height: 40)
-                            .background(AloTheme.accent, in: Capsule())
+                    doneButton { mode = .none }
+                case .text:
+                    Spacer()
+                    doneButton { commitText() }
+                case .sticker:
+                    AloChatCircleButton(systemImage: "trash", label: "Удалить") {
+                        if let id = selectedStickerID {
+                            edits[currentPageID]?.stickers.removeAll { $0.id == id }
+                        }
+                        deselect()
                     }
-                    .buttonStyle(AloControlPressStyle())
-                    .accessibilityIdentifier("alo.story.tool-done")
+                    .accessibilityIdentifier("alo.story.item-delete")
+                    Spacer()
+                    doneButton { deselect() }
                 }
             }
             .padding(10)
@@ -351,7 +488,17 @@ struct AloStoryEditorScreen: View {
         }
     }
 
-    /// Typeface, plate and colour for the text story, and its background gradient.
+    private func doneButton(action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text("Готово").font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
+                .padding(.horizontal, 16).frame(height: 40)
+                .background(AloTheme.accent, in: Capsule())
+        }
+        .buttonStyle(AloControlPressStyle())
+        .accessibilityIdentifier("alo.story.tool-done")
+    }
+
+    /// Typeface, plate and colour of the text being typed; on a text story also its background.
     private var textStyleBar: some View {
         VStack(spacing: 10) {
             HStack(spacing: 8) {
@@ -363,8 +510,10 @@ struct AloStoryEditorScreen: View {
                     let all = AloStoryTextStyle.Plate.allCases
                     textStyle.plate = all[(all.firstIndex(of: textStyle.plate)! + 1) % all.count]
                 }
-                styleButton(systemImage: "paintpalette", label: "Фон") {
-                    textStyle.gradientIndex = (textStyle.gradientIndex + 1) % AloStoryTextStyle.gradients.count
+                if attachments.isEmpty {
+                    styleButton(systemImage: "paintpalette", label: "Фон") {
+                        textStyle.gradientIndex = (textStyle.gradientIndex + 1) % AloStoryTextStyle.gradients.count
+                    }
                 }
             }
             HStack(spacing: 8) {
@@ -392,6 +541,8 @@ struct AloStoryEditorScreen: View {
                 .font(.system(size: 17, weight: .semibold)).foregroundStyle(.white)
                 .frame(width: 44, height: 40)
                 .modifier(AloChatGlass(interactive: false, role: .chrome))
+                // The glass doesn't take touches; without this a tap falls through to the page.
+                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .buttonStyle(AloControlPressStyle())
         .accessibilityLabel(label)
@@ -483,8 +634,10 @@ struct AloStoryEditorScreen: View {
 
     /// Flattens every page that has drawing, stickers or styled text into a picture, then publishes.
     private func publish(canvasSize: CGSize) {
+        if mode == .text { commitText() }
         publishRequested = true
         isTextFocused = false
+        selectedStickerID = nil
         mode = .none
         isPreparing = true
         Task { @MainActor in
@@ -493,8 +646,7 @@ struct AloStoryEditorScreen: View {
             var body = text
             if attachments.isEmpty {
                 // A text story is its picture: the text is drawn on the gradient, not repeated below.
-                guard let rendered = await render(background: nil, pageID: Self.textPageID, canvasSize: canvasSize,
-                                                  includeText: true) else { return }
+                guard let rendered = await render(background: nil, pageID: Self.textPageID, canvasSize: canvasSize) else { return }
                 media = [rendered]
                 body = ""
             } else {
@@ -507,8 +659,7 @@ struct AloStoryEditorScreen: View {
                     }
                     if attachment.type == "image", !pageEdits.isEmpty,
                        let image = try? await AloImageCache.draftImage(attachment, maxPixelSize: 2_048),
-                       let rendered = await render(background: image, pageID: attachment.id, canvasSize: canvasSize,
-                                                   includeText: false) {
+                       let rendered = await render(background: image, pageID: attachment.id, canvasSize: canvasSize) {
                         media.append(rendered)
                     } else {
                         media.append(attachment)
@@ -527,9 +678,8 @@ struct AloStoryEditorScreen: View {
         let scale = renderSize.width / canvasSize.width
         let drawingImage = pageEdits.drawing.strokes.isEmpty ? nil
             : pageEdits.drawing.image(from: CGRect(origin: .zero, size: canvasSize), scale: scale)
-        let overlayView = AloStoryRenderedPage(background: nil, gradient: [], text: "", textStyle: textStyle,
-                                               drawing: drawingImage, stickers: pageEdits.stickers, size: canvasSize,
-                                               transparent: true)
+        let overlayView = AloStoryRenderedPage(background: nil, gradient: [], drawing: drawingImage,
+                                               stickers: pageEdits.stickers, size: canvasSize, transparent: true)
         let renderer = ImageRenderer(content: overlayView)
         renderer.scale = scale
         renderer.isOpaque = false
@@ -549,13 +699,12 @@ struct AloStoryEditorScreen: View {
         }
     }
 
-    private func render(background: UIImage?, pageID: UUID, canvasSize: CGSize, includeText: Bool) async -> AloLocalAttachment? {
+    private func render(background: UIImage?, pageID: UUID, canvasSize: CGSize) async -> AloLocalAttachment? {
         let pageEdits = edits[pageID] ?? AloStoryPageEdits()
         let scale = 1_080 / canvasSize.width
         let drawingImage = pageEdits.drawing.strokes.isEmpty ? nil
             : pageEdits.drawing.image(from: CGRect(origin: .zero, size: canvasSize), scale: scale)
         let content = AloStoryRenderedPage(background: background, gradient: AloStoryTextStyle.gradients[textStyle.gradientIndex],
-                                           text: includeText ? text : "", textStyle: textStyle,
                                            drawing: drawingImage, stickers: pageEdits.stickers, size: canvasSize)
         let renderer = ImageRenderer(content: content)
         renderer.scale = scale
@@ -576,6 +725,16 @@ struct AloStoryEditorScreen: View {
         page = max(0, min(page, attachments.count - 1))
     }
 
+    /// When the first photo or video arrives, what was typed, placed or drawn on the text story
+    /// moves onto it instead of being lost with the gradient.
+    private func adoptTextPage(into id: UUID) {
+        if mode == .text { commitText() }
+        if mode == .sticker { deselect() }
+        if let carried = edits.removeValue(forKey: Self.textPageID), !carried.isEmpty {
+            edits[id] = carried
+        }
+    }
+
     private func loadPickedItems(_ items: [PhotosPickerItem]) async {
         do {
             let next = try await AloFeedMediaImport.load(items)
@@ -583,6 +742,7 @@ struct AloStoryEditorScreen: View {
             attachments = next
             edits = edits.filter { $0.key == Self.textPageID }
             page = 0
+            if let first = next.first { adoptTextPage(into: first.id) }
         } catch {
             guard !Task.isCancelled else { return }
             importError = error.localizedDescription
@@ -591,16 +751,14 @@ struct AloStoryEditorScreen: View {
     }
 }
 
-/// The flattened page: background, text, drawing and stickers at the canvas's own coordinates.
-private struct AloStoryRenderedPage: View {
+/// The flattened page: background, drawing and items at the canvas's own coordinates.
+struct AloStoryRenderedPage: View {
     let background: UIImage?
     let gradient: [Color]
-    let text: String
-    let textStyle: AloStoryTextStyle
     let drawing: UIImage?
     let stickers: [AloStorySticker]
     let size: CGSize
-    /// Only the drawing and stickers, on transparency: the overlay laid over a video.
+    /// Only the drawing and items, on transparency: the overlay laid over a video.
     var transparent = false
 
     var body: some View {
@@ -611,23 +769,11 @@ private struct AloStoryRenderedPage: View {
             } else if !transparent {
                 LinearGradient(colors: gradient, startPoint: .topLeading, endPoint: .bottomTrailing)
             }
-            if !text.isEmpty {
-                Text(text)
-                    .font(textStyle.font(size: 28))
-                    .foregroundStyle(textStyle.textColor)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, textStyle.plateColor == nil ? 0 : 14)
-                    .padding(.vertical, textStyle.plateColor == nil ? 0 : 8)
-                    .background(textStyle.plateColor ?? .clear, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .padding(.horizontal, 28)
-            }
             if let drawing {
                 Image(uiImage: drawing).resizable().frame(width: size.width, height: size.height)
             }
             ForEach(stickers) { sticker in
-                Text(sticker.emoji)
-                    .font(.system(size: AloStoryStickerView.baseSize))
-                    .scaleEffect(sticker.scale)
+                AloStoryStickerContent(sticker: sticker, canvasWidth: size.width)
                     .rotationEffect(sticker.rotation)
                     .position(x: sticker.position.x * size.width, y: sticker.position.y * size.height)
             }
@@ -636,25 +782,81 @@ private struct AloStoryRenderedPage: View {
     }
 }
 
-/// One sticker: drag to move, pinch to resize, twist to rotate. Dropped on the trash, it is removed.
+/// How an item looks, shared by the editor and the flattened page so both match exactly.
+/// The size goes into the font rather than a scale transform, so stretched text stays sharp.
+struct AloStoryStickerContent: View {
+    static let emojiSize: CGFloat = 72
+    static let textSize: CGFloat = 28
+    /// Text wraps at this share of the page width (times the item's size), so stretching keeps its lines.
+    static let textWrap: CGFloat = 0.78
+    let sticker: AloStorySticker
+    let canvasWidth: CGFloat
+    var scale: CGFloat?
+
+    var body: some View {
+        let scale = self.scale ?? sticker.scale
+        switch sticker.content {
+        case .emoji(let emoji):
+            Text(emoji).font(.system(size: Self.emojiSize * scale))
+        case .text(let string, let style):
+            AloStoryTextWrap(width: canvasWidth * Self.textWrap * scale) {
+                Text(string)
+                    .font(style.font(size: Self.textSize * scale))
+                    .foregroundStyle(style.textColor)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(.horizontal, style.plateColor == nil ? 0 : 14 * scale)
+            .padding(.vertical, style.plateColor == nil ? 0 : 8 * scale)
+            .background(style.plateColor ?? .clear, in: RoundedRectangle(cornerRadius: 12 * scale, style: .continuous))
+        }
+    }
+}
+
+/// Lays text out at a given wrapping width but takes only the width its longest line needs.
+private struct AloStoryTextWrap: Layout {
+    let width: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        subviews.first?.sizeThatFits(ProposedViewSize(width: width, height: nil)) ?? .zero
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: CGPoint(x: bounds.midX, y: bounds.midY), anchor: .center,
+                              proposal: ProposedViewSize(width: width, height: nil))
+    }
+}
+
+/// One item on the page, as in Instagram: drag to move, pinch or pull a corner to stretch, twist to
+/// rotate. A tap selects it (a square dashed frame with corner handles); a second tap edits text.
+/// Dropped on the trash, it is removed.
 private struct AloStoryStickerView: View {
-    static let baseSize: CGFloat = 72
     let sticker: AloStorySticker
     let canvasSize: CGSize
+    let isSelected: Bool
+    let onTap: () -> Void
     let onDragChanged: (CGPoint) -> Void
-    let onCommit: (AloStorySticker, CGPoint) -> Void
+    /// The updated item and, for a move, where it was dropped (nil after a resize or rotation).
+    let onCommit: (AloStorySticker, CGPoint?) -> Void
     @State private var offset: CGSize = .zero
     @State private var pinch: CGFloat = 1
     @State private var twist: Angle = .zero
+    @State private var size: CGSize = .zero
+    /// The item's size when a handle was grabbed; the stretch is measured against it.
+    @State private var stretchBase: CGSize?
 
     var body: some View {
         let origin = CGPoint(x: sticker.position.x * canvasSize.width, y: sticker.position.y * canvasSize.height)
-        Text(sticker.emoji)
-            .font(.system(size: Self.baseSize))
-            .scaleEffect(sticker.scale * pinch)
+        AloStoryStickerContent(sticker: sticker, canvasWidth: canvasSize.width,
+                               scale: AloStorySticker.clamped(sticker.scale * pinch))
+            .padding(10)
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
+            .overlay {
+                if isSelected { selectionFrame() }
+            }
             .rotationEffect(sticker.rotation + twist)
             .position(x: origin.x + offset.width, y: origin.y + offset.height)
-            .gesture(
+            // The tap goes first, so a quick touch selects instead of starting a move.
+            .gesture(TapGesture().onEnded(onTap).exclusively(before:
                 DragGesture()
                     .onChanged { value in
                         offset = value.translation
@@ -672,9 +874,9 @@ private struct AloStoryStickerView: View {
                         .onChanged { pinch = $0.magnification }
                         .onEnded { value in
                             var updated = sticker
-                            updated.scale = min(4, max(0.4, sticker.scale * value.magnification))
+                            updated.scale = AloStorySticker.clamped(sticker.scale * value.magnification)
                             pinch = 1
-                            onCommit(updated, origin)
+                            onCommit(updated, nil)
                         })
                     .simultaneously(with: RotateGesture()
                         .onChanged { twist = $0.rotation }
@@ -682,10 +884,69 @@ private struct AloStoryStickerView: View {
                             var updated = sticker
                             updated.rotation = sticker.rotation + value.rotation
                             twist = .zero
-                            onCommit(updated, origin)
+                            onCommit(updated, nil)
                         })
-            )
-            .accessibilityLabel("Стикер \(sticker.emoji)")
+            ))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(sticker.accessibilityLabel)
+            .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+            .accessibilityHint("Смахните вверх или вниз, чтобы изменить размер")
+            .accessibilityAdjustableAction { direction in
+                var updated = sticker
+                switch direction {
+                case .increment: updated.scale = AloStorySticker.clamped(sticker.scale * 1.15)
+                case .decrement: updated.scale = AloStorySticker.clamped(sticker.scale / 1.15)
+                @unknown default: return
+                }
+                onCommit(updated, nil)
+            }
+            .accessibilityIdentifier(sticker.isText ? "alo.story.text-item" : "alo.story.sticker")
+    }
+
+    private func selectionFrame() -> some View {
+        Rectangle()
+            .strokeBorder(.white.opacity(0.9), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+            .overlay(alignment: .topLeading) { handle(x: -1, y: -1) }
+            .overlay(alignment: .topTrailing) { handle(x: 1, y: -1) }
+            .overlay(alignment: .bottomLeading) { handle(x: -1, y: 1) }
+            .overlay(alignment: .bottomTrailing) { handle(x: 1, y: 1) }
+    }
+
+    /// A corner knob: pulling it away from the centre stretches the item, pushing it in shrinks it.
+    /// Measured from the finger's travel, which no transform of the growing item can disturb.
+    private func handle(x: CGFloat, y: CGFloat) -> some View {
+        Circle()
+            .fill(.white)
+            .frame(width: 14, height: 14)
+            .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
+            .frame(width: 40, height: 40)
+            .contentShape(Rectangle())
+            .offset(x: x * 20, y: y * 20)
+            .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                .onChanged { drag in
+                    if stretchBase == nil { stretchBase = size }
+                    pinch = stretch(drag.translation, x: x, y: y)
+                }
+                .onEnded { drag in
+                    var updated = sticker
+                    updated.scale = AloStorySticker.clamped(sticker.scale * stretch(drag.translation, x: x, y: y))
+                    pinch = 1
+                    stretchBase = nil
+                    onCommit(updated, nil)
+                })
+            .accessibilityHidden(true)
+    }
+
+    /// The corner's distance from the centre after the drag, over its distance before.
+    private func stretch(_ translation: CGSize, x: CGFloat, y: CGFloat) -> CGFloat {
+        let base = stretchBase ?? size
+        let angle = CGFloat(sticker.rotation.radians)
+        let cx = x * base.width / 2, cy = y * base.height / 2
+        // The corner as it sits on screen, turned with the item.
+        let corner = CGPoint(x: cx * cos(angle) - cy * sin(angle), y: cx * sin(angle) + cy * cos(angle))
+        let start = hypot(corner.x, corner.y)
+        guard start > 4 else { return 1 }
+        return hypot(corner.x + translation.width, corner.y + translation.height) / start
     }
 }
 

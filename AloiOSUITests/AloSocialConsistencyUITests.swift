@@ -580,25 +580,32 @@ final class AloSocialConsistencyUITests: XCTestCase {
         XCTAssertTrue(story.waitForExistence(timeout: 15))
         story.tap()
         XCTAssertTrue(app.buttons["alo.story.publish"].waitForExistence(timeout: 4))
-        Thread.sleep(forTimeInterval: 0.8)
-        app.typeText("Выходные у моря")
-
-        // Text tools: font, plate, colour and the background gradient.
-        app.buttons["alo.story.text-style"].tap()
+        // A new story opens typing, with the text tools above the keyboard.
         XCTAssertTrue(app.buttons["Шрифт"].waitForExistence(timeout: 3))
+        Thread.sleep(forTimeInterval: 0.6)
+        app.typeText("Выходные у моря")
         app.buttons["Подложка"].tap()
         app.buttons["Цвет 1"].tap()
         app.buttons["Фон"].tap()
         Thread.sleep(forTimeInterval: 0.6)
         capture("s-1-text-style")
+
+        // "Готово" places the text as an item and selects it: a square frame with corner handles.
+        app.buttons["alo.story.tool-done"].tap()
+        let textItem = app.descendants(matching: .any).matching(identifier: "alo.story.text-item").firstMatch
+        XCTAssertTrue(textItem.waitForExistence(timeout: 3))
+        XCTAssertTrue(textItem.isSelected)
+        Thread.sleep(forTimeInterval: 0.5)
+        capture("s-2-text-item")
         app.buttons["alo.story.tool-done"].tap()
 
-        // A sticker in the middle of the page.
+        // A sticker comes in selected as well.
         app.buttons["alo.story.stickers"].tap()
         XCTAssertTrue(app.buttons["🔥"].waitForExistence(timeout: 3))
         app.buttons["🔥"].tap()
         Thread.sleep(forTimeInterval: 0.8)
-        capture("s-2-sticker")
+        capture("s-3-sticker")
+        app.buttons["alo.story.tool-done"].tap()
 
         // A stroke with the pen.
         app.buttons["alo.story.draw"].tap()
@@ -607,7 +614,6 @@ final class AloSocialConsistencyUITests: XCTestCase {
         start.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.62)),
                     withVelocity: .slow, thenHoldForDuration: 0)
         Thread.sleep(forTimeInterval: 0.6)
-        capture("s-3-drawing")
         app.buttons["alo.story.tool-done"].tap()
         Thread.sleep(forTimeInterval: 0.6)
         capture("s-4-ready")
@@ -615,8 +621,76 @@ final class AloSocialConsistencyUITests: XCTestCase {
         app.buttons["alo.story.publish"].tap()
         let error = app.descendants(matching: .any).matching(identifier: "alo.story.publish-error").firstMatch
         XCTAssertTrue(error.waitForExistence(timeout: 10), "the page was rendered and the upload attempted")
-        print("STORYDBG", error.label)
         capture("s-5-publish-offline")
+    }
+
+    /// Text and emoji are stretched like in Instagram: by a corner handle or a pinch; a second tap
+    /// on selected text opens it for editing.
+    func testStoryItemsStretchAndEdit() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "feed-surface"]
+        app.launch()
+        let story = app.buttons["alo.feed.create-story"]
+        XCTAssertTrue(story.waitForExistence(timeout: 15))
+        story.tap()
+        XCTAssertTrue(app.buttons["Шрифт"].waitForExistence(timeout: 4))
+        Thread.sleep(forTimeInterval: 0.6)
+        app.typeText("Привет")
+        app.buttons["alo.story.tool-done"].tap()
+
+        let text = app.descendants(matching: .any).matching(identifier: "alo.story.text-item").firstMatch
+        XCTAssertTrue(text.waitForExistence(timeout: 3))
+        let before = text.frame
+        // The element's frame includes the handles, whose knobs sit 20 pt inside its corners.
+        // Pull the bottom-right knob away from the centre.
+        let corner = text.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: before.width - 20, dy: before.height - 20))
+        corner.press(forDuration: 0.1, thenDragTo: corner.withOffset(CGVector(dx: 60, dy: 30)),
+                     withVelocity: .slow, thenHoldForDuration: 0.1)
+        Thread.sleep(forTimeInterval: 0.6)
+        let stretched = text.frame
+        XCTAssertGreaterThan(stretched.width, before.width * 1.3, "the corner handle stretches the text")
+        XCTAssertEqual(stretched.midX, before.midX, accuracy: 3, "it grows around its centre")
+        capture("i-1-text-stretched")
+
+        // Pinching in shrinks it again.
+        text.pinch(withScale: 0.6, velocity: -1)
+        Thread.sleep(forTimeInterval: 0.6)
+        XCTAssertLessThan(text.frame.width, stretched.width * 0.9, "a pinch shrinks the text")
+
+        // An emoji: added selected, then stretched by its handle.
+        app.buttons["alo.story.tool-done"].tap()
+        app.buttons["alo.story.stickers"].tap()
+        XCTAssertTrue(app.buttons["✨"].waitForExistence(timeout: 3))
+        app.buttons["✨"].tap()
+        let sticker = app.descendants(matching: .any).matching(identifier: "alo.story.sticker").firstMatch
+        XCTAssertTrue(sticker.waitForExistence(timeout: 3))
+        Thread.sleep(forTimeInterval: 0.6)
+        let small = sticker.frame
+        let stickerCorner = sticker.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 20, dy: 20))
+        stickerCorner.press(forDuration: 0.1, thenDragTo: stickerCorner.withOffset(CGVector(dx: -50, dy: -50)),
+                            withVelocity: .slow, thenHoldForDuration: 0.1)
+        Thread.sleep(forTimeInterval: 0.6)
+        XCTAssertGreaterThan(sticker.frame.width, small.width * 1.4, "the corner handle stretches the emoji")
+        capture("i-2-emoji-stretched")
+        // Move it out of the text's way.
+        let middle = sticker.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        middle.press(forDuration: 0.1, thenDragTo: middle.withOffset(CGVector(dx: 0, dy: 160)),
+                     withVelocity: .slow, thenHoldForDuration: 0.1)
+        Thread.sleep(forTimeInterval: 0.5)
+
+        // Select the text, tap it again: it opens for editing with its words.
+        app.buttons["alo.story.tool-done"].tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        text.tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertTrue(text.isSelected, "a tap selects the text")
+        capture("i-3-text-selected")
+        text.tap()
+        let field = app.descendants(matching: .any).matching(identifier: "alo.story.text").firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 3))
+        XCTAssertEqual(field.value as? String, "Привет")
+        capture("i-4-text-editing")
     }
 
     /// Needs a video in the simulator's Photos (`xcrun simctl addmedia <udid> clip.mp4`).
@@ -627,6 +701,10 @@ final class AloSocialConsistencyUITests: XCTestCase {
         let story = app.buttons["alo.feed.create-story"]
         XCTAssertTrue(story.waitForExistence(timeout: 15))
         story.tap()
+        // The editor opens typing; leave that first, as the keyboard covers the bottom bar.
+        let done = app.buttons["alo.story.tool-done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 4))
+        done.tap()
         let gallery = app.buttons["alo.story.gallery"]
         XCTAssertTrue(gallery.waitForExistence(timeout: 4))
         gallery.tap()
@@ -640,7 +718,8 @@ final class AloSocialConsistencyUITests: XCTestCase {
         // The picker runs in another process, so its cells report themselves as not hittable.
         Thread.sleep(forTimeInterval: 1.0)
         video.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        let add = app.buttons.matching(NSPredicate(format: "label IN {'Add', 'Добавить', 'Готово', 'Done'}")).firstMatch
+        // The picker's confirm button is labelled "Готово" too; its identifier tells it apart.
+        let add = app.buttons.matching(identifier: "Add").firstMatch
         if add.waitForExistence(timeout: 3) { add.tap() }
 
         // The page shows the clip's real first frame and both tools are offered on it.
@@ -656,6 +735,25 @@ final class AloSocialConsistencyUITests: XCTestCase {
         XCTAssertTrue(app.buttons["✨"].waitForExistence(timeout: 3))
         app.buttons["✨"].tap()
         Thread.sleep(forTimeInterval: 0.8)
+        // The new sticker is selected; "Готово" leaves selection.
+        app.buttons["alo.story.tool-done"].tap()
+
+        // Text on the video, as in Instagram: typed, placed, then stretched by its corner.
+        app.buttons["alo.story.add-text"].tap()
+        XCTAssertTrue(app.buttons["Подложка"].waitForExistence(timeout: 3))
+        Thread.sleep(forTimeInterval: 0.5)
+        app.typeText("Водопад")
+        app.buttons["Подложка"].tap()
+        app.buttons["alo.story.tool-done"].tap()
+        let caption = app.descendants(matching: .any).matching(identifier: "alo.story.text-item").firstMatch
+        XCTAssertTrue(caption.waitForExistence(timeout: 3))
+        let frame = caption.frame
+        let knob = caption.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: frame.width - 20, dy: frame.height - 20))
+        knob.press(forDuration: 0.1, thenDragTo: knob.withOffset(CGVector(dx: 40, dy: 20)), withVelocity: .slow, thenHoldForDuration: 0.1)
+        Thread.sleep(forTimeInterval: 0.6)
+        XCTAssertGreaterThan(caption.frame.width, frame.width * 1.2)
+        capture("v-2-video-text")
+        app.buttons["alo.story.tool-done"].tap()
 
         draw.tap()
         Thread.sleep(forTimeInterval: 1.0)
@@ -663,10 +761,10 @@ final class AloSocialConsistencyUITests: XCTestCase {
         start.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.78, dy: 0.58)),
                     withVelocity: .slow, thenHoldForDuration: 0)
         Thread.sleep(forTimeInterval: 0.6)
-        capture("v-2-video-drawing")
+        capture("v-3-video-drawing")
         app.buttons["alo.story.tool-done"].tap()
         Thread.sleep(forTimeInterval: 0.6)
-        capture("v-3-video-ready")
+        capture("v-4-video-ready")
 
         // Publishing burns the overlay into the video first; offline, the upload then fails visibly.
         app.buttons["alo.story.publish"].tap()
@@ -674,7 +772,7 @@ final class AloSocialConsistencyUITests: XCTestCase {
         XCTAssertTrue(error.waitForExistence(timeout: 60), "the video was composed and the upload attempted")
         print("STORYDBG", error.label)
         XCTAssertFalse(error.label.contains("подготовить видео"), "composition itself must not fail: \(error.label)")
-        capture("v-4-publish-offline")
+        capture("v-5-publish-offline")
     }
 
     func testCaptureCreationEditors() {
