@@ -584,7 +584,7 @@ final class AloSocialConsistencyUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Шрифт"].waitForExistence(timeout: 3))
         Thread.sleep(forTimeInterval: 0.6)
         app.typeText("Выходные у моря")
-        app.buttons["Подложка"].tap()
+        app.buttons["Тёмная подложка"].tap()
         app.buttons["Цвет 1"].tap()
         app.buttons["Фон"].tap()
         Thread.sleep(forTimeInterval: 0.6)
@@ -667,8 +667,9 @@ final class AloSocialConsistencyUITests: XCTestCase {
         XCTAssertTrue(sticker.waitForExistence(timeout: 3))
         Thread.sleep(forTimeInterval: 0.6)
         let small = sticker.frame
-        let stickerCorner = sticker.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 20, dy: 20))
-        stickerCorner.press(forDuration: 0.1, thenDragTo: stickerCorner.withOffset(CGVector(dx: -50, dy: -50)),
+        let stickerCorner = sticker.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: small.width - 20, dy: small.height - 20))
+        stickerCorner.press(forDuration: 0.1, thenDragTo: stickerCorner.withOffset(CGVector(dx: 50, dy: 50)),
                             withVelocity: .slow, thenHoldForDuration: 0.1)
         Thread.sleep(forTimeInterval: 0.6)
         XCTAssertGreaterThan(sticker.frame.width, small.width * 1.4, "the corner handle stretches the emoji")
@@ -691,6 +692,77 @@ final class AloSocialConsistencyUITests: XCTestCase {
         XCTAssertTrue(field.waitForExistence(timeout: 3))
         XCTAssertEqual(field.value as? String, "Привет")
         capture("i-4-text-editing")
+    }
+
+    /// Text and emoji turn with one finger on the round handle above the frame or with two
+    /// fingers, snapping to right angles; the text plate is picked from a row of samples.
+    func testStoryItemsRotateAndPlates() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "feed-surface"]
+        app.launch()
+        let story = app.buttons["alo.feed.create-story"]
+        XCTAssertTrue(story.waitForExistence(timeout: 15))
+        story.tap()
+        XCTAssertTrue(app.buttons["Без подложки"].waitForExistence(timeout: 4))
+        Thread.sleep(forTimeInterval: 0.6)
+        app.typeText("Поворот")
+        for plate in ["Без подложки", "Тёмная подложка", "Цветная подложка", "Светлая подложка", "Подложка-рамка"] {
+            let chip = app.buttons[plate]
+            XCTAssertTrue(chip.exists, plate)
+            chip.tap()
+            XCTAssertTrue(chip.isSelected, "\(plate) is the chosen plate")
+            if plate == "Светлая подложка" {
+                Thread.sleep(forTimeInterval: 0.4)
+                capture("r-1-plates")
+            }
+        }
+        app.buttons["alo.story.tool-done"].tap()
+
+        // One finger on the round handle, a quarter turn round the centre: it snaps to 90°.
+        let text = app.descendants(matching: .any).matching(identifier: "alo.story.text-item").firstMatch
+        XCTAssertTrue(text.waitForExistence(timeout: 3))
+        Thread.sleep(forTimeInterval: 0.5)
+        let frame = text.frame
+        // The element spans the knobs: the rotation handle's centre is 20 pt below its top,
+        // the frame's bottom edge 20 pt above its bottom, and the frame's top 38 pt below the handle.
+        let knobY = frame.minY + 20
+        let centerY = ((knobY + 38) + (frame.maxY - 20)) / 2
+        let radius = centerY - knobY
+        let origin = text.coordinate(withNormalizedOffset: .zero)
+        let knob = origin.withOffset(CGVector(dx: frame.width / 2, dy: 20))
+        let quarter = origin.withOffset(CGVector(dx: frame.width / 2 + radius * 0.98, dy: centerY - frame.minY + radius * 0.05))
+        knob.press(forDuration: 0.1, thenDragTo: quarter, withVelocity: .slow, thenHoldForDuration: 0.2)
+        Thread.sleep(forTimeInterval: 0.6)
+        let degrees = Int((text.value as? String ?? "").filter(\.isNumber)) ?? 0
+        XCTAssertTrue((75...115).contains(degrees), "about a quarter turn: \(degrees)°")
+        XCTAssertGreaterThan(text.frame.height, text.frame.width, "the wide text now stands upright")
+        capture("r-2-text-turned")
+
+        // The emoji turns the other way with its own handle. (Two-finger twists drive the same
+        // turn; the Simulator's synthesized two-finger rotation is too unreliable to assert here.)
+        app.buttons["alo.story.tool-done"].tap()
+        app.buttons["alo.story.stickers"].tap()
+        XCTAssertTrue(app.buttons["🔥"].waitForExistence(timeout: 3))
+        app.buttons["🔥"].tap()
+        let sticker = app.descendants(matching: .any).matching(identifier: "alo.story.sticker").firstMatch
+        XCTAssertTrue(sticker.waitForExistence(timeout: 3))
+        // Move it clear of the text first.
+        let middle = sticker.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
+        middle.press(forDuration: 0.1, thenDragTo: middle.withOffset(CGVector(dx: 0, dy: 150)),
+                     withVelocity: .slow, thenHoldForDuration: 0.1)
+        Thread.sleep(forTimeInterval: 0.5)
+        let box = sticker.frame
+        let stickerKnobY = box.minY + 20
+        let stickerCenterY = ((stickerKnobY + 38) + (box.maxY - 20)) / 2
+        let reach = stickerCenterY - stickerKnobY
+        let stickerOrigin = sticker.coordinate(withNormalizedOffset: .zero)
+        let stickerKnob = stickerOrigin.withOffset(CGVector(dx: box.width / 2, dy: 20))
+        let left = stickerOrigin.withOffset(CGVector(dx: box.width / 2 - reach, dy: stickerCenterY - box.minY))
+        stickerKnob.press(forDuration: 0.1, thenDragTo: left, withVelocity: .slow, thenHoldForDuration: 0.2)
+        Thread.sleep(forTimeInterval: 0.6)
+        let turned = Int((sticker.value as? String ?? "").filter { $0.isNumber || $0 == "-" }) ?? 0
+        XCTAssertTrue((-115 ... -65).contains(turned), "a quarter turn back: \(turned)°")
+        capture("r-3-emoji-turned")
     }
 
     /// Needs a video in the simulator's Photos (`xcrun simctl addmedia <udid> clip.mp4`).
@@ -740,10 +812,10 @@ final class AloSocialConsistencyUITests: XCTestCase {
 
         // Text on the video, as in Instagram: typed, placed, then stretched by its corner.
         app.buttons["alo.story.add-text"].tap()
-        XCTAssertTrue(app.buttons["Подложка"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["Тёмная подложка"].waitForExistence(timeout: 3))
         Thread.sleep(forTimeInterval: 0.5)
         app.typeText("Водопад")
-        app.buttons["Подложка"].tap()
+        app.buttons["Тёмная подложка"].tap()
         app.buttons["alo.story.tool-done"].tap()
         let caption = app.descendants(matching: .any).matching(identifier: "alo.story.text-item").firstMatch
         XCTAssertTrue(caption.waitForExistence(timeout: 3))
