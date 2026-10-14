@@ -1,0 +1,45 @@
+import SwiftUI
+import XCTest
+@testable import AloiOS
+
+/// The flattened story page draws items exactly as the editor shows them: a stretched text item
+/// grows around its centre and keeps its lines.
+@MainActor
+final class AloStoryRenderTests: XCTestCase {
+    func testStretchedTextAndEmojiAreDrawnOnThePage() throws {
+        let canvas = CGSize(width: 390, height: 693)
+        var style = AloStoryTextStyle()
+        style.plate = .solid
+        style.colorIndex = 6
+        var text = AloStorySticker(text: "Привет", style: style)
+        text.scale = 2
+        var emoji = AloStorySticker(emoji: "✨")
+        emoji.scale = 1.5
+        let page = AloStoryRenderedPage(background: nil, gradient: [.black, .black], drawing: nil,
+                                        stickers: [text, emoji], size: canvas)
+        let renderer = ImageRenderer(content: page)
+        renderer.scale = 1_080 / canvas.width
+        let image = try XCTUnwrap(renderer.cgImage)
+        XCTAssertEqual(image.width, 1_080)
+        XCTAssertEqual(image.height, 1_919, accuracy: 1)
+
+        // The blue plate sits around the text's centre (0.5, 0.4), twice the editor's 28 pt size.
+        let scale = 1_080 / canvas.width
+        let plateEdge = pixel(image, x: Int((canvas.width / 2 - 95) * scale), y: Int(canvas.height * 0.4 * scale))
+        XCTAssertGreaterThan(plateEdge.blue, 200, "the plate reaches ~95 pt left of centre at size 2")
+        let outside = pixel(image, x: Int((canvas.width / 2 - 170) * scale), y: Int(canvas.height * 0.4 * scale))
+        XCTAssertLessThan(outside.blue, 40, "and stops before the page edge")
+
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("alo-story-render.png")
+        try UIImage(cgImage: image).pngData()?.write(to: url)
+        print("STORYRENDER", url.path)
+    }
+
+    private func pixel(_ image: CGImage, x: Int, y: Int) -> (red: Int, green: Int, blue: Int) {
+        var bytes = [UInt8](repeating: 0, count: 4)
+        let context = CGContext(data: &bytes, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.draw(image, in: CGRect(x: -x, y: -(image.height - 1 - y), width: image.width, height: image.height))
+        return (Int(bytes[0]), Int(bytes[1]), Int(bytes[2]))
+    }
+}
