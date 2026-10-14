@@ -23,18 +23,12 @@ final class AloPushCoordinator {
     static let shared = AloPushCoordinator()
 
     private let tokenKey = "alo.ios.push.apns-token.v1"
-    private let deviceIdKey = "alo.ios.push.device-id.v1"
     private var syncTask: Task<Void, Never>?
 
     private init() {}
 
     var deviceId: String {
-        if let existing = UserDefaults.standard.string(forKey: deviceIdKey), !existing.isEmpty {
-            return existing
-        }
-        let created = UUID().uuidString.lowercased()
-        UserDefaults.standard.set(created, forKey: deviceIdKey)
-        return created
+        AloDeviceIdentity.shared.identifier
     }
 
     func updateDeviceToken(_ data: Data, api: AloAPIClient = .shared) {

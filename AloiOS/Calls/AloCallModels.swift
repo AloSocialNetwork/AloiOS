@@ -41,6 +41,68 @@ struct AloDirectCallSignal {
     let payload: [String: Any]
 }
 
+struct AloGroupCallSession {
+    let id: Int
+    let roomId: Int
+    let type: String
+    let status: String
+    let roomTitle: String
+    let participants: [AloDirectCallPeer]
+}
+
+struct AloGroupCallSFUJoin {
+    let serverURL: String
+    let roomName: String
+    let identity: String
+    let token: String
+    let expiresAt: Date?
+}
+
+struct AloGroupCallSignal {
+    let id: Int
+    let callId: Int
+    let roomId: Int
+    let fromUserId: Int
+    let toUserId: Int
+    let kind: String
+    let payload: [String: Any]
+}
+
+struct AloGroupCallState: Identifiable {
+    let id: Int
+    let roomId: Int
+    let roomTitle: String
+    let participants: [AloDirectCallPeer]
+    let videoParticipantIds: Set<Int>
+    let isMuted: Bool
+    let isSpeakerOn: Bool
+    let isVideoEnabled: Bool
+    let isFrontCamera: Bool
+    let startedAt: Date
+
+    func updating(
+        participants: [AloDirectCallPeer]? = nil,
+        videoParticipantIds: Set<Int>? = nil,
+        isMuted: Bool? = nil,
+        isSpeakerOn: Bool? = nil,
+        isVideoEnabled: Bool? = nil,
+        isFrontCamera: Bool? = nil
+    ) -> AloGroupCallState {
+        AloGroupCallState(
+            id: id,
+            roomId: roomId,
+            roomTitle: roomTitle,
+            participants: participants ?? self.participants,
+            videoParticipantIds: videoParticipantIds ?? self.videoParticipantIds,
+            isMuted: isMuted ?? self.isMuted,
+            isSpeakerOn: isSpeakerOn ?? self.isSpeakerOn,
+            isVideoEnabled: isVideoEnabled ?? self.isVideoEnabled,
+            isFrontCamera: isFrontCamera ?? self.isFrontCamera,
+            startedAt: startedAt
+        )
+    }
+}
+
 enum AloDirectCallPhase: String {
     case outgoing
     case incoming
@@ -79,9 +141,13 @@ enum AloCallMinimizePolicy {
         viewportHeight: CGFloat
     ) -> Bool {
         let height = max(1, viewportHeight)
-        let offsetFraction = abs(translation) / height
-        let projectedTravel = abs(predictedTranslation - translation)
-        return offsetFraction > 0.6 || projectedTravel >= 100
+        guard abs(translation) >= 28,
+              translation * predictedTranslation >= 0 else { return false }
+        let projectedTravel = abs(predictedTranslation) - abs(translation)
+        // A reversal cancels, including after a long pull. A tiny fling never
+        // hides the call while the user is aiming for a control.
+        guard projectedTravel > -45 else { return false }
+        return abs(translation) / height > 0.42 || projectedTravel >= 120
     }
 
     static func direction(
@@ -199,6 +265,14 @@ struct AloCallVideoLayout: Equatable {
     let previewIsLocal: Bool
 
     var showsIdentity: Bool { !showsPrimaryVideo }
+
+    func isPrimary(isLocal: Bool) -> Bool {
+        showsPrimaryVideo && primaryIsLocal == isLocal
+    }
+
+    func renders(isLocal: Bool) -> Bool {
+        isPrimary(isLocal: isLocal) || (showsPreview && previewIsLocal == isLocal)
+    }
 
     static func resolve(
         phase: AloDirectCallPhase,

@@ -32,6 +32,12 @@ private final class AloDecodedImageCache: @unchecked Sendable {
         let pixels = max(1, Int(image.size.width * image.scale))
             * max(1, Int(image.size.height * image.scale))
         cache.setObject(image, forKey: url as NSURL, cost: pixels * 4)
+        // Remember the proportions for messages that arrive without a size (drafts and inline data aside).
+        if url.scheme != "data", url.scheme != "alo-draft-preview" {
+            AloMediaSizeRegistry.shared.record(width: Double(image.size.width * image.scale),
+                                               height: Double(image.size.height * image.scale),
+                                               forKey: Self.remoteImageCacheKey(for: url))
+        }
     }
 
     func removeAll() {
@@ -43,30 +49,59 @@ private final class AloDecodedImageCache: @unchecked Sendable {
             return cached
         }
 
-        var request = URLRequest(
-            url: url,
-            cachePolicy: .returnCacheDataElseLoad,
-            timeoutInterval: 30
-        )
-        request.setValue("image/*", forHTTPHeaderField: "Accept")
-
-        let data: Data
-        if let cachedResponse = URLCache.shared.cachedResponse(for: request) {
-            data = cachedResponse.data
-        } else {
-            let response: URLResponse
-            (data, response) = try await URLSession.shared.data(for: request)
-            if let http = response as? HTTPURLResponse,
-               !(200..<300).contains(http.statusCode) {
-                throw URLError(.badServerResponse)
-            }
+        let cacheKey = Self.remoteImageCacheKey(for: url)
+        if url.scheme == "data" {
+            // Compatibility for inline drafts; never decode a full image in
+            // every SwiftUI body pass, and never persist the plaintext preview.
+            let image = try await Task.detached(priority: .userInitiated) {
+                let value = url.absoluteString
+                guard let comma = value.firstIndex(of: ","),
+                      let data = Data(base64Encoded: String(value[value.index(after: comma)...])) else {
+                    throw AloSecureMediaError.invalidImage
+                }
+                return try Self.decodeImage(data)
+            }.value
+            insert(image, for: url)
+            return image
         }
+        let diskImage = await Task.detached(priority: .utility) { () -> UIImage? in
+            guard let data = AloSecureOfflineCacheStore.shared.loadRemoteImage(cacheKey: cacheKey) else {
+                return nil
+            }
+            return try? Self.decodeImage(data)
+        }.value
+        if let diskImage {
+            insert(diskImage, for: url)
+            return diskImage
+        }
+
+        // Protected media must use the API session: it owns both the authenticated
+        // cookie and certificate-pinning policy. Bypassing URLCache also discards
+        // responses cached before the media route stopped redirecting to itself.
+        let data = try await AloAPIClient.shared.downloadData(
+            from: url,
+            ignoringLocalCache: false
+        ).data
 
         let image = try await Task.detached(priority: .userInitiated) {
             try Self.decodeImage(data)
         }.value
         insert(image, for: url)
+        Task.detached(priority: .utility) {
+            AloSecureOfflineCacheStore.shared.saveRemoteImage(data, cacheKey: cacheKey)
+        }
         return image
+    }
+
+    static func remoteImageCacheKey(for url: URL) -> String {
+        // The local development host may change. The resource path remains
+        // stable, so cache it independently from a LAN address while keeping
+        // third-party absolute URLs distinct.
+        if url.path.hasPrefix("/"),
+           url.host == AloAPIClient.shared.baseURL.host {
+            return url.path + (url.query.map { "?\($0)" } ?? "")
+        }
+        return url.absoluteString
     }
 
     static func decodeImage(
@@ -99,6 +134,83 @@ private final class AloDecodedImageCache: @unchecked Sendable {
 enum AloImageCache {
     static func removeAll() {
         AloDecodedImageCache.shared.removeAll()
+    }
+
+    static func draftImage(_ attachment: AloLocalAttachment, maxPixelSize: Int) async throws -> UIImage {
+        if let playback = attachment.localPlaybackURL {
+            _ = try AloSecureMediaStore.shared.contentInfo(for: playback)
+        }
+        let identity = URL(string: "alo-draft-preview://\(attachment.id.uuidString)?pixels=\(maxPixelSize)")!
+        if let cached = AloDecodedImageCache.shared.image(for: identity) { return cached }
+        return try await Task.detached(priority: .userInitiated) {
+            let bytes: Data
+            if let url = attachment.localPlaybackURL {
+                bytes = try AloSecureMediaStore.shared.payload(for: url).data
+            } else { bytes = attachment.data }
+            let image = try AloDecodedImageCache.decodeImage(bytes, maxPixelSize: maxPixelSize)
+            AloDecodedImageCache.shared.insert(image, for: identity)
+            return image
+        }.value
+    }
+
+#if DEBUG
+    /// Offline layout fixtures have no HTTP server. Seed their generated image,
+    /// without changing authenticated media loading or accepting fixture URLs in Release.
+    static func installPreviewImage(_ image: UIImage, for url: URL) {
+        guard UserDefaults.standard.bool(forKey: "ALO_UI_MESSENGER_PREVIEW") else { return }
+        AloDecodedImageCache.shared.insert(image, for: url)
+    }
+#endif
+}
+
+/// Natural size of an image decoded in memory now or on this device before; nil if never seen.
+enum AloCachedImageSize {
+    static func dimensions(for url: URL) -> AloMediaDimensions? {
+        if let image = AloDecodedImageCache.shared.image(for: url) {
+            return AloMediaDimensions(width: image.size.width, height: image.size.height)
+        }
+        // Decoded in an earlier session: the size outlives the in-memory image.
+        return AloMediaSizeRegistry.shared.dimensions(forKey: AloDecodedImageCache.remoteImageCacheKey(for: url))
+    }
+}
+
+/// Like `AloAsyncImage`, but hands out the decoded `UIImage` so full-screen viewers can zoom it.
+enum AloAsyncUIImagePhase { case loading, success(UIImage), failure }
+
+struct AloAsyncUIImage<Content: View>: View {
+    let url: URL?
+    @ViewBuilder let content: (AloAsyncUIImagePhase) -> Content
+    @State private var phase: AloAsyncUIImagePhase = .loading
+
+    var body: some View {
+        if let url, let image = AloDecodedImageCache.shared.image(for: url) {
+            content(.success(image))
+        } else if let url {
+            content(phase)
+                .task(id: url) {
+                    phase = .loading
+                    do {
+                        let image: UIImage
+                        if AloSecureMediaStore.shared.isSecureURL(url) {
+                            image = try await Task.detached(priority: .userInitiated) {
+                                let payload = try AloSecureMediaStore.shared.payload(for: url)
+                                let image = try AloDecodedImageCache.decodeImage(payload.data)
+                                AloDecodedImageCache.shared.insert(image, for: url)
+                                return image
+                            }.value
+                        } else {
+                            image = try await AloDecodedImageCache.shared.loadRemoteImage(for: url)
+                        }
+                        guard !Task.isCancelled else { return }
+                        phase = .success(image)
+                    } catch {
+                        guard !Task.isCancelled else { return }
+                        phase = .failure
+                    }
+                }
+        } else {
+            content(.failure)
+        }
     }
 }
 
@@ -151,12 +263,25 @@ final class AloSecureMediaStore: @unchecked Sendable {
         let name: String
     }
 
-    private struct Entry: Codable {
-        let encryptedPath: String
-        let key: String
-        let iv: String
+    struct ContentInfo {
         let mime: String
         let name: String
+        let plaintextSize: Int64
+        let isChunked: Bool
+    }
+
+    private struct Entry: Codable {
+        let encryptedPath: String
+        let algorithm: String?
+        let key: String
+        let iv: String
+        let noncePrefix: String?
+        let chunkSize: Int?
+        let plaintextSize: Int64?
+        let mime: String
+        let name: String
+        // Optional so registries created before expiring media remain readable.
+        let expiresAt: String?
     }
 
     private let lock = NSLock()
@@ -164,6 +289,7 @@ final class AloSecureMediaStore: @unchecked Sendable {
     private let registryKey: SymmetricKey
     private var entries: [String: Entry]
     private static var playerLoaderAssociation: UInt8 = 0
+    private static let maximumInMemoryPayloadSize: Int64 = 64 * 1_024 * 1_024
 
     private init() {
         let applicationSupport = (try? FileManager.default.url(
@@ -177,40 +303,79 @@ final class AloSecureMediaStore: @unchecked Sendable {
             .appendingPathComponent("registry-v1.bin")
         registryKey = SymmetricKey(data: Self.loadOrCreateRegistryKey())
         entries = Self.loadRegistry(from: registryURL, using: registryKey)
+        purgeExpired()
     }
 
     func isSecureURL(_ url: URL) -> Bool {
         url.scheme?.lowercased() == Self.scheme
     }
 
+    /// Stage ciphertext for resource-loader playback. Called on the capture
+    /// worker, so no plaintext movie/base64 string is created on the UI thread.
+    func registerDraft(_ attachment: AloLocalAttachment) throws -> URL {
+        guard let source = attachment.encryptedSourceURL else { throw AloSecureMediaError.invalidPath }
+        let root = Self.encryptedCacheRoot()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let destination = root.appendingPathComponent("draft-\(attachment.id.uuidString).bin")
+        try FileManager.default.copyItem(at: source, to: destination)
+        do {
+            try FileManager.default.setAttributes(
+                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: destination.path)
+            try Self.excludeFromBackup(destination)
+            return try register(encryptedURL: destination,
+                encryption: attachment.mediaEncryption.reduce(into: [String: Any]()) { $0[$1.key] = $1.value },
+                type: attachment.type, name: attachment.name)
+        } catch {
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
+    }
+
     func register(
         encryptedURL: URL,
         encryption: [String: Any],
         type: String,
-        name: String
+        name: String,
+        expiresAt: String = ""
     ) throws -> URL {
-        guard encryption.string("algorithm") == "aes-256-gcm-v1" else {
-            throw AloSecureMediaError.invalidMetadata
-        }
+        let algorithm = encryption.string("algorithm")
         let key = encryption.string("key")
         let iv = encryption.string("iv")
-        guard !key.isEmpty, !iv.isEmpty else { throw AloSecureMediaError.invalidMetadata }
+        let chunkedMetadata = AloChunkedMediaCrypto.Metadata(encryption)
+        guard
+            (algorithm == "aes-256-gcm-v1" && !key.isEmpty && !iv.isEmpty) ||
+            chunkedMetadata != nil
+        else { throw AloSecureMediaError.invalidMetadata }
         let canonicalURL = encryptedURL.standardizedFileURL.resolvingSymlinksInPath()
         let allowedRoot = Self.encryptedCacheRoot().standardizedFileURL.resolvingSymlinksInPath()
         let allowedPrefix = allowedRoot.path.hasSuffix("/") ? allowedRoot.path : allowedRoot.path + "/"
         guard canonicalURL.path.hasPrefix(allowedPrefix) else { throw AloSecureMediaError.invalidPath }
 
-        let tokenData = Data("\(canonicalURL.path)|\(key)|\(iv)".utf8)
+        let tokenData = Data([
+            canonicalURL.path,
+            algorithm,
+            key,
+            iv,
+            chunkedMetadata?.noncePrefix ?? "",
+            chunkedMetadata.map { String($0.chunkSize) } ?? "",
+            chunkedMetadata.map { String($0.plaintextSize) } ?? ""
+        ].joined(separator: "|").utf8)
         let token = SHA256.hash(data: tokenData).map { String(format: "%02x", $0) }.joined()
         let mime = encryption.string("mime").ifBlank(Self.mime(type: type, name: name))
         let displayName = name.trimmingCharacters(in: .whitespacesAndNewlines)
             .ifBlank("media.\(Self.fileExtension(mime: mime, type: type))")
+        let normalizedExpiry = expiresAt.trimmingCharacters(in: .whitespacesAndNewlines)
         let entry = Entry(
             encryptedPath: canonicalURL.path,
+            algorithm: algorithm,
             key: key,
             iv: iv,
+            noncePrefix: chunkedMetadata?.noncePrefix,
+            chunkSize: chunkedMetadata?.chunkSize,
+            plaintextSize: chunkedMetadata?.plaintextSize,
             mime: mime,
-            name: displayName
+            name: displayName,
+            expiresAt: normalizedExpiry.isEmpty ? nil : normalizedExpiry
         )
 
         lock.lock()
@@ -227,7 +392,90 @@ final class AloSecureMediaStore: @unchecked Sendable {
         return url
     }
 
+    /// Removes encrypted cache entries whose disappearing-media deadline
+    /// elapsed while the application was suspended or terminated.
+    func purgeExpired(now: Date = Date()) {
+        lock.lock()
+        let expiredTokens = entries.compactMap { token, entry in
+            Self.isExpired(entry.expiresAt, at: now) ? token : nil
+        }
+        let removedPaths = expiredTokens.compactMap { token in
+            entries.removeValue(forKey: token)?.encryptedPath
+        }
+        let snapshot = entries
+        lock.unlock()
+
+        guard !removedPaths.isEmpty else { return }
+        removedPaths.forEach { path in
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: path))
+        }
+        try? persist(snapshot)
+    }
+
     func payload(for url: URL) throws -> Payload {
+        let (entry, encryptedURL) = try resolvedEntry(for: url)
+        if let metadata = chunkedMetadata(for: entry) {
+            guard metadata.plaintextSize <= Self.maximumInMemoryPayloadSize else {
+                throw AloSecureMediaError.payloadTooLarge
+            }
+            return Payload(
+                data: try AloChunkedMediaCrypto.readRange(
+                    encryptedURL: encryptedURL,
+                    metadata: metadata,
+                    offset: 0,
+                    length: Int(metadata.plaintextSize)
+                ),
+                mime: entry.mime,
+                name: entry.name
+            )
+        }
+        return Payload(
+            data: try decryptLegacyPayload(encryptedURL: encryptedURL, entry: entry),
+            mime: entry.mime,
+            name: entry.name
+        )
+    }
+
+    func contentInfo(for url: URL) throws -> ContentInfo {
+        let (entry, encryptedURL) = try resolvedEntry(for: url)
+        if let metadata = chunkedMetadata(for: entry) {
+            return ContentInfo(
+                mime: entry.mime,
+                name: entry.name,
+                plaintextSize: metadata.plaintextSize,
+                isChunked: true
+            )
+        }
+        let encryptedSize = try encryptedURL.resourceValues(forKeys: [.fileSizeKey])
+            .fileSize
+            .map(Int64.init) ?? -1
+        guard encryptedSize > 16 else { throw AloSecureMediaError.invalidMetadata }
+        return ContentInfo(
+            mime: entry.mime,
+            name: entry.name,
+            plaintextSize: encryptedSize - 16,
+            isChunked: false
+        )
+    }
+
+    func readData(for url: URL, offset: Int64, length: Int) throws -> Data {
+        let (entry, encryptedURL) = try resolvedEntry(for: url)
+        if let metadata = chunkedMetadata(for: entry) {
+            return try AloChunkedMediaCrypto.readRange(
+                encryptedURL: encryptedURL,
+                metadata: metadata,
+                offset: offset,
+                length: length
+            )
+        }
+        let plaintext = try decryptLegacyPayload(encryptedURL: encryptedURL, entry: entry)
+        guard offset >= 0, length > 0, offset < Int64(plaintext.count) else { return Data() }
+        let start = Int(offset)
+        let end = min(plaintext.count, start + length)
+        return Data(plaintext[start..<end])
+    }
+
+    private func resolvedEntry(for url: URL) throws -> (Entry, URL) {
         guard isSecureURL(url), let token = url.host, !token.isEmpty else {
             throw AloSecureMediaError.invalidURL
         }
@@ -235,6 +483,10 @@ final class AloSecureMediaStore: @unchecked Sendable {
         let entry = entries[token]
         lock.unlock()
         guard let entry else { throw AloSecureMediaError.missingRegistration }
+        if Self.isExpired(entry.expiresAt, at: Date()) {
+            remove(urls: [url])
+            throw AloSecureMediaError.expired
+        }
 
         let encryptedURL = URL(fileURLWithPath: entry.encryptedPath)
             .standardizedFileURL
@@ -242,6 +494,21 @@ final class AloSecureMediaStore: @unchecked Sendable {
         let allowedRoot = Self.encryptedCacheRoot().standardizedFileURL.resolvingSymlinksInPath()
         let allowedPrefix = allowedRoot.path.hasSuffix("/") ? allowedRoot.path : allowedRoot.path + "/"
         guard encryptedURL.path.hasPrefix(allowedPrefix) else { throw AloSecureMediaError.invalidPath }
+        return (entry, encryptedURL)
+    }
+
+    private func chunkedMetadata(for entry: Entry) -> AloChunkedMediaCrypto.Metadata? {
+        AloChunkedMediaCrypto.Metadata([
+            "algorithm": entry.algorithm ?? "aes-256-gcm-v1",
+            "key": entry.key,
+            "noncePrefix": entry.noncePrefix ?? "",
+            "chunkSize": entry.chunkSize.map(String.init) ?? "",
+            "plaintextSize": entry.plaintextSize.map(String.init) ?? "",
+            "mime": entry.mime
+        ])
+    }
+
+    private func decryptLegacyPayload(encryptedURL: URL, entry: Entry) throws -> Data {
         let encrypted = try Data(contentsOf: encryptedURL, options: [.mappedIfSafe])
         guard encrypted.count > 16,
               let key = Self.base64URLData(entry.key),
@@ -253,31 +520,57 @@ final class AloSecureMediaStore: @unchecked Sendable {
             ciphertext: Data(encrypted.dropLast(16)),
             tag: Data(encrypted.suffix(16))
         )
-        let plaintext = try AES.GCM.open(sealed, using: SymmetricKey(data: key))
-        return Payload(data: plaintext, mime: entry.mime, name: entry.name)
+        return try AES.GCM.open(sealed, using: SymmetricKey(data: key))
     }
 
     func makePlayer(url: URL) -> AVPlayer {
-        guard isSecureURL(url) else { return AVPlayer(url: url) }
+        AVPlayer(playerItem: AVPlayerItem(asset: makeAsset(url: url)))
+    }
+
+    /// Metadata/posters must not allocate a decoder, playback clock or player
+    /// layer for every row. Retain the private loader for the asset's lifetime.
+    func makeAsset(url: URL) -> AVURLAsset {
         let asset = AVURLAsset(url: url)
+        guard isSecureURL(url) else { return asset }
         let loader = AloSecureMediaResourceLoader(sourceURL: url, store: self)
         asset.resourceLoader.setDelegate(loader, queue: loader.queue)
-        let player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
         objc_setAssociatedObject(
-            player,
+            asset,
             &Self.playerLoaderAssociation,
             loader,
             .OBJC_ASSOCIATION_RETAIN_NONATOMIC
         )
-        return player
+        return asset
     }
 
     func clearCache() {
+        Task { await AloMediaPreviewCache.shared.removeAll() }
         try? FileManager.default.removeItem(at: Self.encryptedCacheRoot())
         lock.lock()
         entries.removeAll()
         let snapshot = entries
         lock.unlock()
+        try? persist(snapshot)
+    }
+
+    func remove(urls: [URL]) {
+        let tokens = Set(
+            urls.compactMap { url in
+                isSecureURL(url) ? url.host : nil
+            }
+        )
+        guard !tokens.isEmpty else { return }
+
+        lock.lock()
+        let removedPaths = tokens.compactMap { token -> String? in
+            entries.removeValue(forKey: token)?.encryptedPath
+        }
+        let snapshot = entries
+        lock.unlock()
+
+        removedPaths.forEach { path in
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: path))
+        }
         try? persist(snapshot)
     }
 
@@ -310,6 +603,16 @@ final class AloSecureMediaStore: @unchecked Sendable {
             return [:]
         }
         return decoded
+    }
+
+    private static func isExpired(_ value: String?, at date: Date) -> Bool {
+        guard let value, !value.isEmpty else { return false }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let expiry = fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+        // A malformed non-empty deadline must not make protected media durable.
+        guard let expiry else { return true }
+        return expiry <= date
     }
 
     private static func loadOrCreateRegistryKey() -> Data {
@@ -403,7 +706,9 @@ private final class AloSecureMediaResourceLoader: NSObject, AVAssetResourceLoade
     let queue = DispatchQueue(label: "com.alo.ios.secure-media-loader")
     private let sourceURL: URL
     private let store: AloSecureMediaStore
-    private var cachedResult: Result<AloSecureMediaStore.Payload, Error>?
+    private var cachedContentInfo: Result<AloSecureMediaStore.ContentInfo, Error>?
+    private var cachedLegacyPayload: Result<AloSecureMediaStore.Payload, Error>?
+    private let responseChunkSize = 1_024 * 1_024
 
     init(sourceURL: URL, store: AloSecureMediaStore) {
         self.sourceURL = sourceURL
@@ -415,24 +720,14 @@ private final class AloSecureMediaResourceLoader: NSObject, AVAssetResourceLoade
         shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest
     ) -> Bool {
         do {
-            let payload = try loadPayload()
+            let info = try loadContentInfo()
             if let information = loadingRequest.contentInformationRequest {
-                information.contentType = UTType(mimeType: payload.mime)?.identifier ?? payload.mime
-                information.contentLength = Int64(payload.data.count)
+                information.contentType = UTType(mimeType: info.mime)?.identifier ?? info.mime
+                information.contentLength = info.plaintextSize
                 information.isByteRangeAccessSupported = true
             }
             if let request = loadingRequest.dataRequest {
-                let rawOffset = request.currentOffset > 0 ? request.currentOffset : request.requestedOffset
-                let start = max(0, min(payload.data.count, Int(rawOffset)))
-                let end: Int
-                if request.requestsAllDataToEndOfResource {
-                    end = payload.data.count
-                } else {
-                    end = min(payload.data.count, start + request.requestedLength)
-                }
-                if end > start {
-                    request.respond(with: payload.data.subdata(in: start..<end))
-                }
+                try respond(to: request, info: info)
             }
             loadingRequest.finishLoading()
         } catch {
@@ -441,10 +736,54 @@ private final class AloSecureMediaResourceLoader: NSObject, AVAssetResourceLoade
         return true
     }
 
-    private func loadPayload() throws -> AloSecureMediaStore.Payload {
-        if let cachedResult { return try cachedResult.get() }
+    private func loadContentInfo() throws -> AloSecureMediaStore.ContentInfo {
+        if let cachedContentInfo { return try cachedContentInfo.get() }
+        let result = Result { try store.contentInfo(for: sourceURL) }
+        cachedContentInfo = result
+        return try result.get()
+    }
+
+    private func respond(
+        to request: AVAssetResourceLoadingDataRequest,
+        info: AloSecureMediaStore.ContentInfo
+    ) throws {
+        let requestedOffset = request.currentOffset > 0 ? request.currentOffset : request.requestedOffset
+        let start = max(0, min(info.plaintextSize, requestedOffset))
+        let end: Int64
+        if request.requestsAllDataToEndOfResource {
+            end = info.plaintextSize
+        } else {
+            let requestedLength = max(0, Int64(request.requestedLength))
+            end = min(info.plaintextSize, start + requestedLength)
+        }
+        guard end > start else { return }
+
+        if info.isChunked {
+            // AVFoundation may request the complete asset. Keep that request streamed
+            // so a large video never becomes one Data allocation.
+            var offset = start
+            while offset < end {
+                let length = Int(min(Int64(responseChunkSize), end - offset))
+                let data = try store.readData(for: sourceURL, offset: offset, length: length)
+                guard !data.isEmpty else { throw AloSecureMediaError.invalidMetadata }
+                request.respond(with: data)
+                offset += Int64(data.count)
+            }
+            return
+        }
+
+        let payload = try loadLegacyPayload()
+        let legacyStart = Int(start)
+        let legacyEnd = Int(end)
+        if legacyEnd > legacyStart {
+            request.respond(with: payload.data.subdata(in: legacyStart..<legacyEnd))
+        }
+    }
+
+    private func loadLegacyPayload() throws -> AloSecureMediaStore.Payload {
+        if let cachedLegacyPayload { return try cachedLegacyPayload.get() }
         let result = Result { try store.payload(for: sourceURL) }
-        cachedResult = result
+        cachedLegacyPayload = result
         return try result.get()
     }
 }
@@ -456,4 +795,6 @@ enum AloSecureMediaError: Error {
     case missingRegistration
     case invalidRegistry
     case invalidImage
+    case payloadTooLarge
+    case expired
 }

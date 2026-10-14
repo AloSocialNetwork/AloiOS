@@ -1,0 +1,843 @@
+import XCTest
+
+final class AloSocialConsistencyUITests: XCTestCase {
+    private func launch(_ arguments: [String] = []) -> XCUIApplication {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "social-overview",
+            "-ALO_UI_MESSENGER_ACCESSIBILITY", "0", "-ALO_UI_REDUCE_MOTION", "0",
+            "-ALO_UI_REDUCE_TRANSPARENCY", "0", "-ALO_UI_INCREASE_CONTRAST", "0", "-ALO_UI_LEGACY_GLASS", "0",
+            "-ALO_UI_SEARCH_INCOMING", "0"] + arguments
+        app.launch()
+        XCTAssertTrue((arguments.contains("chat-list") ? app.buttons["Чаты"].firstMatch : app.buttons["alo.feed.tab.popular"]).waitForExistence(timeout: 15))
+        return app
+    }
+
+    private func capture(_ name: String) {
+        let image = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        image.name = name; image.lifetime = .keepAlways; add(image)
+    }
+
+    private func rail(_ app: XCUIApplication, identifiers: [String]) -> CGRect {
+        identifiers.reduce(CGRect.null) { $0.union(app.buttons[$1].frame) }
+    }
+
+    private func renderedFrame(_ element: XCUIElement) -> CGRect {
+        let values = (element.value as? String ?? "").split(separator: ",").compactMap { Double($0) }
+        XCTAssertEqual(values.count, 4, "A rendered geometry probe must be available in the DEBUG fixture")
+        guard values.count == 4 else { return .zero }
+        return CGRect(x: values[0], y: values[1], width: values[2], height: values[3])
+    }
+
+    func testSharedGeometrySettingsAndAllMenus() {
+        let app = launch()
+        let feedRail = rail(app, identifiers: ["alo.feed.tab.popular", "alo.feed.tab.subscriptions"])
+        XCTAssertEqual(feedRail.height, 44, accuracy: 0.01)
+        XCTAssertEqual(feedRail.width + 8, app.windows.firstMatch.frame.width - 32, accuracy: 1)
+        let gear = app.buttons["alo.feed.settings"].frame
+        XCTAssertEqual(gear.size, CGSize(width: 44, height: 44))
+        capture("01-feed")
+        app.buttons["alo.feed.settings"].tap()
+        XCTAssertTrue(app.buttons["Закрыть настройки"].waitForExistence(timeout: 4))
+        capture("06-settings")
+        app.buttons["Закрыть настройки"].tap()
+
+        app.buttons["Поиск"].firstMatch.tap()
+        let field = app.otherElements["alo.search.field"].firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 4))
+        let fieldSurface = renderedFrame(field)
+        XCTAssertEqual(fieldSurface.height, 40, accuracy: 1)
+        XCTAssertEqual(fieldSurface.width, feedRail.width + 8, accuracy: 1)
+        XCTAssertEqual(fieldSurface.minX, 16, accuracy: 1)
+        let title = app.staticTexts["alo.search.title"].frame
+        XCTAssertEqual(app.buttons["alo.search.settings"].frame.size, gear.size)
+        capture("02-search")
+        app.buttons["alo.search.settings"].tap()
+        XCTAssertTrue(app.buttons["Закрыть настройки"].waitForExistence(timeout: 4))
+        app.buttons["Закрыть настройки"].tap()
+        let input = app.textFields["alo.search.input"]
+        input.tap(); input.typeText("Александр")
+        XCTAssertTrue(app.buttons["Очистить поиск"].waitForExistence(timeout: 3))
+        app.buttons["Очистить поиск"].tap()
+        let cleared = expectation(for: NSPredicate(format: "value == %@ OR value == %@", "Поиск", ""), evaluatedWith: input)
+        wait(for: [cleared], timeout: 4)
+
+        app.buttons["Уведы"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["alo.alerts.filter.all"].waitForExistence(timeout: 4))
+        let alertsRail = rail(app, identifiers: ["alo.alerts.filter.all", "alo.alerts.filter.replies", "alo.alerts.filter.reactions"])
+        XCTAssertEqual(alertsRail.height, feedRail.height, accuracy: 1)
+        XCTAssertEqual(alertsRail.width, feedRail.width, accuracy: 1)
+        XCTAssertEqual(app.staticTexts["alo.alerts.title"].frame.height, title.height, accuracy: 1)
+        XCTAssertEqual(app.buttons["alo.alerts.settings"].frame.size, gear.size)
+        for text in ["Принять", "Отклонить"] {
+            XCTAssertGreaterThanOrEqual(app.buttons[text].frame.height + 0.01, 44)
+            XCTAssertLessThanOrEqual(app.buttons[text].frame.height, 44.01)
+        }
+        capture("03-notifications")
+        app.buttons["alo.alerts.filter.reactions"].tap()
+        XCTAssertTrue(app.buttons["alo.alerts.filter.reactions"].isSelected)
+        capture("07-notification-reactions")
+        app.buttons["alo.alerts.filter.all"].tap()
+
+        app.buttons["Профиль"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["alo.profile.tab.posts"].waitForExistence(timeout: 4))
+        let profileRail = rail(app, identifiers: ["alo.profile.tab.posts", "alo.profile.tab.likes"])
+        XCTAssertEqual(profileRail.height, feedRail.height, accuracy: 1)
+        XCTAssertEqual(profileRail.width, feedRail.width, accuracy: 1)
+        XCTAssertEqual(app.buttons["alo.profile.settings"].frame.size, gear.size)
+        capture("04-profile")
+        app.buttons["alo.profile.settings"].tap()
+        XCTAssertTrue(app.buttons["Закрыть настройки"].waitForExistence(timeout: 4))
+        app.buttons["Закрыть настройки"].tap()
+        let lastLike = app.buttons["alo.post.like.990411"]
+        let profile = app.scrollViews["alo.profile.scroll"]
+        for _ in 0..<16 {
+            if lastLike.isHittable && lastLike.frame.maxY <= app.buttons["Профиль"].firstMatch.frame.minY { break }
+            profile.swipeUp()
+        }
+        XCTAssertTrue(lastLike.isHittable)
+        XCTAssertLessThanOrEqual(lastLike.frame.maxY, app.buttons["Профиль"].firstMatch.frame.minY)
+        capture("08-profile-bottom")
+        app.buttons["Чаты"].firstMatch.tap()
+        capture("05-chats")
+    }
+
+    func testLargeTextReducedMotionAndLegacyMaterials() {
+        let app = launch(["-ALO_UI_MESSENGER_ACCESSIBILITY", "1", "-ALO_UI_REDUCE_MOTION", "1",
+            "-ALO_UI_REDUCE_TRANSPARENCY", "1", "-ALO_UI_INCREASE_CONTRAST", "1", "-ALO_UI_LEGACY_GLASS", "1"])
+        capture("accessibility-feed")
+        app.buttons["Поиск"].firstMatch.tap()
+        XCTAssertTrue(app.textFields["alo.search.input"].waitForExistence(timeout: 4))
+        XCTAssertTrue(app.buttons["alo.search.settings"].isHittable)
+        capture("accessibility-search")
+        app.buttons["Уведы"].firstMatch.tap()
+        let reactions = app.buttons["alo.alerts.filter.reactions"]
+        XCTAssertTrue(reactions.waitForExistence(timeout: 4))
+        XCTAssertGreaterThanOrEqual(reactions.frame.height, 44)
+        reactions.tap()
+        XCTAssertTrue(reactions.isSelected)
+        app.buttons["alo.alerts.filter.all"].tap()
+        let request = app.buttons["Принять"]
+        for _ in 0..<4 where !request.isHittable { app.scrollViews["alo.alerts.scroll"].swipeUp() }
+        XCTAssertTrue(request.isHittable)
+        capture("accessibility-notifications")
+        app.buttons["Профиль"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["alo.profile.settings"].waitForExistence(timeout: 4))
+        XCTAssertTrue(app.buttons["alo.profile.tab.posts"].exists)
+        capture("accessibility-profile")
+    }
+
+    func testIncomingSearchRequestOffersResponse() {
+        let app = launch(["-ALO_UI_SEARCH_INCOMING", "1"])
+        app.buttons["Поиск"].firstMatch.tap()
+        let reply = app.buttons["Ответить"]
+        XCTAssertTrue(reply.waitForExistence(timeout: 4))
+        XCTAssertTrue(reply.isEnabled)
+        reply.tap()
+        XCTAssertTrue(app.buttons["Принять"].waitForExistence(timeout: 4))
+        XCTAssertTrue(app.buttons["Отклонить"].exists)
+        capture("incoming-request-options")
+        // Inspect choices only: the fixture must never create real social mutations.
+        if app.buttons["Отмена"].exists { app.buttons["Отмена"].tap() }
+        else { app.staticTexts["alo.search.title"].tap() } // iOS 26 popovers dismiss outside.
+        XCTAssertTrue(reply.isHittable)
+    }
+
+    /// Visual review only: no geometry assertions, so it can run before and after chrome changes.
+    func testCaptureAllScreensForReview() {
+        let app = launch()
+        capture("a-feed")
+        app.scrollViews["alo.feed.scroll"].swipeUp(velocity: .slow)
+        capture("a-feed-scrolled")
+        app.buttons["Поиск"].firstMatch.tap()
+        _ = app.otherElements["alo.search.field"].firstMatch.waitForExistence(timeout: 4)
+        capture("b-search")
+        app.buttons["Чаты"].firstMatch.tap()
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("c-chats")
+        app.buttons["Уведы"].firstMatch.tap()
+        _ = app.buttons["alo.alerts.filter.all"].waitForExistence(timeout: 4)
+        capture("d-notifications")
+        let alerts = app.scrollViews["alo.alerts.scroll"]
+        if alerts.exists { alerts.swipeUp(velocity: .slow) }
+        capture("d-notifications-scrolled")
+        app.buttons["Профиль"].firstMatch.tap()
+        _ = app.buttons["alo.profile.tab.posts"].waitForExistence(timeout: 4)
+        capture("e-profile")
+    }
+
+    func testCaptureChatListAndSearch() {
+        let app = launch(["-ALO_UI_MESSENGER_CONTENT", "chat-list"])
+        app.buttons["Чаты"].firstMatch.tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("f-chatlist-closed")
+        let list = app.scrollViews.firstMatch
+        list.swipeDown(velocity: .slow)
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("f-chatlist-pulled")
+        let input = app.textFields["alo.chats.search.input"]
+        input.tap()
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("f-chatsearch-empty")
+        input.typeText("Ма")
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("f-chatsearch-results")
+        app.buttons["alo.chats.search.cancel"].tap()
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("f-chatlist-after-cancel")
+    }
+
+    /// Same screens through the iOS 18 glass fallback.
+    func testCaptureLegacyGlass() {
+        var app = launch(["-ALO_UI_LEGACY_GLASS", "1"])
+        app.scrollViews["alo.feed.scroll"].swipeUp(velocity: .slow)
+        capture("g-feed-scrolled")
+        app.buttons["Уведы"].firstMatch.tap()
+        _ = app.buttons["alo.alerts.filter.all"].waitForExistence(timeout: 4)
+        app.scrollViews["alo.alerts.scroll"].swipeUp(velocity: .slow)
+        capture("g-notifications-scrolled")
+        app.terminate()
+        app = launch(["-ALO_UI_MESSENGER_CONTENT", "chat-list", "-ALO_UI_LEGACY_GLASS", "1"])
+        app.buttons["Чаты"].firstMatch.tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        app.scrollViews.firstMatch.swipeDown(velocity: .slow)
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("g-chatlist-pulled")
+    }
+
+    func testCaptureCallScreens() {
+        var app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_CALL_PREVIEW", "1"]
+        app.launch()
+        let bar = app.buttons["alo.compact-call-bar"]
+        XCTAssertTrue(bar.waitForExistence(timeout: 10))
+        capture("h-call-compact")
+        bar.tap()
+        XCTAssertTrue(app.buttons["alo.call.minimize"].waitForExistence(timeout: 5))
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("h-call-expanded")
+        app.buttons["alo.call-safety-verification"].tap()
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("h-call-safety")
+        app.terminate()
+        app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_CALL_PREVIEW", "1", "-ALO_UI_CALL_VIDEO_PREVIEW", "1", "-ALO_UI_CALL_REMOTE_VIDEO_PREVIEW", "1"]
+        app.launch()
+        XCTAssertTrue(app.buttons["alo.compact-call-bar"].waitForExistence(timeout: 10))
+        app.buttons["alo.compact-call-bar"].tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("h-call-video")
+    }
+
+    func testCaptureChatScreens() {
+        for (name, content, extra) in [("i-chat", "", [String]()), ("i-chat-forward", "forward", [String]()),
+                                       ("i-chat-legacy", "", ["-ALO_UI_LEGACY_GLASS", "1"])] {
+            let app = XCUIApplication()
+            app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", content] + extra
+            app.launch()
+            XCTAssertTrue(app.descendants(matching: .any)["alo.chat.composer"].waitForExistence(timeout: 15))
+            Thread.sleep(forTimeInterval: 1.0)
+            capture(name)
+            app.terminate()
+        }
+    }
+
+    /// Screens most likely to break on a 375 pt phone: typing, comments, new post.
+    func testCaptureSmallScreenRisks() {
+        var app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", ""]
+        app.launch()
+        let composer = app.descendants(matching: .any)["alo.chat.composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 15))
+        composer.tap()
+        composer.typeText("Проверяем высоту поля ввода, когда текст длинный и переходит на несколько строк подряд")
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("j-chat-typing")
+        app.terminate()
+
+        app = launch()
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'alo.post.comments.'")).firstMatch.tap()
+        let input = app.descendants(matching: .any).matching(identifier: "alo.comments.input").firstMatch
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("j-comments")
+        if input.isHittable { input.tap(); Thread.sleep(forTimeInterval: 0.8); capture("j-comments-typing") }
+        app.terminate()
+
+        app = launch()
+        app.buttons["alo.feed.create-post"].tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("j-post-composer")
+    }
+
+    func testCaptureChatFeatures() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "forward"]
+        app.launch()
+        let composer = app.descendants(matching: .any)["alo.chat.composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 15))
+        Thread.sleep(forTimeInterval: 1.0)
+        let body = app.staticTexts["Привет! Посмотрел фотографии с поездки?"].firstMatch
+        XCTAssertTrue(body.waitForExistence(timeout: 5))
+        body.press(forDuration: 0.6)
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("m-menu")
+        if app.buttons["Ответить"].exists {
+            app.buttons["Ответить"].tap()
+            Thread.sleep(forTimeInterval: 0.8)
+            capture("m-reply")
+            if app.buttons["alo.composer.reply.cancel"].exists { app.buttons["alo.composer.reply.cancel"].tap() }
+        } else { app.tap() }
+        Thread.sleep(forTimeInterval: 0.5)
+        body.press(forDuration: 0.6)
+        Thread.sleep(forTimeInterval: 0.8)
+        if app.buttons["Выбрать"].exists {
+            app.buttons["Выбрать"].tap()
+            Thread.sleep(forTimeInterval: 0.8)
+            capture("m-select")
+        }
+        app.terminate()
+        let app2 = XCUIApplication()
+        app2.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", ""]
+        app2.launch()
+        XCTAssertTrue(app2.buttons["alo.chat.attach"].waitForExistence(timeout: 15))
+        app2.buttons["alo.chat.attach"].tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("m-attach")
+    }
+
+    func testCaptureAppearance() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "appearance"]
+        app.launch()
+        XCTAssertTrue(app.buttons["alo.appearance.apply"].waitForExistence(timeout: 15))
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("n-appearance-theme")
+        app.buttons["alo.appearance.section.1"].tap()
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("n-appearance-wallpaper")
+        app.buttons["alo.appearance.section.2"].tap()
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("n-appearance-messages")
+    }
+
+    func testCaptureCircleRecording() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "",
+                                "-ALO_UI_RECORDING_FIXTURE", "1", "-ALO_UI_MESSENGER_SURFACE", "1"]
+        app.launch()
+        let record = app.buttons["alo.chat.record-send"]
+        XCTAssertTrue(record.waitForExistence(timeout: 15))
+        capture("q-composer-voice")
+        record.tap()
+        XCTAssertEqual(record.label, "Кружок")
+        capture("q-composer-circle")
+        let origin = record.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        origin.press(forDuration: 0.65, thenDragTo: origin.withOffset(CGVector(dx: 0, dy: -115)),
+                     withVelocity: .slow, thenHoldForDuration: 0.1)
+        XCTAssertTrue(app.buttons["Завершить и просмотреть кружок"].waitForExistence(timeout: 4))
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("q-circle-recording-locked")
+    }
+
+    func testCaptureLoadingSkeleton() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_LOADING_SKELETON", "1"]
+        app.launch()
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("s-skeleton-1")
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("s-skeleton-2")
+    }
+
+    func testCaptureGroupInfo() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "group-info"]
+        app.launch()
+        XCTAssertTrue(app.buttons["alo.chat.info"].waitForExistence(timeout: 15))
+        app.buttons["alo.chat.info"].tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("t-group-info-top")
+        let scroll = app.scrollViews["alo.peer.scroll"]
+        if scroll.exists { scroll.swipeUp(velocity: .fast); scroll.swipeUp(velocity: .fast) }
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("t-group-info-bottom")
+    }
+
+    func testCaptureMediaViewers() {
+        var app = launch()
+        let media = app.otherElements.matching(NSPredicate(format: "identifier BEGINSWITH 'alo.post.media.'")).firstMatch
+        XCTAssertTrue(media.waitForExistence(timeout: 8))
+        media.tap()
+        XCTAssertTrue(app.buttons["alo.post.viewer.close"].waitForExistence(timeout: 6))
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("v-photo-viewer")
+        Thread.sleep(forTimeInterval: 3.6)
+        capture("v-photo-viewer-autohidden")
+        let center = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        center.doubleTap()
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("v-photo-zoomed")
+        center.doubleTap()
+        Thread.sleep(forTimeInterval: 0.6)
+        app.pinch(withScale: 3, velocity: 2)
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("v-photo-pinched")
+        app.terminate()
+
+        app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "feed-video"]
+        app.launch()
+        let video = app.otherElements.matching(NSPredicate(format: "identifier BEGINSWITH 'alo.post.media.'")).firstMatch
+        XCTAssertTrue(video.waitForExistence(timeout: 15))
+        video.tap()
+        Thread.sleep(forTimeInterval: 1.5)
+        capture("v-video-after-tap")
+        Thread.sleep(forTimeInterval: 1.5)
+        capture("v-video-player")
+        app.tap()
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("v-video-player-toggled")
+    }
+
+    /// "26" is the system glass; "18" is the fallback used on iOS 18 (forced here, no iOS 18 runtime installed).
+    func testCaptureOSComparison() {
+        for (tag, extra) in [("26", ["-ALO_UI_LEGACY_GLASS", "0"]), ("18", ["-ALO_UI_LEGACY_GLASS", "1"])] {
+            var app = launch(extra)
+            app.scrollViews["alo.feed.scroll"].swipeUp(velocity: .slow)
+            Thread.sleep(forTimeInterval: 0.5)
+            capture("w-feed-\(tag)")
+            app.terminate()
+            app = launch(["-ALO_UI_MESSENGER_CONTENT", "chat-list"] + extra)
+            app.buttons["Чаты"].firstMatch.tap()
+            Thread.sleep(forTimeInterval: 1.0)
+            app.scrollViews.firstMatch.swipeDown(velocity: .slow)
+            Thread.sleep(forTimeInterval: 0.6)
+            capture("w-chatlist-\(tag)")
+            app.terminate()
+            let chat = XCUIApplication()
+            chat.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "forward"] + extra
+            chat.launch()
+            XCTAssertTrue(chat.descendants(matching: .any)["alo.chat.composer"].waitForExistence(timeout: 15))
+            Thread.sleep(forTimeInterval: 1.0)
+            capture("w-chat-\(tag)")
+            chat.terminate()
+        }
+    }
+
+    func testCapturePinFlow() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", ""]
+        app.launch()
+        XCTAssertTrue(app.descendants(matching: .any)["alo.chat.composer"].waitForExistence(timeout: 15))
+        let body = app.staticTexts["Привет! Посмотрел фотографии с поездки?"].firstMatch
+        XCTAssertTrue(body.waitForExistence(timeout: 5))
+        body.press(forDuration: 0.6)
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("x-pin-menu")
+        if app.buttons["Закрепить"].exists {
+            app.buttons["Закрепить"].tap()
+            Thread.sleep(forTimeInterval: 1.2)
+            capture("x-pin-after")
+        }
+    }
+
+    func testCaptureChatListActions() {
+        let app = launch(["-ALO_UI_MESSENGER_CONTENT", "chat-list"])
+        app.buttons["Чаты"].firstMatch.tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("y-list")
+        let row = app.staticTexts["Илья"].firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        let start = row.coordinate(withNormalizedOffset: CGVector(dx: 2.2, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: -170, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.1)
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("y-swipe-left")
+        app.staticTexts["Даша"].firstMatch.tap()
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("y-after-close")
+        let row2 = app.staticTexts["Анна"].firstMatch
+        let s2 = row2.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
+        s2.press(forDuration: 0.05, thenDragTo: s2.withOffset(CGVector(dx: 120, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.1)
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("y-swipe-right")
+        app.staticTexts["Даша"].firstMatch.tap()
+        Thread.sleep(forTimeInterval: 0.8)
+        app.staticTexts["Мария"].firstMatch.press(forDuration: 0.6)
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("y-menu")
+        if app.buttons["Выбрать"].exists {
+            app.buttons["Выбрать"].tap()
+            Thread.sleep(forTimeInterval: 0.8)
+            app.staticTexts["Даша"].firstMatch.tap()
+            Thread.sleep(forTimeInterval: 0.6)
+            capture("y-select")
+        }
+        app.buttons["alo.chats.select.done"].tap()
+        Thread.sleep(forTimeInterval: 0.6)
+        if app.buttons["alo.chats.archive.entry"].exists {
+            app.buttons["alo.chats.archive.entry"].tap()
+            Thread.sleep(forTimeInterval: 0.8)
+            capture("y-archive")
+        }
+    }
+
+    func testCaptureCallsAndDeletion() {
+        let app = launch(["-ALO_UI_MESSENGER_CONTENT", "chat-list"])
+        app.buttons["Чаты"].firstMatch.tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("z-list-counts")
+        let row = app.staticTexts["Работа"].firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        let start = row.coordinate(withNormalizedOffset: CGVector(dx: 2.2, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: -200, dy: 0)), withVelocity: .slow, thenHoldForDuration: 0.1)
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("z-swipe-delete")
+        if app.buttons["Удалить"].firstMatch.exists {
+            app.buttons["Удалить"].firstMatch.tap()
+            Thread.sleep(forTimeInterval: 0.8)
+            capture("z-delete-confirm")
+            if app.buttons["Удалить у меня"].exists { app.buttons["Удалить у меня"].tap() }
+            Thread.sleep(forTimeInterval: 0.8)
+            XCTAssertFalse(app.staticTexts["Работа"].exists, "deleted chat leaves the list")
+            capture("z-after-delete")
+        }
+        // A group can be pinned like any chat.
+        let group = app.staticTexts["Семья"].firstMatch
+        XCTAssertTrue(group.waitForExistence(timeout: 4))
+        let g = group.coordinate(withNormalizedOffset: CGVector(dx: 0.0, dy: 0.5))
+        g.press(forDuration: 0.05, thenDragTo: g.withOffset(CGVector(dx: 300, dy: 0)), withVelocity: .fast, thenHoldForDuration: 0.05)
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("z-group-pinned")
+        app.buttons["alo.chats.calls"].tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("z-calls")
+        app.buttons["alo.calls.filter.missed"].tap()
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("z-calls-missed")
+    }
+
+    func testViewerSwipeDownAndPiP() {
+        var app = launch()
+        let media = app.otherElements.matching(NSPredicate(format: "identifier BEGINSWITH 'alo.post.media.'")).firstMatch
+        XCTAssertTrue(media.waitForExistence(timeout: 8))
+        media.tap()
+        let close = app.buttons["alo.post.viewer.close"]
+        XCTAssertTrue(close.waitForExistence(timeout: 6))
+        let center = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        center.press(forDuration: 0.05, thenDragTo: center.withOffset(CGVector(dx: 0, dy: 50)), withVelocity: .slow, thenHoldForDuration: 0.05)
+        Thread.sleep(forTimeInterval: 0.8)
+        XCTAssertTrue(app.descendants(matching: .any)["alo.post.viewer.close"].exists, "a short drag springs back")
+        center.press(forDuration: 0.05, thenDragTo: center.withOffset(CGVector(dx: 0, dy: 320)), withVelocity: .fast, thenHoldForDuration: 0.0)
+        Thread.sleep(forTimeInterval: 1.0)
+        XCTAssertFalse(app.buttons["alo.post.viewer.close"].exists, "a long drag closes the photo")
+        capture("p-after-swipe-close")
+        app.terminate()
+
+        app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "feed-video"]
+        app.launch()
+        let video = app.otherElements.matching(NSPredicate(format: "identifier BEGINSWITH 'alo.post.media.'")).firstMatch
+        XCTAssertTrue(video.waitForExistence(timeout: 15))
+        video.tap()
+        Thread.sleep(forTimeInterval: 1.5)
+        capture("p-video-controls")
+        print("PIPDBG", app.buttons["alo.video.pip"].exists, app.buttons["alo.video.play"].exists)
+        if app.buttons["alo.video.pip"].exists {
+            app.buttons["alo.video.pip"].tap()
+            Thread.sleep(forTimeInterval: 2.0)
+            capture("p-pip")
+        }
+    }
+
+
+    func testCaptureStoryTools() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "feed-surface"]
+        app.launch()
+        let story = app.buttons["alo.feed.create-story"]
+        XCTAssertTrue(story.waitForExistence(timeout: 15))
+        story.tap()
+        XCTAssertTrue(app.buttons["alo.story.publish"].waitForExistence(timeout: 4))
+        Thread.sleep(forTimeInterval: 0.8)
+        app.typeText("Выходные у моря")
+
+        // Text tools: font, plate, colour and the background gradient.
+        app.buttons["alo.story.text-style"].tap()
+        XCTAssertTrue(app.buttons["Шрифт"].waitForExistence(timeout: 3))
+        app.buttons["Подложка"].tap()
+        app.buttons["Цвет 1"].tap()
+        app.buttons["Фон"].tap()
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("s-1-text-style")
+        app.buttons["alo.story.tool-done"].tap()
+
+        // A sticker in the middle of the page.
+        app.buttons["alo.story.stickers"].tap()
+        XCTAssertTrue(app.buttons["🔥"].waitForExistence(timeout: 3))
+        app.buttons["🔥"].tap()
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("s-2-sticker")
+
+        // A stroke with the pen.
+        app.buttons["alo.story.draw"].tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.7))
+        start.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.62)),
+                    withVelocity: .slow, thenHoldForDuration: 0)
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("s-3-drawing")
+        app.buttons["alo.story.tool-done"].tap()
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("s-4-ready")
+        // Publishing flattens the page first; offline, the upload then fails with a visible error.
+        app.buttons["alo.story.publish"].tap()
+        let error = app.descendants(matching: .any).matching(identifier: "alo.story.publish-error").firstMatch
+        XCTAssertTrue(error.waitForExistence(timeout: 10), "the page was rendered and the upload attempted")
+        print("STORYDBG", error.label)
+        capture("s-5-publish-offline")
+    }
+
+    func testCaptureCreationEditors() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "feed-surface"]
+        app.launch()
+        let post = app.buttons["alo.feed.create-post"]
+        XCTAssertTrue(post.waitForExistence(timeout: 15))
+        post.tap()
+        XCTAssertTrue(app.buttons["alo.post.publish"].waitForExistence(timeout: 4))
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("p-post-editor")
+        app.typeText("Вечером собираемся в парке, присоединяйтесь!")
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("p-post-editor-typed")
+        app.buttons["Закрыть редактор поста"].tap()
+        let story = app.buttons["alo.feed.create-story"]
+        XCTAssertTrue(story.waitForExistence(timeout: 4))
+        story.tap()
+        XCTAssertTrue(app.buttons["alo.story.publish"].waitForExistence(timeout: 4))
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("p-story-editor")
+        app.typeText("Сегодня в парке!")
+        app.buttons["alo.story.lifetime"].tap()
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("p-story-lifetime")
+    }
+
+    func testCaptureCommunityCreation() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "chat-list"]
+        app.launch()
+        XCTAssertTrue(app.buttons["Новое сообщение"].waitForExistence(timeout: 15))
+        app.buttons["Новое сообщение"].tap()
+        XCTAssertTrue(app.buttons["alo.compose.group"].waitForExistence(timeout: 4))
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("n-1-new-message")
+
+        // Group: members, then name and photo.
+        app.buttons["alo.compose.group"].tap()
+        let people = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'alo.compose.person.'"))
+        XCTAssertTrue(people.firstMatch.waitForExistence(timeout: 4))
+        print("CREATEDBG people", people.count)
+        people.element(boundBy: 0).tap()
+        if people.count > 1 { people.element(boundBy: 1).tap() }
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("n-2-group-members")
+        app.buttons["alo.compose.action"].tap()
+        let title = app.textFields["alo.community.title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 4))
+        title.typeText("Друзья")
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("n-3-group-info")
+        app.buttons["alo.compose.leading"].tap()
+        Thread.sleep(forTimeInterval: 0.5)
+        app.buttons["alo.compose.leading"].tap()
+        XCTAssertTrue(app.buttons["alo.compose.channel"].waitForExistence(timeout: 4))
+
+        // Channel: name and description, type and link, subscribers.
+        app.buttons["alo.compose.channel"].tap()
+        XCTAssertTrue(title.waitForExistence(timeout: 4))
+        title.typeText("Новости района")
+        app.descendants(matching: .any).matching(identifier: "alo.community.description").firstMatch.tap()
+        app.typeText("Главное о нашем районе каждый день.")
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("n-4-channel-info")
+        app.buttons["alo.compose.action"].tap()
+        let username = app.textFields["alo.community.username"]
+        XCTAssertTrue(username.waitForExistence(timeout: 4))
+        username.tap()
+        username.typeText("raion_news")
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("n-5-channel-type-public")
+        app.buttons["alo.community.private"].tap()
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("n-6-channel-type-private")
+        app.buttons["alo.compose.action"].tap()
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("n-7-channel-subscribers")
+    }
+
+    func testCaptureChatEdges() {
+        for (name, extra) in [("light", ["-ALO_UI_MESSENGER_SURFACE", "1"]), ("dark", [])] {
+            let app = XCUIApplication()
+            app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "bubble-shapes"] + extra
+            app.launch()
+            XCTAssertTrue(app.buttons["alo.chat.back"].waitForExistence(timeout: 15))
+            Thread.sleep(forTimeInterval: 1.5)
+            capture("e-edges-\(name)")
+            app.terminate()
+        }
+    }
+
+    func testCaptureCommunityProfiles() {
+        for content in ["channel-owner", "group-owner"] {
+            let app = XCUIApplication()
+            app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", content]
+            app.launch()
+            XCTAssertTrue(app.buttons["alo.chat.info"].waitForExistence(timeout: 15))
+            app.buttons["alo.chat.info"].tap()
+            Thread.sleep(forTimeInterval: 1.2)
+            capture("c-\(content)-profile")
+            XCTAssertFalse(app.buttons["alo.group.delete"].exists, "delete is not on the profile page")
+            print("COMMDBG", content, "leave:", app.buttons["alo.group.leave"].exists)
+            app.buttons["alo.peer.more"].tap()
+            XCTAssertTrue(app.buttons["Управление"].waitForExistence(timeout: 3))
+            capture("c-\(content)-more")
+            app.buttons["Управление"].tap()
+            let delete = app.buttons["alo.group.delete"]
+            for _ in 0..<8 where !delete.isHittable { app.swipeUp() }
+            Thread.sleep(forTimeInterval: 0.6)
+            capture("c-\(content)-manage-delete")
+            print("COMMDBG", content, "delete in management:", delete.exists, delete.label)
+            app.terminate()
+        }
+    }
+
+    func testCaptureBubbleShapes() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "bubble-shapes"]
+        app.launch()
+        XCTAssertTrue(app.buttons["alo.chat.back"].waitForExistence(timeout: 15))
+        Thread.sleep(forTimeInterval: 1.5)
+        capture("b-bubbles-bottom")
+        for id in 990210...990218 {
+            let body = app.descendants(matching: .any).matching(identifier: "alo.message.body.\(id)").firstMatch
+            let time = app.descendants(matching: .any).matching(identifier: "alo.message.time.\(id)").firstMatch
+            let media = app.descendants(matching: .any).matching(identifier: "alo.message.media.\(id)").firstMatch
+            print("BUBBLEDBG", id, body.exists ? "\(body.frame)" : "-", time.exists ? "\(time.frame)" : "-", media.exists ? "\(media.frame)" : "-")
+        }
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
+            .press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)), withVelocity: .slow, thenHoldForDuration: 0.5)
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("b-bubbles-top")
+    }
+
+    func testAvatarCropCapture() {
+        let app = launch()
+        app.buttons["Профиль"].firstMatch.tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        app.images["camera.fill"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["Загрузить новое фото"].waitForExistence(timeout: 4))
+        app.buttons["Загрузить новое фото"].tap()
+        Thread.sleep(forTimeInterval: 2.5)
+        // The system picker lives out of process but is reachable through the app's tree.
+        let photo = app.images.matching(NSPredicate(format: "label BEGINSWITH 'Фото' OR label BEGINSWITH 'Photo'")).firstMatch
+        if !photo.waitForExistence(timeout: 4) {
+            print("CROPDBG picker tree", app.debugDescription.prefix(3000))
+        }
+        photo.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let choose = app.buttons["alo.avatar.crop.choose"]
+        XCTAssertTrue(choose.waitForExistence(timeout: 6), "the cropper opens after picking a photo")
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("u-crop-1-opened")
+        let canvas = app.descendants(matching: .any)["alo.avatar.crop.canvas"]
+        canvas.pinch(withScale: 2.2, velocity: 1.5)
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
+            .press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.62, dy: 0.55)), withVelocity: .slow, thenHoldForDuration: 0.3)
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("u-crop-2-zoomed")
+        app.buttons["alo.avatar.crop.rotate"].tap()
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("u-crop-3-rotated")
+        choose.tap()
+        XCTAssertTrue(choose.waitForNonExistence(timeout: 4), "choosing closes the cropper")
+        Thread.sleep(forTimeInterval: 1.5)
+        capture("u-crop-4-after")
+    }
+
+    func testSettingsChromeCapture() {
+        let app = launch()
+        app.buttons["Профиль"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["alo.profile.settings"].waitForExistence(timeout: 4))
+        app.buttons["alo.profile.settings"].tap()
+        Thread.sleep(forTimeInterval: 1.2)
+        capture("s-settings-root")
+        app.buttons["Приватность"].firstMatch.tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("s-settings-privacy")
+        // The edge swipe walks up one level: privacy → settings → profile.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.0, dy: 0.6))
+            .press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.6)), withVelocity: .default, thenHoldForDuration: 0)
+        XCTAssertTrue(app.buttons["Закрыть настройки"].waitForExistence(timeout: 3), "edge swipe returns to the settings list")
+        capture("s-settings-swipe-back")
+        app.buttons["Закрыть настройки"].tap()
+        XCTAssertTrue(app.buttons["alo.profile.settings"].waitForExistence(timeout: 3))
+    }
+
+    func testAvatarPickerAndPhotoPaging() {
+        var app = launch()
+        app.buttons["Профиль"].firstMatch.tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        let avatar = app.buttons.matching(NSPredicate(format: "label CONTAINS 'Тест интерфейса'")).firstMatch
+        let camera = app.images["camera.fill"].firstMatch
+        if camera.exists { camera.tap() } else { avatar.tap() }
+        XCTAssertTrue(app.buttons["Загрузить новое фото"].waitForExistence(timeout: 4), "avatar options appear")
+        capture("u-avatar-options")
+        app.buttons["Загрузить новое фото"].tap()
+        Thread.sleep(forTimeInterval: 2.5)
+        capture("u-avatar-picker")
+        app.terminate()
+
+        app = launch()
+        let gallery = app.otherElements.matching(NSPredicate(format: "identifier == 'alo.post.media.990401'")).firstMatch
+        let anyMedia = app.otherElements.matching(NSPredicate(format: "identifier BEGINSWITH 'alo.post.media.'"))
+        print("MEDIADBG", anyMedia.count, gallery.exists)
+        // The first photo of the first two-photo post (990402), so there is a page to swipe to.
+        let pair = app.otherElements.matching(NSPredicate(format: "identifier == 'alo.post.media.990402'")).firstMatch
+        let target = pair.exists ? pair : (gallery.exists ? gallery : anyMedia.element(boundBy: min(1, anyMedia.count - 1)))
+        if !target.isHittable { app.scrollViews["alo.feed.scroll"].swipeUp(velocity: .slow) }
+        target.tap()
+        Thread.sleep(forTimeInterval: 1.2)
+        capture("u-paging-1")
+        for e in app.staticTexts.matching(NSPredicate(format: "label CONTAINS ' из '")).allElementsBoundByIndex { print("PAGEDBG start", e.label) }
+        let middle = app.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5))
+        middle.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.52)), withVelocity: .default, thenHoldForDuration: 0.0)
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("u-paging-2")
+        for e in app.staticTexts.matching(NSPredicate(format: "label CONTAINS ' из '")).allElementsBoundByIndex { print("PAGEDBG", e.label) }
+        // Back to the first photo, then zoom: a zoomed photo pans instead of paging.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5))
+            .press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)), withVelocity: .default, thenHoldForDuration: 0)
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("u-paging-back")
+        for e in app.staticTexts.matching(NSPredicate(format: "label CONTAINS ' из '")).allElementsBoundByIndex { print("PAGEDBG back", e.label) }
+        app.swipeLeft()
+        Thread.sleep(forTimeInterval: 1.0)
+        capture("u-paging-forward")
+        for e in app.staticTexts.matching(NSPredicate(format: "label CONTAINS ' из '")).allElementsBoundByIndex { print("PAGEDBG swipeLeft", e.label) }
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).doubleTap()
+        Thread.sleep(forTimeInterval: 0.8)
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+            .press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5)), withVelocity: .slow, thenHoldForDuration: 0)
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("u-zoomed-pan")
+        // Back to the fitted photo; a vertical drag closes the viewer.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).doubleTap()
+        Thread.sleep(forTimeInterval: 0.8)
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
+            .press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.52, dy: 0.85)), withVelocity: .fast, thenHoldForDuration: 0)
+        Thread.sleep(forTimeInterval: 1.0)
+        print("PAGEDBG closed", !app.buttons["alo.post.viewer.close"].exists)
+        capture("u-viewer-closed")
+    }
+}

@@ -27,17 +27,35 @@
     pod install
     ```
 
-Открывайте `AloiOS.xcworkspace`. Debug использует локальный HTTP API. Release
-намеренно требует HTTPS и хотя бы один SHA-256 certificate pin:
+Открывайте `AloiOS.xcworkspace`. Release намеренно требует HTTPS. Для
+production API за Cloudflare используется системная проверка TLS/ATS: Cloudflare
+может штатно менять edge-сертификат, поэтому его leaf-certificate нельзя жёстко
+закреплять в приложении.
 
 ```text
 ALO_API_BASE_URL=https://api.example.com/
-ALO_CERTIFICATE_PINS=sha256/CURRENT_PIN,sha256/NEXT_PIN
 ```
 
-Без этих значений production-сборка не запускает сетевой клиент. Настройка APNs,
-PushKit, TURN и ротации pin описана на сервере в
-`docs/production-mobile-setup.md`.
+Если API когда-либо будет обслуживаться сертификатом с контролируемыми
+стабильными ключами, можно включить pinning через
+`ALO_CERTIFICATE_PINS=sha256/CURRENT_PIN,sha256/NEXT_PIN`; при пустом значении
+клиент использует только проверенную Apple системную цепочку доверия. Настройка
+APNs, PushKit и TURN описана на сервере в `docs/production-mobile-setup.md`.
+
+### Локальный сервер и физический iPhone (Debug)
+
+Пошаговая инструкция без опыта разработки: [как запустить сервер и куда вписать IP](LOCAL-SERVER-RU.md).
+
+Симулятор использует `http://127.0.0.1:3000/`. Для физического iPhone задайте
+текущий LAN-адрес Mac в `debugLocalDevelopmentHost` (ветка `#else`) файла
+`AloiOS/Networking/AloServerConfiguration.swift`. Поддерживаются адрес без порта,
+`IP:порт` и полный URL. Узнать адрес Mac: `ipconfig getifaddr en0`.
+
+На Mac запустите сервер (`npm run dev` в `/Users/mikhail/alo`), затем проверьте
+`http://<IP-Mac>:3000/health/live`. iPhone и Mac должны быть в одной локальной
+сети; для Alo должен быть разрешён доступ к локальной сети. После смены IP
+обновите адрес и пересоберите приложение. Настройка `ALO_API_BASE_URL` при наличии
+имеет приоритет; Release по-прежнему требует HTTPS.
 
 ## Архитектура
 

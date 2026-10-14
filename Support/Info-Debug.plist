@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.alo.ios.links</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>alo</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>AloAPIBaseURL</key>
+	<string>$(ALO_API_BASE_URL)</string>
+	<key>AloAppLinkBaseURL</key>
+	<string>$(ALO_APP_LINK_BASE_URL)</string>
+	<key>AloCertificatePins</key>
+	<string>$(ALO_CERTIFICATE_PINS)</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<!-- Debug only: release uses Support/Info.plist and HTTPS exclusively. -->
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Alo использует камеру для записи кружков, видеозвонков и сканирования QR-кода входа по вашему действию.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Alo использует микрофон для голосовых сообщений и звонков.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Alo подключается к локальному серверу разработки на вашем Mac.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Alo сохраняет выбранные фото и видео из постов в медиатеку по вашему действию.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Alo использует галерею для отправки фото и видео в чатах.</string>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+		<string>remote-notification</string>
+		<string>voip</string>
+	</array>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+</dict>
+</plist>

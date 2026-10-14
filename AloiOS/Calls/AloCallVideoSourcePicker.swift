@@ -25,6 +25,29 @@ enum AloCallVideoSource: Int, CaseIterable, Identifiable {
     var usesFrontCamera: Bool {
         self == .frontCamera
     }
+
+    static func current(for call: AloDirectCallState) -> AloCallVideoSource {
+        if call.isScreenSharing {
+            return .screen
+        }
+        return call.isFrontCamera ? .frontCamera : .backCamera
+    }
+}
+
+enum AloCallVideoControlAction: Equatable {
+    case presentSources
+    case disableCamera
+    case stopScreenShare
+
+    static func resolve(for call: AloDirectCallState) -> Self {
+        if call.isScreenSharing {
+            return .stopScreenShare
+        }
+        if call.isVideoEnabled {
+            return .disableCamera
+        }
+        return .presentSources
+    }
 }
 
 struct AloCallVideoSourcePicker: View {
@@ -38,6 +61,7 @@ struct AloCallVideoSourcePicker: View {
 
     @State private var selectedSource: AloCallVideoSource
     @State private var isVisible = false
+    @GestureState private var dismissTranslation: CGFloat = 0
 
     init(
         coordinator: AloCallCoordinator,
@@ -60,7 +84,11 @@ struct AloCallVideoSourcePicker: View {
         GeometryReader { geometry in
             ZStack(alignment: .bottom) {
                 Color.black
-                    .opacity(isVisible ? 0.5 : 0)
+                    .opacity(
+                        isVisible
+                            ? 0.5 * (1 - min(dismissTranslation / 420, 0.7))
+                            : 0
+                    )
                     .ignoresSafeArea()
                     .contentShape(Rectangle())
                     .onTapGesture(perform: close)
@@ -75,7 +103,13 @@ struct AloCallVideoSourcePicker: View {
                         geometry.size.height - safeAreaInsets.top - 8
                     )
                 )
-                .offset(y: isVisible ? 0 : geometry.size.height)
+                .offset(
+                    y: isVisible
+                        ? max(0, dismissTranslation)
+                        : geometry.size.height
+                )
+                .simultaneousGesture(horizontalSourceGesture)
+                .simultaneousGesture(verticalDismissGesture)
             }
         }
         .ignoresSafeArea()
@@ -170,16 +204,30 @@ struct AloCallVideoSourcePicker: View {
         AloCallVideoRenderer(
             coordinator: coordinator,
             isLocal: true,
-            mirrored: selectedSource != .backCamera
+            mirrored: selectedSource != .backCamera,
+            transitioning: coordinator.isCameraStarting
+                || coordinator.isCameraSwitching
         )
-        .scaleEffect(selectedSource == .screen ? 1.08 : 1)
-        .blur(radius: selectedSource == .screen ? 24 : 0)
+        .scaleEffect(
+            selectedSource == .screen
+                ? 1.08
+                : (coordinator.isCameraSwitching ? 1.015 : 1)
+        )
+        .blur(
+            radius: selectedSource == .screen
+                ? 24
+                : (coordinator.isCameraSwitching ? 1.5 : 0)
+        )
         .overlay {
             if selectedSource == .screen {
                 Color.black.opacity(0.22)
             }
         }
         .animation(.easeInOut(duration: 0.3), value: selectedSource)
+        .animation(
+            .easeInOut(duration: 0.22),
+            value: coordinator.isCameraSwitching
+        )
         .accessibilityIdentifier("alo.call-video-source-preview")
     }
 
@@ -232,6 +280,54 @@ struct AloCallVideoSourcePicker: View {
         }
     }
 
+    private var horizontalSourceGesture: some Gesture {
+        DragGesture(minimumDistance: 18)
+            .onEnded { value in
+                guard abs(value.translation.width) >
+                        abs(value.translation.height) * 1.2 else {
+                    return
+                }
+                let projected = value.predictedEndTranslation.width
+                if projected < -44 {
+                    selectSource(rawValue: selectedSource.rawValue + 1)
+                } else if projected > 44 {
+                    selectSource(rawValue: selectedSource.rawValue - 1)
+                }
+            }
+    }
+
+    private var verticalDismissGesture: some Gesture {
+        DragGesture(minimumDistance: 8)
+            .updating($dismissTranslation) { value, state, _ in
+                guard value.translation.height > 0,
+                      abs(value.translation.height) >
+                        abs(value.translation.width) else {
+                    return
+                }
+                state = value.translation.height
+            }
+            .onEnded { value in
+                guard value.translation.height > 0,
+                      abs(value.translation.height) >
+                        abs(value.translation.width) else {
+                    return
+                }
+                if value.translation.height > 84 ||
+                    value.predictedEndTranslation.height > 180 {
+                    close()
+                }
+            }
+    }
+
+    private func selectSource(rawValue: Int) {
+        guard let source = AloCallVideoSource(rawValue: rawValue) else {
+            return
+        }
+        withAnimation(.easeInOut(duration: 0.22)) {
+            selectedSource = source
+        }
+    }
+
     private func confirm() {
         let source = selectedSource
         withAnimation(.easeInOut(duration: 0.3)) {
@@ -245,7 +341,6 @@ struct AloCallVideoSourcePicker: View {
 
 private struct AloCallVideoSourceWheel: View {
     @Binding var selection: AloCallVideoSource
-    @GestureState private var dragOffset: CGFloat = 0
 
     private let itemWidth: CGFloat = 174
 
@@ -294,24 +389,9 @@ private struct AloCallVideoSourceWheel: View {
             .position(x: geometry.size.width / 2, y: 18)
             .offset(
                 x: -CGFloat(selection.rawValue - 1) * itemWidth
-                    + dragOffset
             )
             .animation(.easeInOut(duration: 0.2), value: selection)
             .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 10)
-                    .updating($dragOffset) { value, state, _ in
-                        state = value.translation.width
-                    }
-                    .onEnded { value in
-                        let projected = value.predictedEndTranslation.width
-                        if projected < -36 {
-                            select(rawValue: selection.rawValue + 1)
-                        } else if projected > 36 {
-                            select(rawValue: selection.rawValue - 1)
-                        }
-                    }
-            )
         }
         .clipped()
         .mask(
@@ -328,10 +408,4 @@ private struct AloCallVideoSourceWheel: View {
         )
     }
 
-    private func select(rawValue: Int) {
-        guard let source = AloCallVideoSource(rawValue: rawValue) else {
-            return
-        }
-        selection = source
-    }
 }
