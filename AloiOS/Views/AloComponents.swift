@@ -1,15 +1,21 @@
 import SwiftUI
 import UIKit
+import AVKit
 
 struct AloPressBounceButtonStyle: ButtonStyle {
-    var pressedScale: CGFloat = 0.92
+    var pressedScale: CGFloat = 0.96
+    private var accessibility = AloVisualAccessibility()
+
+    init(pressedScale: CGFloat = 0.96) {
+        self.pressedScale = pressedScale
+    }
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? pressedScale : 1)
-            .opacity(configuration.isPressed ? 0.9 : 1)
+            .scaleEffect(configuration.isPressed && !accessibility.reduceMotion ? pressedScale : 1)
+            .opacity(configuration.isPressed ? 0.92 : 1)
             .animation(
-                .spring(response: 0.25, dampingFraction: 0.50, blendDuration: 0.04),
+                configuration.isPressed || accessibility.reduceMotion ? nil : AloPressFeedback.release,
                 value: configuration.isPressed
             )
     }
@@ -18,12 +24,18 @@ struct AloPressBounceButtonStyle: ButtonStyle {
 private struct AloTouchBounceModifier: ViewModifier {
     let pressedScale: CGFloat
     @GestureState private var isPressed = false
+    private var accessibility = AloVisualAccessibility()
+
+    init(pressedScale: CGFloat) {
+        self.pressedScale = pressedScale
+    }
 
     func body(content: Content) -> some View {
         content
-            .scaleEffect(isPressed ? pressedScale : 1)
+            .scaleEffect(isPressed && !accessibility.reduceMotion ? pressedScale : 1)
+            .opacity(isPressed ? 0.92 : 1)
             .animation(
-                .spring(response: 0.26, dampingFraction: 0.52, blendDuration: 0.04),
+                isPressed || accessibility.reduceMotion ? nil : AloPressFeedback.release,
                 value: isPressed
             )
             .simultaneousGesture(
@@ -39,13 +51,170 @@ extension View {
     }
 }
 
+struct AloInteractiveBackGesture: UIViewRepresentable {
+    var isEnabled = true
+    let onBegan: () -> Void
+    let onChanged: (CGFloat) -> Void
+    let onEnded: (_ translation: CGFloat, _ velocity: CGFloat) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(owner: self)
+    }
+
+    func makeUIView(context: Context) -> InstallerView {
+        let view = InstallerView()
+        view.isUserInteractionEnabled = false
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateUIView(_ uiView: InstallerView, context: Context) {
+        context.coordinator.owner = self
+        context.coordinator.recognizer.isEnabled = isEnabled
+        uiView.scheduleInstallation()
+    }
+
+    static func dismantleUIView(_ uiView: InstallerView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
+    final class InstallerView: UIView {
+        weak var coordinator: Coordinator?
+
+        override func didMoveToSuperview() {
+            super.didMoveToSuperview()
+            scheduleInstallation()
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            scheduleInstallation()
+        }
+
+        func scheduleInstallation() {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let superview else { return }
+                coordinator?.attach(to: superview)
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var owner: AloInteractiveBackGesture
+        weak var attachedView: UIView?
+
+        lazy var recognizer: UIPanGestureRecognizer = {
+            let recognizer = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+            recognizer.maximumNumberOfTouches = 1
+            // Ordinary controls keep their normal touch lifecycle. The pan becomes
+            // exclusive only after UIKit establishes a rightward horizontal drag.
+            recognizer.cancelsTouchesInView = false
+            recognizer.delaysTouchesBegan = false
+            recognizer.delegate = self
+            return recognizer
+        }()
+
+        init(owner: AloInteractiveBackGesture) {
+            self.owner = owner
+        }
+
+        func attach(to view: UIView) {
+            guard attachedView !== view else { return }
+            detach()
+            attachedView = view
+            view.addGestureRecognizer(recognizer)
+        }
+
+        func detach() {
+            attachedView?.removeGestureRecognizer(recognizer)
+            attachedView = nil
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard owner.isEnabled,
+                  let pan = gestureRecognizer as? UIPanGestureRecognizer else { return false }
+            let velocity = pan.velocity(in: pan.view)
+            // Start even for a slow, intentional pull, while keeping vertical
+            // scrolling as the stronger gesture when the direction is ambiguous.
+            return velocity.x > 10 && abs(velocity.x) > abs(velocity.y) * 1.12
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            // Buttons, text inputs and horizontal carousels own their gestures.
+            // The interactive back gesture stays available across the rest of
+            // the conversation, including its vertical message list.
+            var view = touch.view
+            while let current = view {
+                if current is UIControl || current is UITextField || current is UITextView {
+                    return false
+                }
+                if let scrollView = current as? UIScrollView,
+                   scrollView.contentSize.width > scrollView.bounds.width + 1 {
+                    return false
+                }
+                view = current.superview
+            }
+            return true
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            // The message history owns vertical scrolling. Allow its pan to
+            // coexist with our direction-gated recognizer so a rightward
+            // back-swipe can begin anywhere in the chat instead of being
+            // swallowed by the ScrollView's pan gesture.
+            otherGestureRecognizer is UIPanGestureRecognizer
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            false
+        }
+
+        @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
+            let translation = max(0, recognizer.translation(in: recognizer.view).x)
+            switch recognizer.state {
+            case .began:
+                owner.onBegan()
+                owner.onChanged(translation)
+            case .changed:
+                owner.onChanged(translation)
+            case .ended:
+                owner.onEnded(translation, recognizer.velocity(in: recognizer.view).x)
+            case .cancelled, .failed:
+                // Cancellation always returns to the current screen.
+                owner.onEnded(0, 0)
+            default:
+                break
+            }
+        }
+    }
+}
+
+/// The API client without the whole app model. Views that only need to resolve media URLs read
+/// this, so they are not re-rendered on every app-wide change (avatars and posts are everywhere).
+private struct AloAPIClientKey: EnvironmentKey {
+    static let defaultValue: AloAPIClient? = nil
+}
+
+extension EnvironmentValues {
+    var aloAPIClient: AloAPIClient? {
+        get { self[AloAPIClientKey.self] }
+        set { self[AloAPIClientKey.self] = newValue }
+    }
+}
+
 struct AloAvatar: View {
     let name: String
     let url: String
     let size: CGFloat
     let colorSeed: String
 
-    @EnvironmentObject private var app: AloAppModel
+    @Environment(\.aloAPIClient) private var api
 
     init(name: String, url: String, size: CGFloat = 46, colorSeed: String? = nil) {
         self.name = name
@@ -57,7 +226,7 @@ struct AloAvatar: View {
     var body: some View {
         ZStack {
             Circle().fill(placeholderGradient)
-            if let imageUrl = app.api.absoluteURL(url), !url.isEmpty {
+            if let imageUrl = api?.absoluteURL(url), !url.isEmpty {
                 AloAsyncImage(url: imageUrl) { phase in
                     switch phase {
                     case .success(let image):
@@ -95,7 +264,8 @@ struct AloAvatar: View {
 }
 
 private enum AloAvatarPalette {
-    // Telegram's seven default avatar gradients. The lighter color is drawn at the top.
+    // The original letter-avatar palette is deliberately bright and distinct.
+    // It keeps inbox rows identifiable without adding color to the page chrome.
     private static let pairs: [(UInt32, UInt32)] = [
         (0xff516a, 0xff885e),
         (0xffa85c, 0xffcd6a),
@@ -145,8 +315,7 @@ struct AloIconButton: View {
                 .foregroundStyle(AloTheme.text)
                 .frame(width: 46, height: 46)
                 .background {
-                    Circle().fill(.ultraThinMaterial)
-                    Circle().fill(AloTheme.surfaceRaised.opacity(0.72))
+                    Circle().fill(AloTheme.surfaceRaised)
                 }
                 .clipShape(Circle())
                 .overlay(Circle().stroke(AloTheme.border, lineWidth: 1))
@@ -202,11 +371,11 @@ struct AloPostCard: View {
     let post: AloPost
     let onLike: () -> Void
     var onComment: () -> Void = {}
+    var onRepost: () -> Void = {}
     var onAuthor: () -> Void = {}
 
     @EnvironmentObject private var app: AloAppModel
     @State private var isDeleteConfirmationPresented = false
-    @State private var likePulse = false
 
     private var canDelete: Bool {
         guard let currentUserId = app.bootstrap?.me.id else { return false }
@@ -214,93 +383,104 @@ struct AloPostCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Button(action: onAuthor) {
-                    HStack(spacing: 10) {
-                                    AloAvatar(
-                                        name: post.author.name,
-                                        url: post.author.avatarUrl,
-                                        size: 42,
-                                        colorSeed: String(post.author.id)
-                                    )
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 5) {
-                                Text(post.author.name)
-                                    .font(.system(size: 17, weight: .bold))
-                                if post.author.verified {
-                                    Image(systemName: "checkmark.seal.fill")
-                                        .font(.system(size: 15, weight: .bold))
-                                        .foregroundStyle(AloTheme.accent)
+        VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    Button(action: onAuthor) {
+                        HStack(spacing: 10) {
+                            AloAvatar(
+                                name: post.author.name,
+                                url: post.author.avatarUrl,
+                                size: 40,
+                                colorSeed: String(post.author.id)
+                            )
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 5) {
+                                    Text(post.author.name)
+                                        .font(.system(size: 17, weight: .bold))
+                                    if post.author.verified {
+                                        Image(systemName: "checkmark.seal.fill")
+                                            .font(.system(size: 15, weight: .bold))
+                                            .foregroundStyle(AloTheme.accent)
+                                    }
                                 }
+                                Text(postMeta)
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(AloTheme.muted)
                             }
-                            Text(post.author.username.withAtPrefix)
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(AloTheme.muted)
                         }
+                        .contentShape(Rectangle())
                     }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                Spacer()
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text(shortDate(post.createdAt))
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(AloTheme.muted)
+                    .buttonStyle(.plain)
+                    Spacer()
                     Button {
                         isDeleteConfirmationPresented = true
                     } label: {
                         Image(systemName: "ellipsis")
                             .font(.system(size: 17, weight: .bold))
                             .foregroundStyle(AloTheme.muted)
-                            .frame(width: 34, height: 26)
+                            .frame(width: 44, height: 44)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Действия с постом")
                 }
-            }
 
-            if !post.body.isEmpty {
-                Text(post.body)
-                    .font(.system(size: 18, weight: .regular))
-                    .foregroundStyle(AloTheme.text)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            if !post.media.isEmpty {
-                AloPostMediaGrid(media: post.media)
-            }
-
-            HStack(spacing: 22) {
-                Button {
-                    withAnimation(.spring(response: 0.18, dampingFraction: 0.62)) {
-                        likePulse = true
-                    }
-                    onLike()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
-                        withAnimation(.spring(response: 0.22, dampingFraction: 0.78)) {
-                            likePulse = false
-                        }
-                    }
-                } label: {
-                    Label("\(post.likeCount)", systemImage: post.viewerLiked ? "heart.fill" : "heart")
-                        .foregroundStyle(post.viewerLiked ? Color(red: 1, green: 0.32, blue: 0.42) : AloTheme.muted)
+                if !post.body.isEmpty {
+                    let markup = AloMessageMarkup.parse(post.body)
+                    AloRichMessageText(body: markup.body, entities: markup.entities)
+                        .accessibilityIdentifier("alo.post.body.\(post.id)")
                 }
-                .scaleEffect(likePulse ? 1.16 : 1)
-                Button(action: onComment) {
-                    Label("\(post.commentCount)", systemImage: "bubble.left")
+
+                if !post.media.isEmpty {
+                    AloPostMediaGrid(media: post.media)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("alo.post.media.\(post.id)")
+                }
+
+                if !post.authorSignature.isEmpty {
+                    Text(post.authorSignature)
+                        .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(AloTheme.muted)
                 }
-                Label("\(post.repostCount)", systemImage: "arrow.2.squarepath")
-                    .foregroundStyle(AloTheme.muted)
-                Spacer()
-                Label("\(post.viewCount)", systemImage: "eye")
-                    .foregroundStyle(AloTheme.muted)
             }
-            .font(.system(size: 15, weight: .semibold))
+
+            HStack(spacing: 8) {
+                Button(action: onLike) {
+                    AloPostActionLabel(count: post.likeCount, icon: post.viewerLiked ? "heart.fill" : "heart",
+                        selected: post.viewerLiked, tint: Color(red: 1, green: 0.32, blue: 0.42))
+                }
+                .accessibilityLabel(post.viewerLiked ? "Убрать лайк" : "Поставить лайк")
+                .accessibilityValue("\(post.likeCount)")
+                .accessibilityIdentifier("alo.post.like.\(post.id)")
+                Button(action: onComment) {
+                    AloPostActionLabel(count: post.commentCount, icon: post.commentsEnabled ? "bubble.left" : "lock.fill")
+                }
+                .disabled(!post.commentsEnabled)
+                .accessibilityLabel(post.commentsEnabled ? "Комментарии" : "Комментарии отключены")
+                .accessibilityValue("\(post.commentCount)")
+                .accessibilityIdentifier("alo.post.comments.\(post.id)")
+                Button(action: onRepost) {
+                    AloPostActionLabel(count: post.repostCount, icon: "arrow.2.squarepath", selected: post.viewerReposted)
+                }
+                .disabled(app.isRepostPending(post.id))
+                .accessibilityLabel(post.viewerReposted ? "Убрать репост" : "Сделать репост")
+                .accessibilityValue("\(post.repostCount)")
+                .accessibilityIdentifier("alo.post.repost.\(post.id)")
+                AloPostActionLabel(count: post.viewCount, icon: "eye", alignment: .trailing)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Просмотры")
+                    .accessibilityValue("\(post.viewCount)")
+            }
+            .buttonStyle(AloChatPressStyle())
         }
-        .padding(14)
-        .aloCard(radius: 22)
+        .padding(.top, AloTheme.spacingMedium)
+        .padding(.bottom, 2)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(AloTheme.feedDivider)
+                .frame(height: 1)
+        }
         .confirmationDialog(
             "Пост",
             isPresented: $isDeleteConfirmationPresented,
@@ -316,10 +496,12 @@ struct AloPostCard: View {
             }
             Button("Отмена", role: .cancel) {}
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("alo.post.card.\(post.id)")
     }
 
     private func copyPostLink() {
-        UIPasteboard.general.string = app.api.appURL("/posts/\(post.id)").absoluteString
+        UIPasteboard.general.string = AloDeepLinkTarget.postURL(postId: post.id)?.absoluteString
         app.notice = "Ссылка на пост скопирована."
     }
 
@@ -328,12 +510,58 @@ struct AloPostCard: View {
         guard value.count == 10 else { return value }
         return String(value.suffix(5))
     }
+
+    private var postMeta: String {
+        let username = post.author.username.withAtPrefix
+        let date = shortDate(post.createdAt)
+        if username.isEmpty { return date }
+        if date.isEmpty { return username }
+        return "\(username) · \(date)"
+    }
+}
+
+/// Equal action columns isolate count updates from post and neighbour geometry.
+struct AloPostActionLabel: View {
+    private var accessibility = AloVisualAccessibility()
+    let count: Int
+    let icon: String
+    var selected = false
+    var tint: Color = AloTheme.accent
+    var alignment: Alignment = .leading
+    var iconSize: CGFloat = 15
+
+    init(count: Int, icon: String, selected: Bool = false, tint: Color = AloTheme.accent,
+         alignment: Alignment = .leading, iconSize: CGFloat = 15) {
+        self.count = count; self.icon = icon; self.selected = selected
+        self.tint = tint; self.alignment = alignment; self.iconSize = iconSize
+    }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: iconSize, weight: selected ? .semibold : .regular))
+                .frame(width: max(20, iconSize + 2))
+                .symbolEffect(.bounce, options: .nonRepeating, value: accessibility.reduceMotion ? false : selected)
+            Text(AloCompactCount.string(count))
+                .font(.system(size: 13, weight: .medium))
+                .monospacedDigit()
+                .lineLimit(1)
+                .fixedSize()
+                .contentTransition(accessibility.reduceMotion ? .identity : .numericText())
+                .animation(accessibility.reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85), value: count)
+        }
+        .foregroundStyle(selected ? tint : AloTheme.muted)
+        .frame(maxWidth: .infinity, minHeight: 44, alignment: alignment)
+        .contentShape(Rectangle())
+    }
 }
 
 struct AloPostMediaGrid: View {
     let media: [AloMediaItem]
+    var timeline = false
 
-    @EnvironmentObject private var app: AloAppModel
+    // Only the API client: a grid is in every post, it must not follow every app change.
+    @Environment(\.aloAPIClient) private var api
     @State private var selectedMedia: AloMediaItem?
 
     var body: some View {
@@ -344,7 +572,7 @@ struct AloPostMediaGrid: View {
             case 1:
                 mediaCell(media[0])
                     .frame(maxWidth: .infinity)
-                    .frame(height: 260)
+                    .aspectRatio(AloPostMediaSizing.ratio(for: knownDimensions(media[0])), contentMode: .fit)
             case 2:
                 HStack(spacing: 2) {
                     mediaCell(media[0])
@@ -352,7 +580,7 @@ struct AloPostMediaGrid: View {
                     mediaCell(media[1])
                         .frame(maxWidth: .infinity)
                 }
-                .frame(height: 230)
+                .aspectRatio(1.6, contentMode: .fit)
             case 3:
                 HStack(spacing: 2) {
                     mediaCell(media[0])
@@ -365,34 +593,40 @@ struct AloPostMediaGrid: View {
                     }
                     .frame(maxWidth: .infinity)
                 }
-                .frame(height: 270)
+                .aspectRatio(1, contentMode: .fit)
             default:
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 2), GridItem(.flexible(), spacing: 2)], spacing: 2) {
                     ForEach(media.prefix(4)) { item in
                         mediaCell(item)
                             .frame(maxWidth: .infinity)
-                            .frame(height: 145)
+                            .aspectRatio(1, contentMode: .fit)
                     }
                 }
             }
         }
         .frame(maxWidth: .infinity)
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: timeline ? 14 : 18, style: .continuous))
         .fullScreenCover(item: $selectedMedia) { item in
             AloPostMediaViewer(
                 media: media,
                 startItem: item,
                 onDismiss: { selectedMedia = nil }
             )
-            .environmentObject(app)
         }
+    }
+
+    /// Server size if present, else the decoded image once it is in memory.
+    private func knownDimensions(_ item: AloMediaItem) -> AloMediaDimensions? {
+        if let dimensions = item.dimensions { return dimensions }
+        guard let url = api?.absoluteURL(item.posterUrl.ifBlank(item.url)) else { return nil }
+        return AloCachedImageSize.dimensions(for: url)
     }
 
     private func mediaCell(_ item: AloMediaItem) -> some View {
         GeometryReader { proxy in
             ZStack {
                 AloTheme.background
-                if let url = app.api.absoluteURL(item.posterUrl.ifBlank(item.url)) {
+                if let url = api?.absoluteURL(item.posterUrl.ifBlank(item.url)) {
                     AloAsyncImage(url: url) { phase in
                         switch phase {
                         case .success(let image):
@@ -401,6 +635,11 @@ struct AloPostMediaGrid: View {
                                 .scaledToFill()
                                 .frame(width: proxy.size.width, height: proxy.size.height)
                                 .clipped()
+                                .accessibilityLabel("Изображение в посте")
+                                .accessibilityIdentifier("alo.post.media.loaded")
+                        case .failure:
+                            Image(systemName: "photo").foregroundStyle(AloTheme.muted)
+                                .accessibilityLabel("Не удалось загрузить изображение")
                         default:
                             ProgressView().tint(AloTheme.accent)
                         }
@@ -433,50 +672,75 @@ private struct AloPostMediaViewer: View {
 
     @EnvironmentObject private var app: AloAppModel
     @Environment(\.openURL) private var openURL
-    @State private var selectedURL: String
+    /// Pages are addressed by position: a post may contain the same photo twice, and URL tags then
+    /// made the pager snap back to the first copy (the "shaking" swipe that never turned the page).
+    @State private var selectedIndex: Int
     @State private var notice: String?
+    @State private var isZoomed = false
+    @State private var chromeHidden = false
+    @State private var chromeToken = 0
+    @State private var dismissState = AloViewerDismissState()
 
     init(media: [AloMediaItem], startItem: AloMediaItem, onDismiss: @escaping () -> Void) {
         self.media = media
         self.startItem = startItem
         self.onDismiss = onDismiss
-        _selectedURL = State(initialValue: startItem.url)
+        _selectedIndex = State(initialValue: media.firstIndex(where: { $0.id == startItem.id })
+            ?? media.firstIndex(where: { $0.url == startItem.url }) ?? 0)
     }
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            Color.black.opacity(1 - dismissState.progress).ignoresSafeArea()
 
-            TabView(selection: $selectedURL) {
-                ForEach(media) { item in
-                    viewerContent(for: item)
-                        .tag(item.url)
+            TabView(selection: $selectedIndex) {
+                ForEach(media.indices, id: \.self) { index in
+                    viewerContent(for: media[index], isActive: index == selectedIndex)
+                        .tag(index)
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: media.count > 1 ? .automatic : .never))
+            .ignoresSafeArea()
+            .modifier(AloViewerDismissModifier(state: $dismissState))
 
-            HStack {
-                Spacer()
-                actionRail
-                    .padding(.trailing, 16)
-            }
-
+            // Telegram-style: one quiet top bar (close, position, menu). It hides itself after a few
+            // seconds, while zoomed, and on a single tap; a tap brings it back.
             VStack {
-                HStack {
-                    Button(action: onDismiss) {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 30, weight: .bold))
-                            .foregroundStyle(Color.white.opacity(0.88))
-                            .frame(width: 48, height: 48)
+                HStack(spacing: 10) {
+                    viewerCircle("chevron.left", label: "Закрыть медиа", identifier: "alo.post.viewer.close", action: onDismiss)
+                    Spacer(minLength: 0)
+                    if media.count > 1 {
+                        Text("\(min(selectedIndex, media.count - 1) + 1) из \(media.count)")
+                            .font(.system(size: 15, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14).frame(height: 36)
+                            .modifier(AloChatGlass(interactive: false, role: .chrome))
+                    }
+                    Spacer(minLength: 0)
+                    Menu {
+                        if let url = currentAbsoluteURL {
+                            ShareLink(item: url) { Label("Поделиться", systemImage: "square.and.arrow.up") }
+                        }
+                        Button { copyCurrentLink() } label: { Label("Скопировать ссылку", systemImage: "link") }
+                        Button { saveCurrentMedia() } label: { Label("Сохранить", systemImage: "arrow.down.to.line") }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 40, height: 40)
+                            .modifier(AloChatGlass(interactive: false, role: .chrome))
+                            .frame(width: 44, height: 44)
                             .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
-                    Spacer()
+                    .accessibilityLabel("Действия с медиа")
+                    .accessibilityIdentifier("alo.post.viewer.menu")
                 }
-                .padding(.horizontal, 18)
-                .padding(.top, 18)
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
                 Spacer()
             }
+            .opacity(chromeHidden || dismissState.offset != 0 ? 0 : 1)
+            .allowsHitTesting(!chromeHidden)
 
             if let notice {
                 VStack {
@@ -493,21 +757,40 @@ private struct AloPostMediaViewer: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
         }
+        // The feed shows through while the photo is dragged away.
+        .presentationBackground(.clear)
+        .task(id: chromeToken) {
+            guard !chromeHidden else { return }
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeInOut(duration: 0.25)) { chromeHidden = true }
+        }
+        .onChange(of: isZoomed) { _, zoomed in
+            withAnimation(.easeInOut(duration: 0.2)) { chromeHidden = zoomed }
+            if !zoomed { chromeToken += 1 }
+        }
+        .onChange(of: selectedIndex) { _, _ in
+            chromeHidden = false
+            chromeToken += 1
+        }
     }
 
     @ViewBuilder
-    private func viewerContent(for item: AloMediaItem) -> some View {
-        if let url = app.api.absoluteURL(item.posterUrl.ifBlank(item.url)) {
-            AloAsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let image):
-                    image
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                default:
-                    ProgressView()
-                        .tint(AloTheme.accent)
+    private func viewerContent(for item: AloMediaItem, isActive: Bool) -> some View {
+        if item.type == "video", let url = app.api.absoluteURL(item.url) {
+            AloTimelineVideoPlayer(url: url, isActive: isActive, dismiss: dismissDrag)
+        } else if let url = app.api.absoluteURL(item.posterUrl.ifBlank(item.url)) {
+            // Pinch, double-tap and pan; a single tap hides or shows the controls.
+            AloZoomableImagePage(url: url, isActive: isActive,
+                onZoomChanged: { isZoomed = $0 },
+                onSingleTap: { withAnimation(.easeInOut(duration: 0.2)) { chromeHidden.toggle() }; chromeToken += 1 },
+                dismiss: dismissDrag) { failed in
+                if failed {
+                    ContentUnavailableView("Не удалось открыть медиа", systemImage: "photo",
+                        description: Text("Проверь соединение и открой вложение ещё раз."))
+                        .foregroundStyle(AloTheme.muted)
+                } else {
+                    ProgressView().tint(AloTheme.accent)
                 }
             }
         } else {
@@ -516,46 +799,34 @@ private struct AloPostMediaViewer: View {
         }
     }
 
-    private var actionRail: some View {
-        VStack(spacing: 12) {
-            if let url = currentAbsoluteURL {
-                ShareLink(item: url) {
-                    railIcon("square.and.arrow.up")
-                }
-                .buttonStyle(.plain)
+    private var dismissDrag: AloViewerDismissDrag {
+        AloViewerDismissDrag(changed: { dismissState.offset = $0 }, ended: { translation, velocity in
+            if AloViewerDismissState.shouldDismiss(translation: translation, velocity: velocity) {
+                withAnimation(.easeOut(duration: 0.2)) { dismissState.offset = translation >= 0 ? 1_000 : -1_000 }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { onDismiss() }
+            } else {
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { dismissState.offset = 0 }
             }
-
-            Button {
-                copyCurrentLink()
-            } label: {
-                railIcon("link")
-            }
-            .buttonStyle(.plain)
-
-            Button {
-                saveCurrentMedia()
-            } label: {
-                railIcon("arrow.down.to.line")
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 6)
-        .background(Color.black.opacity(0.42))
-        .clipShape(Capsule())
+        })
     }
 
-    private func railIcon(_ systemName: String) -> some View {
-        Image(systemName: systemName)
-            .font(.system(size: 18, weight: .bold))
-            .foregroundStyle(.white)
-            .frame(width: 42, height: 42)
-            .background(Color.white.opacity(0.10))
-            .clipShape(Circle())
+    private func viewerCircle(_ systemName: String, label: String, identifier: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 40, height: 40)
+                .modifier(AloChatGlass(interactive: false, role: .chrome))
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(AloControlPressStyle())
+        .accessibilityLabel(label)
+        .accessibilityIdentifier(identifier)
     }
 
     private var currentItem: AloMediaItem? {
-        media.first(where: { $0.url == selectedURL }) ?? media.first
+        media.indices.contains(selectedIndex) ? media[selectedIndex] : media.first
     }
 
     private var currentAbsoluteURL: URL? {

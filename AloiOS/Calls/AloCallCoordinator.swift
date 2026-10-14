@@ -13,6 +13,7 @@ final class AloCallCoordinator: NSObject, ObservableObject {
     @Published private(set) var isScreenShareStarting = false
     @Published private(set) var isCameraStarting = false
     @Published private(set) var isCameraSwitching = false
+    let groupCall: AloGroupCallCoordinator
 
     private weak var app: AloAppModel?
     private let api: AloAPIClient
@@ -20,6 +21,7 @@ final class AloCallCoordinator: NSObject, ObservableObject {
     private let callController = CXCallController()
     private let tonePlayer = AloCallTonePlayer()
     private var pollTask: Task<Void, Never>?
+    private var heartbeatTask: Task<Void, Never>?
     private var ringTimeoutTask: Task<Void, Never>?
     private var disconnectTimeoutTask: Task<Void, Never>?
     private var reconnectAttemptTask: Task<Void, Never>?
@@ -27,17 +29,20 @@ final class AloCallCoordinator: NSObject, ObservableObject {
     private var terminalDismissTask: Task<Void, Never>?
     private var rtcConfiguration: AloRTCConfiguration?
     private var client: AloWebRTCCallClient?
-    private weak var localVideoRenderer: RTCVideoRenderer?
-    private weak var remoteVideoRenderer: RTCVideoRenderer?
+    private let localVideoRenderers = AloVideoRendererRegistry()
+    private let remoteVideoRenderers = AloVideoRendererRegistry()
     private var lastSignalId = 0
+    private var isRefreshingSignals = false
     private var remoteTermination = false
     private var resumeCameraAfterScreenShare = false
     private var videoSourcePreviewGeneration = 0
+    private var pendingPreviewFrontCamera: Bool?
     private var securityHandshake: AloCallSecurityHandshake?
 
     init(api: AloAPIClient, app: AloAppModel) {
         self.api = api
         self.app = app
+        self.groupCall = AloGroupCallCoordinator(api: api, app: app)
         let configuration = CXProviderConfiguration()
         configuration.supportsVideo = true
         configuration.maximumCallsPerCallGroup = 1
@@ -55,35 +60,76 @@ final class AloCallCoordinator: NSObject, ObservableObject {
     }
 
     func startPolling() {
+        groupCall.startPolling()
         guard pollTask == nil else { return }
         pollTask = Task { [weak self] in
             guard let self else { return }
-            var retryDelay: UInt64 = 900_000_000
+            var retryDelay: UInt64 = 500_000_000
             while !Task.isCancelled {
+                await refreshDirectSignals()
+                await groupCall.refreshSignals()
                 do {
-                    let signals = try await api.pollDirectCallSignals(
-                        afterId: lastSignalId,
-                        activeCallId: activeCall?.id
-                    )
-                    if let maxId = signals.map(\.id).max() {
-                        lastSignalId = max(lastSignalId, maxId)
+                    for try await event in api.callEventStream() {
+                        if Task.isCancelled { return }
+                        if event.name == "call_ready" {
+                            await refreshDirectSignals()
+                            await groupCall.refreshSignals()
+                            retryDelay = 500_000_000
+                        } else if event.name == "call_signal_available" {
+                            if event.payload.string("channel") == "group" {
+                                await groupCall.refreshSignals()
+                            } else {
+                                await refreshDirectSignals()
+                            }
+                            retryDelay = 500_000_000
+                        }
                     }
-                    await process(signals)
-                    retryDelay = 900_000_000
                 } catch let error as AloAPIError {
                     if error.status == 401 { break }
-                    retryDelay = min(retryDelay * 2, 8_000_000_000)
                 } catch {
-                    retryDelay = min(retryDelay * 2, 8_000_000_000)
+                    // Offline calls reconnect from the persisted database cursor.
                 }
                 try? await Task.sleep(nanoseconds: retryDelay)
+                retryDelay = min(retryDelay * 2, 20_000_000_000)
+            }
+        }
+        heartbeatTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                if Task.isCancelled { return }
+                if let callId = activeCall?.id, callId > 0 {
+                    try? await api.heartbeatDirectCall(callId: callId)
+                }
+                await refreshDirectSignals()
             }
         }
     }
 
+    private func refreshDirectSignals() async {
+        guard !isRefreshingSignals else { return }
+        isRefreshingSignals = true
+        defer { isRefreshingSignals = false }
+        do {
+            let signals = try await api.pollDirectCallSignals(
+                afterId: lastSignalId,
+                activeCallId: nil
+            )
+            if let maxId = signals.map(\.id).max() {
+                lastSignalId = max(lastSignalId, maxId)
+            }
+            await process(signals)
+        } catch {
+            // The stream reconnect and heartbeat fallback will retry.
+        }
+    }
+
     func stop() {
+        groupCall.stop()
         pollTask?.cancel()
         pollTask = nil
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
         ringTimeoutTask?.cancel()
         ringTimeoutTask = nil
         disconnectTimeoutTask?.cancel()
@@ -107,6 +153,7 @@ final class AloCallCoordinator: NSObject, ObservableObject {
         isCameraStarting = false
         isCameraSwitching = false
         resumeCameraAfterScreenShare = false
+        pendingPreviewFrontCamera = nil
         videoSourcePreviewGeneration += 1
         lastSignalId = 0
     }
@@ -146,16 +193,53 @@ final class AloCallCoordinator: NSObject, ObservableObject {
     }
 #endif
 
+    private var isStartingCall = false
+
     func startCall(conversation: AloConversationDetail, video: Bool) async {
-        guard activeCall == nil else { return }
-        guard conversation.kind != "group", conversation.peerId > 0 else {
-            app?.errorMessage = "Защищённые звонки пока доступны только в личных чатах."
+        guard !isStartingCall else { return }
+        if activeCall != nil {
+            isMinimized = false
+            return
+        }
+        guard groupCall.activeCall == nil else {
+            app?.errorMessage = "Сначала завершите текущий групповой звонок."
+            return
+        }
+        isStartingCall = true
+        defer { isStartingCall = false }
+        #if DEBUG
+        if UserDefaults.standard.bool(forKey: "ALO_UI_MESSENGER_PREVIEW"), conversation.peerId == 990002 {
+            // Exercise routing without placing a call to a real person.
+            app?.errorMessage = video ? "UI-тест: видеозвонок. Сеть не используется." : "UI-тест: аудиозвонок. Сеть не используется."
+            return
+        }
+        #endif
+        if conversation.kind == "group", conversation.roomId > 0 {
+            if conversation.groupPolicy?.kind == "channel" {
+                let rights = conversation.groupPolicy?.memberAdminRights ?? [:]
+                let canStart = conversation.groupMemberRole == "owner" || (
+                    conversation.groupMemberRole == "admin" &&
+                    (rights.isEmpty || rights["manageVideoChats"] == true)
+                )
+                guard canStart else {
+                    app?.errorMessage = "Начать видеочат канала может только администратор с соответствующим правом."
+                    return
+                }
+            }
+            await groupCall.start(conversation: conversation)
+            return
+        }
+        guard conversation.peerId > 0 else { return }
+        if app?.isUserBlocked(conversation.peerId) == true {
+            app?.errorMessage = AloDirectContactPolicy.unavailableMessage
             return
         }
         guard await requestMediaPermissions(video: video) else {
-            app?.errorMessage = video
-                ? "Для видеозвонка нужны доступ к микрофону и камере."
-                : "Для звонка нужен доступ к микрофону."
+            showMediaPermissionError(
+                video
+                    ? "Для видеозвонка разрешите Alo доступ к микрофону и камере."
+                    : "Для звонка разрешите Alo доступ к микрофону."
+            )
             return
         }
         do {
@@ -228,9 +312,11 @@ final class AloCallCoordinator: NSObject, ObservableObject {
         Task {
             guard await requestMediaPermissions(video: call.isVideo) else {
                 await decline()
-                app?.errorMessage = call.isVideo
-                    ? "Для видеозвонка нужны доступ к микрофону и камере."
-                    : "Для звонка нужен доступ к микрофону."
+                showMediaPermissionError(
+                    call.isVideo
+                        ? "Для видеозвонка разрешите Alo доступ к микрофону и камере."
+                        : "Для звонка разрешите Alo доступ к микрофону."
+                )
                 return
             }
             do {
@@ -309,7 +395,9 @@ final class AloCallCoordinator: NSObject, ObservableObject {
         Task {
             let permissionGranted = await requestCameraPermission()
             if !permissionGranted {
-                app?.errorMessage = "Для включения камеры разрешите Alo доступ к камере."
+                showMediaPermissionError(
+                    "Для включения камеры разрешите Alo доступ к камере."
+                )
                 return
             }
             guard let current = activeCall, current.id == call.id else { return }
@@ -329,12 +417,13 @@ final class AloCallCoordinator: NSObject, ObservableObject {
                     continuation.resume(returning: $0)
                 }
             }
-            guard activeCall?.id == current.id else { return }
+            guard let completedCall = activeCall, completedCall.id == current.id else { return }
             if case let .failure(error) = result {
+                client.setVideoEnabled(false)
                 app?.errorMessage = error.localizedDescription
                 return
             }
-            let updated = latest.updating(
+            let updated = completedCall.updating(
                 isSpeakerOn: true,
                 isVideoEnabled: true,
                 isScreenSharing: false
@@ -371,8 +460,9 @@ final class AloCallCoordinator: NSObject, ObservableObject {
                 guard generation == videoSourcePreviewGeneration else {
                     return
                 }
-                app?.errorMessage =
+                showMediaPermissionError(
                     "Для предпросмотра разрешите Alo доступ к камере."
+                )
                 return
             }
             guard generation == videoSourcePreviewGeneration,
@@ -417,6 +507,10 @@ final class AloCallCoordinator: NSObject, ObservableObject {
             case let .failure(error):
                 app?.errorMessage = error.localizedDescription
             }
+            drainPendingVideoSourcePreview(
+                callId: call.id,
+                generation: generation
+            )
         }
     }
 
@@ -424,9 +518,11 @@ final class AloCallCoordinator: NSObject, ObservableObject {
         guard let call = activeCall,
               !call.isVideoEnabled,
               !call.isScreenSharing,
-              call.isFrontCamera != frontCamera,
-              !isCameraStarting,
-              !isCameraSwitching else {
+              call.isFrontCamera != frontCamera else {
+            return
+        }
+        if isCameraStarting || isCameraSwitching {
+            pendingPreviewFrontCamera = frontCamera
             return
         }
 #if DEBUG
@@ -441,6 +537,7 @@ final class AloCallCoordinator: NSObject, ObservableObject {
         }
 
         let generation = videoSourcePreviewGeneration
+        pendingPreviewFrontCamera = nil
         isCameraSwitching = true
         client.setCameraPosition(frontCamera: frontCamera) { [weak self] result in
             Task { @MainActor in
@@ -460,12 +557,17 @@ final class AloCallCoordinator: NSObject, ObservableObject {
                 case let .failure(error):
                     self.app?.errorMessage = error.localizedDescription
                 }
+                self.drainPendingVideoSourcePreview(
+                    callId: call.id,
+                    generation: generation
+                )
             }
         }
     }
 
     func cancelVideoSourcePreview() {
         videoSourcePreviewGeneration += 1
+        pendingPreviewFrontCamera = nil
         isCameraStarting = false
         isCameraSwitching = false
         client?.cancelCameraPreview()
@@ -474,6 +576,7 @@ final class AloCallCoordinator: NSObject, ObservableObject {
     func commitVideoSource(_ source: AloCallVideoSource) {
         guard let call = activeCall else { return }
         videoSourcePreviewGeneration += 1
+        pendingPreviewFrontCamera = nil
         isCameraStarting = false
         isCameraSwitching = false
 #if DEBUG
@@ -489,13 +592,36 @@ final class AloCallCoordinator: NSObject, ObservableObject {
         switch source {
         case .screen:
             client?.cancelCameraPreview()
+            guard !call.isScreenSharing else { return }
             toggleScreenShare()
         case .frontCamera, .backCamera:
+            if call.isVideoEnabled, !call.isScreenSharing {
+                guard call.isFrontCamera != source.usesFrontCamera else {
+                    return
+                }
+                switchCamera()
+                return
+            }
             activeCall = call.updating(
                 isFrontCamera: source.usesFrontCamera
             )
             toggleVideo()
         }
+    }
+
+    private func drainPendingVideoSourcePreview(
+        callId: Int,
+        generation: Int
+    ) {
+        guard generation == videoSourcePreviewGeneration,
+              let target = pendingPreviewFrontCamera,
+              let call = activeCall,
+              call.id == callId else {
+            return
+        }
+        pendingPreviewFrontCamera = nil
+        guard call.isFrontCamera != target else { return }
+        previewVideoSource(frontCamera: target)
     }
 
     func toggleScreenShare() {
@@ -610,35 +736,23 @@ final class AloCallCoordinator: NSObject, ObservableObject {
     }
 
     func bindLocalRenderer(_ renderer: RTCVideoRenderer?) {
-        guard !sameRenderer(localVideoRenderer, renderer) else { return }
-        localVideoRenderer = renderer
+        guard let renderer, localVideoRenderers.insert(renderer) else { return }
         client?.bindLocalRenderer(renderer)
     }
 
     func bindRemoteRenderer(_ renderer: RTCVideoRenderer?) {
-        guard !sameRenderer(remoteVideoRenderer, renderer) else { return }
-        remoteVideoRenderer = renderer
+        guard let renderer, remoteVideoRenderers.insert(renderer) else { return }
         client?.bindRemoteRenderer(renderer)
     }
 
     func unbindLocalRenderer(_ renderer: RTCVideoRenderer) {
-        guard sameRenderer(localVideoRenderer, renderer) else { return }
-        client?.bindLocalRenderer(nil)
-        localVideoRenderer = nil
+        client?.unbindLocalRenderer(renderer)
+        localVideoRenderers.remove(renderer)
     }
 
     func unbindRemoteRenderer(_ renderer: RTCVideoRenderer) {
-        guard sameRenderer(remoteVideoRenderer, renderer) else { return }
-        client?.bindRemoteRenderer(nil)
-        remoteVideoRenderer = nil
-    }
-
-    private func sameRenderer(
-        _ lhs: RTCVideoRenderer?,
-        _ rhs: RTCVideoRenderer?
-    ) -> Bool {
-        guard let lhs, let rhs else { return lhs == nil && rhs == nil }
-        return (lhs as AnyObject) === (rhs as AnyObject)
+        client?.unbindRemoteRenderer(renderer)
+        remoteVideoRenderers.remove(renderer)
     }
 
     private func process(_ signals: [AloDirectCallSignal]) async {
@@ -710,6 +824,10 @@ final class AloCallCoordinator: NSObject, ObservableObject {
     private func handleInvite(_ signal: AloDirectCallSignal) async {
         if activeCall?.phase.isTerminal == true {
             finish(reason: .remoteEnded, terminalTone: nil)
+        }
+        if groupCall.activeCall != nil {
+            try? await api.endDirectCall(callId: signal.callId, reason: "busy")
+            return
         }
         if let activeCall {
             if activeCall.id == signal.callId { return }
@@ -1335,8 +1453,8 @@ final class AloCallCoordinator: NSObject, ObservableObject {
                 }
             }
         )
-        created.bindLocalRenderer(localVideoRenderer)
-        created.bindRemoteRenderer(remoteVideoRenderer)
+        localVideoRenderers.all.forEach { created.bindLocalRenderer($0) }
+        remoteVideoRenderers.all.forEach { created.bindRemoteRenderer($0) }
         created.setMuted(call.isMuted)
         created.setSpeakerOn(call.isSpeakerOn)
         client = created
@@ -1862,6 +1980,7 @@ final class AloCallCoordinator: NSObject, ObservableObject {
         isCameraStarting = false
         isCameraSwitching = false
         resumeCameraAfterScreenShare = false
+        pendingPreviewFrontCamera = nil
         videoSourcePreviewGeneration += 1
         if let terminalTone {
             tonePlayer.play(terminalTone)
@@ -1906,6 +2025,7 @@ final class AloCallCoordinator: NSObject, ObservableObject {
         isCameraStarting = false
         isCameraSwitching = false
         resumeCameraAfterScreenShare = false
+        pendingPreviewFrontCamera = nil
         videoSourcePreviewGeneration += 1
         app?.errorMessage = ""
         tonePlayer.prepareAudioRoute(speakerOn: call.isSpeakerOn, activate: true)
@@ -2079,6 +2199,11 @@ final class AloCallCoordinator: NSObject, ObservableObject {
         default:
             return false
         }
+    }
+
+    private func showMediaPermissionError(_ message: String) {
+        app?.shouldOfferAppSettings = true
+        app?.errorMessage = message
     }
 
     private func callUUID(callId: Int) -> UUID {

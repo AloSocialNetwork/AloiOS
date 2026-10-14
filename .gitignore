@@ -15,3 +15,8 @@ build/
 *.mobileprovision
 *.xcconfig.local
 GoogleService-Info.plist
+
+# Simulator screenshots from design reviews stay local; the notes are versioned.
+Design/**/*.png
+Design/**/*.mov
+Design/**/*.xcresult

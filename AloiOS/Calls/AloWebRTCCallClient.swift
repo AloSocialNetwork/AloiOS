@@ -33,8 +33,13 @@ final class AloWebRTCCallClient: NSObject {
     private var isCameraTransitioning = false
     private var cameraOperationGeneration = 0
     private var preferredCameraPosition: AVCaptureDevice.Position = .front
-    private weak var localRenderer: RTCVideoRenderer?
-    private weak var remoteRenderer: RTCVideoRenderer?
+    private var activeCameraPosition: AVCaptureDevice.Position?
+    private var pendingCameraRequest: (
+        position: AVCaptureDevice.Position,
+        completion: (Result<Void, Error>) -> Void
+    )?
+    private let localRenderers = AloVideoRendererRegistry()
+    private let remoteRenderers = AloVideoRendererRegistry()
 
     init(
         configuration: AloRTCConfiguration,
@@ -317,19 +322,29 @@ final class AloWebRTCCallClient: NSObject {
         frontCamera: Bool,
         completion: @escaping (Result<Void, Error>) -> Void
     ) {
-        preferredCameraPosition = frontCamera ? .front : .back
+        let requestedPosition: AVCaptureDevice.Position =
+            frontCamera ? .front : .back
+        preferredCameraPosition = requestedPosition
         guard screenCapturer == nil else {
             completion(.failure(AloCallCaptureError.screenShareActive))
             return
         }
-        guard !isCameraTransitioning else {
-            completion(.failure(AloCallCaptureError.cameraBusy))
+        if isCameraTransitioning {
+            if let pendingCameraRequest {
+                pendingCameraRequest.completion(
+                    .failure(AloCallCaptureError.operationSuperseded)
+                )
+            }
+            pendingCameraRequest = (requestedPosition, completion)
             return
         }
-        let devices = RTCCameraVideoCapturer.captureDevices()
-        guard let next = devices.first(where: { $0.position == preferredCameraPosition }),
+        guard let next = cameraDevice(for: requestedPosition),
               let format = preferredFormat(for: next) else {
             completion(.failure(AloCallCaptureError.cameraUnavailable))
+            return
+        }
+        if isCameraCapturing, activeCameraPosition == requestedPosition {
+            completion(.success(()))
             return
         }
 
@@ -372,20 +387,28 @@ final class AloWebRTCCallClient: NSObject {
     }
 
     func bindLocalRenderer(_ renderer: RTCVideoRenderer?) {
-        if let localRenderer { localPreviewTrack?.remove(localRenderer) }
-        localRenderer = renderer
-        if let renderer { localPreviewTrack?.add(renderer) }
+        guard let renderer, localRenderers.insert(renderer) else { return }
+        localPreviewTrack?.add(renderer)
     }
 
     func bindRemoteRenderer(_ renderer: RTCVideoRenderer?) {
-        if let remoteRenderer { remoteVideoTrack?.remove(remoteRenderer) }
-        remoteRenderer = renderer
-        if let renderer { remoteVideoTrack?.add(renderer) }
+        guard let renderer, remoteRenderers.insert(renderer) else { return }
+        remoteVideoTrack?.add(renderer)
+    }
+
+    func unbindLocalRenderer(_ renderer: RTCVideoRenderer) {
+        localPreviewTrack?.remove(renderer)
+        localRenderers.remove(renderer)
+    }
+
+    func unbindRemoteRenderer(_ renderer: RTCVideoRenderer) {
+        remoteVideoTrack?.remove(renderer)
+        remoteRenderers.remove(renderer)
     }
 
     func close() {
-        if let localRenderer { localPreviewTrack?.remove(localRenderer) }
-        if let remoteRenderer { remoteVideoTrack?.remove(remoteRenderer) }
+        localRenderers.all.forEach { localPreviewTrack?.remove($0) }
+        remoteRenderers.all.forEach { remoteVideoTrack?.remove($0) }
         stopCameraCapture()
         stopScreenCapture()
         peerConnection.close()
@@ -421,23 +444,35 @@ final class AloWebRTCCallClient: NSObject {
         localPreviewTrack = previewTrack
         previewTrack.isEnabled = false
         peerConnection.add(track, streamIds: ["alo-stream"])
-        if let localRenderer { previewTrack.add(localRenderer) }
+        localRenderers.all.forEach { previewTrack.add($0) }
     }
 
     private func startCameraCapture(
         completion: ((Result<Void, Error>) -> Void)? = nil
     ) {
         guard !isCameraCapturing else {
-            completion?(.success(()))
+            if activeCameraPosition == preferredCameraPosition {
+                completion?(.success(()))
+            } else {
+                setCameraPosition(
+                    frontCamera: preferredCameraPosition == .front,
+                    completion: completion ?? { _ in }
+                )
+            }
             return
         }
         guard !isCameraTransitioning else {
-            completion?(.failure(AloCallCaptureError.cameraBusy))
+            if let completion {
+                if let pendingCameraRequest {
+                    pendingCameraRequest.completion(
+                        .failure(AloCallCaptureError.operationSuperseded)
+                    )
+                }
+                pendingCameraRequest = (preferredCameraPosition, completion)
+            }
             return
         }
-        guard let device = RTCCameraVideoCapturer.captureDevices()
-            .first(where: { $0.position == preferredCameraPosition })
-                ?? RTCCameraVideoCapturer.captureDevices().first,
+        guard let device = cameraDevice(for: preferredCameraPosition),
               let format = preferredFormat(for: device) else {
             let error = AloCallCaptureError.cameraUnavailable
             onError(error.localizedDescription)
@@ -467,6 +502,13 @@ final class AloWebRTCCallClient: NSObject {
     private func stopCameraCapture() {
         cameraOperationGeneration += 1
         isCameraTransitioning = false
+        activeCameraPosition = nil
+        if let pendingCameraRequest {
+            pendingCameraRequest.completion(
+                .failure(AloCallCaptureError.operationSuperseded)
+            )
+            self.pendingCameraRequest = nil
+        }
         guard isCameraCapturing || cameraCapturer != nil else { return }
         isCameraCapturing = false
         cameraCapturer?.stopCapture()
@@ -494,14 +536,29 @@ final class AloWebRTCCallClient: NSObject {
                 self.isCameraTransitioning = false
                 if let error {
                     self.isCameraCapturing = false
+                    self.activeCameraPosition = nil
                     self.onError(error.localizedDescription)
                     completion?(.failure(error))
                 } else {
                     self.isCameraCapturing = true
+                    self.activeCameraPosition = device.position
                     completion?(.success(()))
                 }
+                self.runPendingCameraRequestIfNeeded()
             }
         }
+    }
+
+    private func runPendingCameraRequestIfNeeded() {
+        guard !isCameraTransitioning,
+              let request = pendingCameraRequest else {
+            return
+        }
+        pendingCameraRequest = nil
+        setCameraPosition(
+            frontCamera: request.position == .front,
+            completion: request.completion
+        )
     }
 
     private func stopScreenCapture() {
@@ -521,6 +578,21 @@ final class AloWebRTCCallClient: NSObject {
                 return left.width * left.height < right.width * right.height
             }
             ?? RTCCameraVideoCapturer.supportedFormats(for: device).first
+    }
+
+    private func cameraDevice(
+        for position: AVCaptureDevice.Position
+    ) -> AVCaptureDevice? {
+        if let wideAngle = AVCaptureDevice.default(
+            .builtInWideAngleCamera,
+            for: .video,
+            position: position
+        ) {
+            return wideAngle
+        }
+        return RTCCameraVideoCapturer.captureDevices().first {
+            $0.position == position
+        }
     }
 
     private func preferredFramesPerSecond(for format: AVCaptureDevice.Format) -> Int {
@@ -785,10 +857,8 @@ extension AloWebRTCCallClient: RTCPeerConnectionDelegate {
     }
 
     private func attachRemoteVideoTrack(_ track: RTCVideoTrack) {
-        if let remoteVideoTrack, let remoteRenderer {
-            remoteVideoTrack.remove(remoteRenderer)
-        }
+        remoteRenderers.all.forEach { remoteVideoTrack?.remove($0) }
         remoteVideoTrack = track
-        if let remoteRenderer { track.add(remoteRenderer) }
+        remoteRenderers.all.forEach { track.add($0) }
     }
 }

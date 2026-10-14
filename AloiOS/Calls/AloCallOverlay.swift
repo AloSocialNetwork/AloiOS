@@ -28,12 +28,22 @@ private enum AloCallVisualPalette {
     }
 }
 
-private enum AloCallLayoutMetrics {
-    static let activeButtonDiameter: CGFloat = 60
+enum AloCallLayoutMetrics {
+    // Telegram CallScreen/ButtonGroupView's active control diameter.
+    static let activeButtonDiameter: CGFloat = 56
     static let incomingButtonDiameter: CGFloat = 72
     static let buttonLabelSize: CGFloat = 13
-    static let controlsBottomSpacing: CGFloat = 36
-    static let peerAvatarSize: CGFloat = 126
+    // The 84 pt row includes a 56 pt circle + label. This backing inset
+    // leaves the circle itself 52 pt above the safe bottom, like ButtonGroupView.
+    static let controlsBottomSpacing: CGFloat = 28
+    static let activeControlBottomInset: CGFloat = 52
+    static let noticeGap: CGFloat = 16
+    static let peerAvatarSize: CGFloat = 136
+    static let activeButtonSpacing: CGFloat = 36
+
+    static func controlSpacing(availableWidth: CGFloat) -> CGFloat {
+        max(0, min(activeButtonSpacing, (availableWidth - 4 * activeButtonDiameter) / 3))
+    }
 }
 
 private enum AloCallSafeArea {
@@ -59,6 +69,10 @@ struct AloCallOverlay: View {
     @State private var callDragOffset: CGFloat = 0
     @State private var isCallDragActive = false
     @State private var isCallTransitionCompleting = false
+    @State private var callTransitionRevision = 0
+    @State private var callGestureRejected = false
+    @State private var callGestureExclusions: [CGRect] = []
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isLocalVideoPrimary = false
     @State private var isSafetyDetailsPresented = false
     @State private var isVideoSourcePickerPresented = false
@@ -82,7 +96,7 @@ struct AloCallOverlay: View {
                 .ignoresSafeArea()
                 .transition(
                     .asymmetric(
-                        insertion: .move(edge: .top).combined(with: .opacity),
+                        insertion: reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity),
                         removal: .identity
                     )
                 )
@@ -90,6 +104,7 @@ struct AloCallOverlay: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onChange(of: coordinator.activeCall?.id) { _, _ in
+            callTransitionRevision += 1
             callDragOffset = 0
             isCallDragActive = false
             isCallTransitionCompleting = false
@@ -110,6 +125,7 @@ struct AloCallOverlay: View {
         }
         .onChange(of: coordinator.isMinimized) { _, minimized in
             if !minimized {
+                callTransitionRevision += 1
                 callDragOffset = 0
                 isCallDragActive = false
                 isCallTransitionCompleting = false
@@ -137,38 +153,18 @@ struct AloCallOverlay: View {
 
         return ZStack {
             callStateBackground(call)
+            AloCallAmbientBlobs(colors: AloCallVisualPalette.colors(for: call),
+                                enabled: !videoLayout.showsPrimaryVideo && !reduceMotion)
 
-            if videoLayout.showsPrimaryVideo {
-                AloCallVideoRenderer(
-                    coordinator: coordinator,
-                    isLocal: videoLayout.primaryIsLocal,
-                    mirrored: videoLayout.primaryIsLocal
-                        && call.isFrontCamera
-                        && !call.isScreenSharing
-                )
-                .id(
-                    "call-primary-\(call.id)-"
-                        + (videoLayout.primaryIsLocal ? "local" : "remote")
-                )
-                .accessibilityIdentifier("alo.call-video-primary")
-
-            }
-
-            if videoLayout.showsPreview {
-                callVideoPreview(
-                    isLocal: videoLayout.previewIsLocal,
-                    mirrored: videoLayout.previewIsLocal
-                        && call.isFrontCamera
-                        && !call.isScreenSharing,
-                    canSwap: call.hasLocalVideo
-                        && call.hasRemoteVideo,
-                    safeAreaInsets: safeAreaInsets
-                )
-                .id(
-                    "call-preview-\(call.id)-"
-                        + (videoLayout.previewIsLocal ? "local" : "remote")
-                )
-                .accessibilityIdentifier("alo.call-video-preview")
+            // Identity follows the track, not its primary/preview role. A swap
+            // changes geometry without allocating/rebinding two Metal renderers.
+            ForEach([true, false], id: \.self) { isLocal in
+                if videoLayout.renders(isLocal: isLocal) {
+                    callVideoSurface(call, isLocal: isLocal,
+                        isPrimary: videoLayout.isPrimary(isLocal: isLocal),
+                        safeAreaInsets: safeAreaInsets,
+                        viewport: CGSize(width: viewportWidth, height: viewportHeight))
+                }
             }
 
             LinearGradient(
@@ -188,7 +184,8 @@ struct AloCallOverlay: View {
 
             if call.isSecurityConfirmed, !call.safetyEmojis.isEmpty {
                 safetyVerification(call)
-                    .padding(.top, safeAreaInsets.top + 18)
+                    // The expanded card sits below the minimize button, not over it.
+                    .padding(.top, safeAreaInsets.top + (isSafetyDetailsPresented ? 60 : 18))
                     .padding(.horizontal, 24)
                     .frame(
                         maxWidth: .infinity,
@@ -208,18 +205,24 @@ struct AloCallOverlay: View {
                         size: AloCallLayoutMetrics.peerAvatarSize,
                         colorSeed: String(call.peer.id)
                     )
+                    .background {
+                        AloCallPulseRings(size: AloCallLayoutMetrics.peerAvatarSize,
+                            enabled: !reduceMotion && [.outgoing, .incoming, .connecting].contains(call.phase))
+                    }
                     .accessibilityIdentifier("alo.call-peer-avatar")
                 }
 
                 VStack(spacing: 8) {
                     Text(call.peer.name)
-                        .font(.system(size: 30, weight: .bold, design: .rounded))
+                        .font(.system(size: 28, weight: .regular))
                         .foregroundStyle(Color.white)
                         .lineLimit(1)
 
                     callStatus(call)
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(.system(size: 17, weight: .regular))
                         .foregroundStyle(Color.white.opacity(0.72))
+                        .id(call.phase)
+                        .transition(.scale(scale: 0.3).combined(with: .opacity))
                 }
                 .padding(
                     .horizontal,
@@ -248,7 +251,8 @@ struct AloCallOverlay: View {
 
             if call.phase != .incoming, !call.phase.isTerminal {
                 callNotices(call)
-                    .padding(.bottom, safeAreaInsets.bottom + 142)
+                    .padding(.bottom, safeAreaInsets.bottom + AloCallLayoutMetrics.activeControlBottomInset
+                        + AloCallLayoutMetrics.activeButtonDiameter + AloCallLayoutMetrics.noticeGap)
                     .frame(
                         maxWidth: .infinity,
                         maxHeight: .infinity,
@@ -256,6 +260,27 @@ struct AloCallOverlay: View {
                     )
                     .allowsHitTesting(false)
                     .zIndex(5)
+            }
+
+            if !isVideoSourcePickerPresented {
+                Button {
+                    minimizeCall(callID: call.id, viewportHeight: viewportHeight, direction: -1)
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 19, weight: .medium))
+                        .foregroundStyle(.white)
+                        .frame(width: 40, height: 40)
+                        .modifier(AloChatGlass(interactive: false, role: .chrome))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(AloControlPressStyle())
+                .accessibilityLabel("Свернуть звонок")
+                .accessibilityIdentifier("alo.call.minimize")
+                .padding(.top, safeAreaInsets.top + 8)
+                .padding(.leading, 16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .zIndex(7)
             }
 
             if isVideoSourcePickerPresented {
@@ -275,13 +300,13 @@ struct AloCallOverlay: View {
                 .zIndex(20)
             }
         }
-        .animation(.easeInOut(duration: 0.32), value: call.phase)
-        .animation(.easeInOut(duration: 0.32), value: call.isMuted)
+        .animation(reduceMotion ? nil : .spring(response: 0.36, dampingFraction: 1), value: call.phase)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: call.isMuted)
         .animation(
-            .interactiveSpring(response: 0.34, dampingFraction: 0.86),
+            reduceMotion ? nil : .interactiveSpring(response: 0.34, dampingFraction: 0.86),
             value: isSafetyDetailsPresented
         )
-        .animation(.easeInOut(duration: 0.28), value: call.hasRemoteVideo)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: call.hasRemoteVideo)
         .frame(width: viewportWidth, height: viewportHeight)
         .clipShape(
             RoundedRectangle(
@@ -290,6 +315,7 @@ struct AloCallOverlay: View {
             )
         )
         .offset(y: callDragOffset)
+        .onPreferenceChange(AloBackSwipeExclusionKey.self) { callGestureExclusions = $0 }
         .simultaneousGesture(
             callMinimizeGesture(
                 callID: call.id,
@@ -342,7 +368,7 @@ struct AloCallOverlay: View {
             if call.isSecurityConfirmed, !call.safetyEmojis.isEmpty {
                 Button {
                     withAnimation(
-                        .interactiveSpring(
+                        reduceMotion ? nil : .interactiveSpring(
                             response: 0.38,
                             dampingFraction: 0.82
                         )
@@ -398,12 +424,12 @@ struct AloCallOverlay: View {
                                 .combined(with: .opacity)
                         )
                     } else {
-                        Text(call.safetyEmojis.joined(separator: "  "))
-                            .font(.system(size: 22))
-                            .lineLimit(1)
-                            .padding(.horizontal, 12)
+                        AloCallEmojiKey(emojis: call.safetyEmojis, reduceMotion: reduceMotion)
+                            .padding(.horizontal, 14)
                             .padding(.vertical, 8)
+                            .modifier(AloChatGlass(interactive: false, role: .chrome))
                             .contentShape(Capsule())
+                            .accessibilityElement(children: .ignore)
                             .accessibilityLabel("Код безопасности звонка")
                             .transition(
                                 .scale(scale: 0.9)
@@ -430,40 +456,65 @@ struct AloCallOverlay: View {
         )
     }
 
-    private func callVideoPreview(
+    private func callVideoSurface(
+        _ call: AloDirectCallState,
         isLocal: Bool,
-        mirrored: Bool,
-        canSwap: Bool,
-        safeAreaInsets: EdgeInsets
+        isPrimary: Bool,
+        safeAreaInsets: EdgeInsets,
+        viewport: CGSize
     ) -> some View {
-        AloCallVideoRenderer(
+        let canSwap = call.hasLocalPreviewVideo && call.hasRemoteVideo
+        let size = isPrimary ? viewport : CGSize(width: 112, height: 164)
+        let radius: CGFloat = isPrimary ? 0 : 22
+        let center = isPrimary ? CGPoint(x: viewport.width / 2, y: viewport.height / 2)
+            : CGPoint(x: viewport.width - 18 - size.width / 2,
+                      y: safeAreaInsets.top + 54 + size.height / 2)
+
+        return AloCallVideoRenderer(
             coordinator: coordinator,
             isLocal: isLocal,
-            mirrored: mirrored
+            mirrored: isLocal && call.isFrontCamera && !call.isScreenSharing,
+            transitioning: isLocal
+                && (coordinator.isCameraStarting || coordinator.isCameraSwitching)
         )
-            .frame(width: 112, height: 164)
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .frame(width: size.width, height: size.height)
+            .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .stroke(Color.white.opacity(isPrimary ? 0 : 0.18), lineWidth: 1)
             )
-            .shadow(color: Color.black.opacity(0.35), radius: 18, y: 8)
-            .padding(.trailing, 18)
-            .padding(.top, safeAreaInsets.top + 54)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-            .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .background {
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .fill(.black).shadow(color: .black.opacity(isPrimary ? 0 : 0.35), radius: 18, y: 8)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .aloBackSwipeExclusion(enabled: !isPrimary)
             .onTapGesture {
-                guard canSwap else { return }
-                withAnimation(.interactiveSpring(response: 0.36, dampingFraction: 0.82)) {
-                    isLocalVideoPrimary.toggle()
+                guard !isPrimary else { return }
+                if canSwap {
+                    withAnimation(
+                        reduceMotion ? nil : .easeInOut(duration: 0.25)
+                    ) {
+                        isLocalVideoPrimary.toggle()
+                    }
+                } else if isLocal {
+                    presentVideoSourcePicker(for: call)
                 }
             }
-            .accessibilityAddTraits(canSwap ? .isButton : [])
+            .onLongPressGesture(minimumDuration: 0.32) {
+                guard isLocal, !isPrimary else { return }
+                presentVideoSourcePicker(for: call)
+            }
+            .accessibilityAddTraits(!isPrimary && (canSwap || isLocal) ? .isButton : [])
             .accessibilityLabel(
-                canSwap
+                !isPrimary && canSwap
                     ? "Поменять местами камеры"
                     : (isLocal ? "Ваша камера" : "Камера собеседника")
             )
+            .accessibilityIdentifier(isPrimary ? "alo.call-video-primary" : "alo.call-video-preview")
+            .accessibilityValue(isLocal ? "local" : "remote")
+            .position(center)
+            .zIndex(isPrimary ? 0 : 4)
     }
 
     private func callStatus(_ call: AloDirectCallState) -> some View {
@@ -521,23 +572,15 @@ struct AloCallOverlay: View {
         _ call: AloDirectCallState,
         isEnabled: Bool = true
     ) -> some View {
-        HStack(spacing: 0) {
-            AloCallRoundButton(
-                systemName: call.isMuted ? "mic.slash.fill" : "mic.fill",
-                title: "Микрофон",
-                color: .white,
-                foreground: .black,
-                diameter: AloCallLayoutMetrics.activeButtonDiameter,
-                isEnabled: isEnabled,
-                action: coordinator.toggleMute
-            )
-            .accessibilityIdentifier("alo.call-microphone")
+        GeometryReader { geometry in
+        HStack(spacing: AloCallLayoutMetrics.controlSpacing(availableWidth: geometry.size.width)) {
             AloCallRoundButton(
                 systemName: call.isSpeakerOn ? "speaker.wave.2.fill" : "iphone",
                 title: call.isSpeakerOn ? "Динамик" : "Телефон",
                 color: call.isSpeakerOn ? Color.white : Color.white.opacity(0.16),
                 foreground: call.isSpeakerOn ? .black : .white,
                 diameter: AloCallLayoutMetrics.activeButtonDiameter,
+                slotWidth: AloCallLayoutMetrics.activeButtonDiameter,
                 isTranslucent: !call.isSpeakerOn,
                 isEnabled: isEnabled,
                 action: coordinator.toggleSpeaker
@@ -545,48 +588,61 @@ struct AloCallOverlay: View {
             .accessibilityIdentifier("alo.call-speaker")
             AloCallRoundButton(
                 systemName: coordinator.isCameraStarting
+                    || coordinator.isScreenShareStarting
                     ? "hourglass"
-                    : (call.isVideoEnabled ? "video.fill" : "video.slash.fill"),
-                title: coordinator.isCameraStarting ? "Камера..." : "Камера",
-                color: call.isVideoEnabled ? Color.white : Color.white.opacity(0.16),
-                foreground: call.isVideoEnabled ? .black : .white,
+                    : (
+                        call.isScreenSharing
+                            ? "rectangle.on.rectangle.fill"
+                            : (call.isVideoEnabled ? "video.fill" : "video.slash.fill")
+                    ),
+                title: coordinator.isCameraStarting
+                    || coordinator.isScreenShareStarting
+                    ? "Подготовка..."
+                    : (call.isScreenSharing ? "Экран" : "Видео"),
+                color: call.hasLocalVideo
+                    ? Color.white
+                    : Color.white.opacity(0.16),
+                foreground: call.hasLocalVideo ? .black : .white,
                 diameter: AloCallLayoutMetrics.activeButtonDiameter,
-                isTranslucent: !call.isVideoEnabled,
+                slotWidth: AloCallLayoutMetrics.activeButtonDiameter,
+                isTranslucent: !call.hasLocalVideo,
                 isEnabled: isEnabled,
                 action: {
-                    if call.isVideoEnabled && !call.isScreenSharing {
+                    switch AloCallVideoControlAction.resolve(for: call) {
+                    case .presentSources:
+                        presentVideoSourcePicker(for: call)
+                    case .disableCamera:
                         coordinator.toggleVideo()
-                    } else {
-                        videoSourcePickerInitialSource = call.isFrontCamera
-                            ? .frontCamera
-                            : .backCamera
-                        isVideoSourcePickerPresented = true
+                    case .stopScreenShare:
+                        coordinator.toggleScreenShare()
                     }
                 }
             )
             .accessibilityIdentifier("alo.call-camera")
             AloCallRoundButton(
-                systemName: coordinator.isScreenShareStarting
-                    ? "hourglass"
-                    : (call.isScreenSharing ? "rectangle.on.rectangle.fill" : "rectangle.on.rectangle"),
-                title: "Экран",
-                color: call.isScreenSharing ? Color.white : Color.white.opacity(0.16),
-                foreground: call.isScreenSharing ? .black : .white,
+                systemName: call.isMuted ? "mic.slash.fill" : "mic.fill",
+                title: call.isMuted ? "Включить звук" : "Убрать звук",
+                color: call.isMuted ? .white : Color.white.opacity(0.16),
+                foreground: call.isMuted ? .black : .white,
                 diameter: AloCallLayoutMetrics.activeButtonDiameter,
-                isTranslucent: !call.isScreenSharing,
+                slotWidth: AloCallLayoutMetrics.activeButtonDiameter,
+                isTranslucent: !call.isMuted,
                 isEnabled: isEnabled,
-                action: coordinator.toggleScreenShare
+                action: coordinator.toggleMute
             )
-            .accessibilityIdentifier("alo.call-screen-share")
+            .accessibilityIdentifier("alo.call-microphone")
             AloCallRoundButton(
                 systemName: "phone.down.fill",
                 title: "Завершить",
                 color: Color(red: 0.85, green: 0.14, blue: 0.15),
                 diameter: AloCallLayoutMetrics.activeButtonDiameter,
+                slotWidth: AloCallLayoutMetrics.activeButtonDiameter,
                 isEnabled: isEnabled,
                 action: coordinator.end
             )
             .accessibilityIdentifier("alo.call-end")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(height: 84)
         .frame(maxWidth: .infinity)
@@ -594,26 +650,41 @@ struct AloCallOverlay: View {
         .allowsHitTesting(isEnabled)
     }
 
+    private func presentVideoSourcePicker(for call: AloDirectCallState) {
+        guard !isVideoSourcePickerPresented else { return }
+        videoSourcePickerInitialSource = .current(for: call)
+        isVideoSourcePickerPresented = true
+    }
+
     private func callMinimizeGesture(
         callID: Int,
         viewportHeight: CGFloat
     ) -> some Gesture {
-        DragGesture(minimumDistance: 8, coordinateSpace: .global)
+        DragGesture(minimumDistance: 12, coordinateSpace: .global)
             .onChanged { value in
-                guard !isCallTransitionCompleting,
-                      !isVideoSourcePickerPresented else {
+                guard !callGestureRejected, !isVideoSourcePickerPresented else {
                     return
                 }
                 let vertical = abs(value.translation.height)
-                guard vertical > abs(value.translation.width) * 1.08 else { return }
-                isCallDragActive = true
-                callDragOffset = min(
-                    max(value.translation.height, -viewportHeight),
-                    viewportHeight
-                )
+                if !isCallDragActive {
+                    guard !callGestureExclusions.contains(where: { $0.contains(value.startLocation) }),
+                          vertical > abs(value.translation.width) * 1.4 else {
+                        callGestureRejected = true
+                        return
+                    }
+                    callTransitionRevision += 1
+                    isCallTransitionCompleting = false
+                    isCallDragActive = true
+                }
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    callDragOffset = min(max(value.translation.height, -viewportHeight), viewportHeight)
+                }
             }
             .onEnded { value in
-                guard isCallDragActive, !isCallTransitionCompleting else { return }
+                callGestureRejected = false
+                guard isCallDragActive else { return }
                 isCallDragActive = false
                 let predicted = value.predictedEndTranslation.height
                 let shouldMinimize = AloCallMinimizePolicy.shouldMinimize(
@@ -639,12 +710,14 @@ struct AloCallOverlay: View {
 
     private func restoreCallSurface() {
         isCallTransitionCompleting = true
+        let revision = callTransitionRevision
         withAnimation(
-            .spring(response: 0.34, dampingFraction: 1.0),
+            reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 1.0),
             completionCriteria: .logicallyComplete
         ) {
             callDragOffset = 0
         } completion: {
+            guard revision == callTransitionRevision else { return }
             isCallTransitionCompleting = false
         }
     }
@@ -654,13 +727,17 @@ struct AloCallOverlay: View {
         viewportHeight: CGFloat,
         direction: CGFloat
     ) {
+        callTransitionRevision += 1
+        let revision = callTransitionRevision
+        isCallTransitionCompleting = true
         let targetOffset = max(1, viewportHeight) * direction
         withAnimation(
-            .spring(response: 0.38, dampingFraction: 1.0),
+            reduceMotion ? nil : .spring(response: 0.36, dampingFraction: 1.0),
             completionCriteria: .logicallyComplete
         ) {
             callDragOffset = targetOffset
         } completion: {
+            guard revision == callTransitionRevision else { return }
             guard coordinator.activeCall?.id == callID else {
                 isCallTransitionCompleting = false
                 return
@@ -685,6 +762,7 @@ struct AloCallCompactBar: View {
     let call: AloDirectCallState
     @ObservedObject var coordinator: AloCallCoordinator
     let statusBarHeight: CGFloat
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var isMicrophoneActive: Bool {
         !call.isMuted && !isConnectionInterrupted
@@ -700,7 +778,7 @@ struct AloCallCompactBar: View {
 
     var body: some View {
         Button {
-            withAnimation(.easeOut(duration: 0.18)) {
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
                 coordinator.isMinimized = false
             }
         } label: {
@@ -718,7 +796,7 @@ struct AloCallCompactBar: View {
                 HStack(spacing: 5) {
                     Image(systemName: call.isMuted ? "mic.slash.fill" : "mic.fill")
                         .font(.system(size: 11, weight: .bold))
-                        .contentTransition(.symbolEffect(.replace))
+                        .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
 
                     Text(call.peer.name)
                         .font(.system(size: 13, weight: .bold))
@@ -756,8 +834,8 @@ struct AloCallCompactBar: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(AloPressBounceButtonStyle(pressedScale: 0.985))
-        .animation(.easeInOut(duration: 0.28), value: call.isMuted)
-        .animation(.easeInOut(duration: 0.28), value: call.phase)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: call.isMuted)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: call.phase)
         .accessibilityIdentifier("alo.compact-call-bar")
         .accessibilityLabel("Вернуться к звонку с \(call.peer.name)")
         .accessibilityValue(
@@ -814,11 +892,86 @@ struct AloCallCompactBar: View {
     }
 }
 
-private struct AloCallStatusWave: View {
-    let isActive: Bool
+/// Telegram reveals the encryption key one emoji at a time: each drops in with a spring,
+/// 0.3 s after the previous one.
+private struct AloCallEmojiKey: View {
+    let emojis: [String]
+    let reduceMotion: Bool
+    @State private var shown = false
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 24.0, paused: !isActive)) { timeline in
+        HStack(spacing: 8) {
+            ForEach(Array(emojis.enumerated()), id: \.offset) { index, emoji in
+                Text(emoji).font(.system(size: 22))
+                    .offset(y: shown || reduceMotion ? 0 : -26)
+                    .opacity(shown || reduceMotion ? 1 : 0)
+                    .animation(.spring(response: 0.5, dampingFraction: 0.78).delay(0.2 + 0.3 * Double(index)), value: shown)
+            }
+        }
+        .onAppear { shown = true }
+    }
+}
+
+/// Soft rings that spread from the avatar while the call is ringing or connecting.
+private struct AloCallPulseRings: View {
+    let size: CGFloat
+    let enabled: Bool
+
+    var body: some View {
+        if enabled {
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+                let t = context.date.timeIntervalSinceReferenceDate
+                ZStack {
+                    ForEach(0..<2, id: \.self) { index in
+                        let phase = (t / 2.4 + Double(index) * 0.5).truncatingRemainder(dividingBy: 1)
+                        Circle()
+                            .stroke(Color.white.opacity(0.28 * (1 - phase)), lineWidth: 2)
+                            .frame(width: size, height: size)
+                            .scaleEffect(1 + 0.5 * phase)
+                    }
+                }
+            }
+            .allowsHitTesting(false).accessibilityHidden(true)
+        }
+    }
+}
+
+/// Slow colour drift behind the call, in the same palette as the state gradient.
+private struct AloCallAmbientBlobs: View {
+    let colors: [Color]
+    let enabled: Bool
+
+    var body: some View {
+        if enabled, !colors.isEmpty {
+            TimelineView(.animation(minimumInterval: 1.0 / 24.0)) { context in
+                let t = context.date.timeIntervalSinceReferenceDate
+                GeometryReader { proxy in
+                    ZStack {
+                        ForEach(0..<3, id: \.self) { index in
+                            let seed = Double(index) * 2.1
+                            Circle()
+                                .fill(colors[index % colors.count].opacity(0.6))
+                                .frame(width: proxy.size.width * 0.95, height: proxy.size.width * 0.95)
+                                .blur(radius: 70)
+                                .offset(x: CGFloat(sin(t * 0.18 + seed)) * proxy.size.width * 0.3,
+                                        y: CGFloat(cos(t * 0.14 + seed * 1.3)) * proxy.size.height * 0.25)
+                        }
+                    }
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                }
+            }
+            .allowsHitTesting(false).accessibilityHidden(true)
+        }
+    }
+}
+
+private struct AloCallStatusWave: View {
+    let isActive: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 24.0, paused: !isActive || reduceMotion || scenePhase != .active)) { timeline in
             Canvas { context, size in
                 guard isActive, size.width > 0, size.height > 0 else { return }
                 let phase = timeline.date.timeIntervalSinceReferenceDate * 2.2
@@ -833,7 +986,7 @@ private struct AloCallStatusWave: View {
             }
         }
         .opacity(isActive ? 1 : 0)
-        .animation(.easeInOut(duration: 0.24), value: isActive)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: isActive)
         .allowsHitTesting(false)
     }
 
@@ -865,11 +1018,13 @@ private struct AloCallStatusWave: View {
 }
 
 private struct AloCallRoundButton: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let systemName: String
     let title: String
     let color: Color
     var foreground: Color = .white
     var diameter: CGFloat = AloCallLayoutMetrics.activeButtonDiameter
+    var slotWidth: CGFloat? = nil
     var isTranslucent = false
     var isEnabled = true
     let action: () -> Void
@@ -879,12 +1034,11 @@ private struct AloCallRoundButton: View {
             VStack(spacing: diameter < 70 ? 5 : 8) {
                 ZStack {
                     if isTranslucent {
-                        Circle()
-                            .fill(.ultraThinMaterial)
-                            .overlay {
-                                Circle()
-                                    .fill(Color.white.opacity(0.06))
-                            }
+                        // Telegram's unfilled call button: blur with a 20% white veil.
+                        Color.clear
+                            .frame(width: diameter, height: diameter)
+                            .modifier(AloChatGlass(interactive: false, role: .chrome))
+                            .overlay { Circle().fill(Color.white.opacity(0.16)) }
                     } else {
                         Circle().fill(color)
                     }
@@ -897,7 +1051,7 @@ private struct AloCallRoundButton: View {
                             )
                         )
                         .foregroundStyle(foreground)
-                        .contentTransition(.symbolEffect(.replace))
+                        .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
                 }
                 .frame(width: diameter, height: diameter)
                 .overlay {
@@ -916,25 +1070,23 @@ private struct AloCallRoundButton: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.72)
             }
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: slotWidth ?? .infinity)
         }
         .buttonStyle(AloCallRoundButtonStyle())
         .disabled(!isEnabled)
-        .animation(.easeInOut(duration: 0.24), value: systemName)
-        .animation(.easeInOut(duration: 0.24), value: color)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: systemName)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.24), value: color)
     }
 }
 
 private struct AloCallRoundButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.9 : 1)
+            .scaleEffect(reduceMotion ? 1 : configuration.isPressed ? 0.96 : 1)
             .brightness(configuration.isPressed ? -0.05 : 0)
             .animation(
-                .spring(
-                    response: configuration.isPressed ? 0.30 : 0.50,
-                    dampingFraction: 0.72
-                ),
+                reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 1),
                 value: configuration.isPressed
             )
     }
@@ -944,6 +1096,7 @@ struct AloCallVideoRenderer: UIViewRepresentable {
     let coordinator: AloCallCoordinator
     let isLocal: Bool
     let mirrored: Bool
+    var transitioning = false
 
     final class Coordinator {
         weak var callCoordinator: AloCallCoordinator?
@@ -962,9 +1115,8 @@ struct AloCallVideoRenderer: UIViewRepresentable {
     func makeUIView(context: Context) -> RTCMTLVideoView {
         let view = RTCMTLVideoView(frame: .zero)
         view.videoContentMode = .scaleAspectFill
-        view.transform = mirrored
-            ? CGAffineTransform(scaleX: -1, y: 1)
-            : .identity
+        view.transform = videoTransform
+        view.alpha = transitioning ? 0.88 : 1
         if isLocal {
             coordinator.bindLocalRenderer(view)
         } else {
@@ -974,17 +1126,32 @@ struct AloCallVideoRenderer: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: RTCMTLVideoView, context: Context) {
-        let target = mirrored
-            ? CGAffineTransform(scaleX: -1, y: 1)
-            : .identity
-        guard uiView.transform != target else { return }
+        let target = videoTransform
+        let alpha: CGFloat = transitioning ? 0.88 : 1
+        // The call timer publishes once a second. Do not restart a renderer
+        // animation for an unchanged mirror/transition state on each tick.
+        guard uiView.transform != target || abs(uiView.alpha - alpha) > 0.001 else { return }
+        // Interpolating -1 to +1 collapses the live image to zero width halfway
+        // through a lens switch. Mirror atomically; animate only the feedback.
+        if uiView.transform.a * target.a < 0 {
+            UIView.performWithoutAnimation { uiView.transform = target }
+        }
         UIView.animate(
-            withDuration: 0.22,
+            withDuration: UIAccessibility.isReduceMotionEnabled ? 0 : transitioning ? 0.18 : 0.28,
             delay: 0,
             options: [.beginFromCurrentState, .curveEaseInOut]
         ) {
             uiView.transform = target
+            uiView.alpha = alpha
         }
+    }
+
+    private var videoTransform: CGAffineTransform {
+        let scale: CGFloat = transitioning ? 1.015 : 1
+        return CGAffineTransform(
+            scaleX: mirrored ? -scale : scale,
+            y: scale
+        )
     }
 
     static func dismantleUIView(_ uiView: RTCMTLVideoView, coordinator context: Coordinator) {

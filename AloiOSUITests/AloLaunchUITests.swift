@@ -14,6 +14,28 @@ final class AloLaunchUITests: XCTestCase {
         XCTAssertTrue(app.windows.firstMatch.exists)
     }
 
+    func testCallMinimizeButtonAndForegroundReturn() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_CALL_PREVIEW", "1"]
+        app.launch()
+        let bar = app.buttons["alo.compact-call-bar"]
+        XCTAssertTrue(bar.waitForExistence(timeout: 10))
+        bar.tap()
+        let minimize = app.buttons["alo.call.minimize"]
+        XCTAssertTrue(minimize.waitForExistence(timeout: 5))
+        XCTAssertGreaterThan(minimize.frame.minY, 25)
+        let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screenshot.name = "call-expanded-v33"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        minimize.tap()
+        XCTAssertTrue(bar.waitForExistence(timeout: 5))
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(minimize.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["alo.call-end"].exists)
+    }
+
     func testCompactCallBarIsTopmostAndDismissesWithoutNetwork() {
         let app = XCUIApplication()
         app.launchArguments += ["-ALO_UI_CALL_PREVIEW", "1"]
@@ -94,6 +116,29 @@ final class AloLaunchUITests: XCTestCase {
         XCTAssertTrue(avatar.waitForExistence(timeout: 10))
         XCTAssertTrue(preview.waitForExistence(timeout: 5))
         XCTAssertFalse(primaryVideo.exists)
+    }
+
+    func testAnsweredVideoSwapsWithoutDuplicatingSurfaces() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_CALL_PREVIEW", "1", "-ALO_UI_CALL_VIDEO_PREVIEW", "1",
+                                "-ALO_UI_CALL_REMOTE_VIDEO_PREVIEW", "1"]
+        app.launch()
+        let preview = app.descendants(matching: .any).matching(identifier: "alo.call-video-preview").firstMatch
+        let primary = app.descendants(matching: .any).matching(identifier: "alo.call-video-primary").firstMatch
+        XCTAssertTrue(preview.waitForExistence(timeout: 15))
+        XCTAssertTrue(primary.exists)
+        let previewFrame = preview.frame
+        for expected in ["local", "remote", "local", "remote"] {
+            preview.tap()
+            let switched = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", expected), object: primary)
+            XCTAssertEqual(XCTWaiter.wait(for: [switched], timeout: 3), .completed)
+            XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "alo.call-video-primary").count, 1)
+            XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "alo.call-video-preview").count, 1)
+            let settled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                abs(preview.frame.width - previewFrame.width) < 1
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 3), .completed)
+        }
     }
 
     func testFullCallSwipeMinimizesIntoStatusBar() {
@@ -177,12 +222,17 @@ final class AloLaunchUITests: XCTestCase {
         let identity = app.descendants(matching: .any)[
             "alo.call-peer-identity"
         ]
-        let screenShare = app.buttons["alo.call-screen-share"]
+        let video = app.buttons["alo.call-camera"]
         XCTAssertTrue(identity.waitForExistence(timeout: 10))
-        XCTAssertTrue(screenShare.waitForExistence(timeout: 5))
+        XCTAssertTrue(video.waitForExistence(timeout: 5))
         let frameBefore = identity.frame
 
-        screenShare.tap()
+        video.tap()
+        video.tap()
+        let screenSource = app.buttons["alo.call-video-source-0"]
+        XCTAssertTrue(screenSource.waitForExistence(timeout: 5))
+        screenSource.tap()
+        app.buttons["alo.call-video-source-continue"].tap()
 
         let notice = app.descendants(matching: .any)[
             "alo.call-screen-share-notice"
@@ -201,10 +251,9 @@ final class AloLaunchUITests: XCTestCase {
         app.launch()
 
         let controls = [
-            app.buttons["alo.call-microphone"],
             app.buttons["alo.call-speaker"],
             app.buttons["alo.call-camera"],
-            app.buttons["alo.call-screen-share"],
+            app.buttons["alo.call-microphone"],
             app.buttons["alo.call-end"]
         ]
         for control in controls {
@@ -223,11 +272,14 @@ final class AloLaunchUITests: XCTestCase {
         let spacings = zip(frames, frames.dropFirst()).map {
             $1.midX - $0.midX
         }
+        XCTAssertEqual(spacings[0], 92, accuracy: 1, "56 pt control + 36 pt reference gap")
         for spacing in spacings.dropFirst() {
             XCTAssertEqual(spacing, spacings[0], accuracy: 2)
         }
 
         let windowFrame = app.windows.firstMatch.frame
+        let bottomSafeInset: CGFloat = windowFrame.height <= 736 ? 0 : 34
+        XCTAssertEqual(windowFrame.maxY - bottomSafeInset - (frames[0].minY + 56), 52, accuracy: 1)
         XCTAssertGreaterThanOrEqual(frames[0].minX, windowFrame.minX)
         XCTAssertLessThanOrEqual(frames.last?.maxX ?? 0, windowFrame.maxX)
         XCTAssertGreaterThanOrEqual(
@@ -241,8 +293,14 @@ final class AloLaunchUITests: XCTestCase {
         let safety = app.buttons["alo.call-safety-verification"]
         XCTAssertTrue(identity.waitForExistence(timeout: 5))
         XCTAssertTrue(safety.waitForExistence(timeout: 5))
-        XCTAssertGreaterThan(safety.frame.minY, windowFrame.minY + 50)
+        // The SE has a 20 pt status region; the notched QA device has >50 pt.
+        // Full-screen calls don't expose a native XCUI StatusBar element.
+        XCTAssertGreaterThan(safety.frame.minY, windowFrame.minY + (windowFrame.height <= 736 ? 20 : 50))
 
+        let capture = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        capture.name = "call-reference-controls"
+        capture.lifetime = .keepAlways
+        add(capture)
         let identityFrame = identity.frame
         safety.tap()
         XCTAssertEqual(identity.frame.midX, identityFrame.midX, accuracy: 1)
@@ -251,7 +309,11 @@ final class AloLaunchUITests: XCTestCase {
 
     func testVideoButtonPresentsThreeSourcePreviewWithoutFloatingFlip() {
         let app = XCUIApplication()
-        app.launchArguments += ["-ALO_UI_CALL_PREVIEW", "1"]
+        app.launchArguments += [
+            "-ALO_UI_CALL_PREVIEW", "1",
+            "-ALO_UI_CALL_VIDEO_PREVIEW", "0",
+            "-ALO_UI_CALL_REMOTE_VIDEO_PREVIEW", "0"
+        ]
         app.launch()
 
         let compactBar = app.buttons["alo.compact-call-bar"]
@@ -260,6 +322,14 @@ final class AloLaunchUITests: XCTestCase {
 
         let camera = app.buttons["alo.call-camera"]
         XCTAssertTrue(camera.waitForExistence(timeout: 10))
+        let cameraIsHittable = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "hittable == true"),
+            object: camera
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [cameraIsHittable], timeout: 3),
+            .completed
+        )
         camera.tap()
 
         let picker = app.descendants(matching: .any)[

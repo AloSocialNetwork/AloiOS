@@ -5,6 +5,8 @@ struct AuthView: View {
     @EnvironmentObject private var app: AloAppModel
     @State private var step: AuthStep = .email
     @FocusState private var focusedField: AuthStep?
+    @State private var isQRCodeLoginPresented = false
+    @State private var isStoredAccountsPresented = false
 
     var body: some View {
         ZStack {
@@ -59,6 +61,14 @@ struct AuthView: View {
         }
         .onChange(of: app.authMode) { _, _ in
             normalizeStepForMode()
+        }
+        .sheet(isPresented: $isQRCodeLoginPresented) {
+            AloDeviceLinkScanSheet()
+                .environmentObject(app)
+        }
+        .sheet(isPresented: $isStoredAccountsPresented) {
+            AloAccountSwitcherSheet()
+                .environmentObject(app)
         }
     }
 
@@ -169,6 +179,50 @@ struct AuthView: View {
             )
 
             if !isVerification {
+                if app.authMode == .login {
+                    HStack(spacing: 10) {
+                        Button {
+                            app.signInWithPasskey()
+                        } label: {
+                            Label("Ключ доступа", systemImage: "key.fill")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(AloTheme.accent)
+                                .frame(maxWidth: .infinity, minHeight: 42)
+                                .background(AloTheme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(app.isBusy || !AloPasskeyCoordinator.isSystemAvailable)
+                        .accessibilityHint("Войти с помощью системного ключа доступа")
+
+                        Button {
+                            isQRCodeLoginPresented = true
+                        } label: {
+                            Label("Сканировать QR", systemImage: "qrcode.viewfinder")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(AloTheme.accent)
+                                .frame(maxWidth: .infinity, minHeight: 42)
+                                .background(AloTheme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(app.isBusy)
+                        .accessibilityHint("Отсканировать QR-код с устройства, где уже открыт Alo")
+                        .accessibilityIdentifier("alo.auth.qr-scan")
+                    }
+
+                    if !app.storedAccounts.isEmpty {
+                        Button {
+                            isStoredAccountsPresented = true
+                        } label: {
+                            Text("Войти в сохранённый аккаунт")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(AloTheme.accent)
+                                .frame(maxWidth: .infinity, minHeight: 32)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(app.isBusy)
+                    }
+                }
+
                 Button(action: switchMode) {
                     HStack(spacing: 4) {
                         Text(app.authMode == .register ? "Уже есть аккаунт?" : "Нет аккаунта?")

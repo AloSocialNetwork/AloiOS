@@ -2,7 +2,11 @@ import SwiftUI
 
 struct SearchView: View {
     @EnvironmentObject private var app: AloAppModel
+    @Environment(\.dynamicTypeSize) private var dynamicType
     @State private var selectedRelationList: SearchRelationListKind?
+    @State private var localMessageHits = [AloOfflineMessageSearchHit]()
+    @State private var settingsPresented = false
+    @State private var incomingRequest: AloEntitySummary?
 
     private var users: [AloEntitySummary] {
         let query = app.searchQuery.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
@@ -12,77 +16,109 @@ struct SearchView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Кого читать")
-                    .font(.largeTitle.bold())
-                    .foregroundStyle(AloTheme.text)
-
-                AloTextField(placeholder: "Поиск", text: $app.searchQuery)
-
-                if let stats = app.bootstrap?.profileStats {
-                    SearchRelationsOverview(stats: stats) { kind in
-                        selectedRelationList = kind
-                    }
-                        .padding(.top, 4)
+        AloSocialScrollScreen(identifier: "alo.search.scroll") {
+            VStack(spacing: AloSocialMetrics.searchSpacing) {
+                AloSocialHeader(title: "Поиск", subtitle: connectionSubtitle,
+                    settingsLabel: "Настройки", identifier: "alo.search") {
+                    settingsPresented = true
                 }
+                AloSocialSearchField(text: $app.searchQuery)
+                    .padding(.horizontal, AloSocialMetrics.inset)
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 10)
-
-            ScrollView {
+        } rows: {
                 LazyVStack(spacing: 0) {
+                    if let stats = app.bootstrap?.profileStats {
+                        SearchRelationsOverview(stats: stats) { selectedRelationList = $0 }
+                            .padding(.horizontal, AloSocialMetrics.inset)
+                            .padding(.bottom, 8)
+                    }
                     ForEach(users) { item in
-                        HStack(spacing: 12) {
+                        searchResult(item)
+                        Divider().background(AloTheme.border).padding(.leading, 82)
+                    }
+
+                    if !localMessageHits.isEmpty {
+                        HStack {
+                            Text("Сообщения на этом устройстве")
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundStyle(AloTheme.muted)
+                            Spacer()
+                            Text("E2EE")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(AloTheme.accent)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 18)
+                        .padding(.bottom, 2)
+
+                        ForEach(localMessageHits) { hit in
                             Button {
-                                app.openProfile(item)
+                                openLocalMessageHit(hit)
                             } label: {
                                 HStack(spacing: 12) {
                                     AloAvatar(
-                                        name: item.name,
-                                        url: item.avatarUrl,
-                                        size: 56,
-                                        colorSeed: String(item.id)
+                                        name: hit.conversation.title,
+                                        url: hit.conversation.avatarUrl,
+                                        size: 46,
+                                        colorSeed: "search-\(hit.conversation.peerId)"
                                     )
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        HStack(spacing: 5) {
-                                            Text(item.name)
-                                                .font(.system(size: 18, weight: .bold))
-                                            if item.verified {
-                                                Image(systemName: "checkmark.seal.fill")
-                                                    .font(.system(size: 15, weight: .bold))
-                                                    .foregroundStyle(AloTheme.accent)
-                                            }
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        HStack(spacing: 6) {
+                                            Text(hit.conversation.title)
+                                                .font(.system(size: 16, weight: .bold))
+                                                .lineLimit(1)
+                                            Spacer(minLength: 4)
+                                            Text(AloFormatters.messageTime(hit.message.createdAt))
+                                                .font(.system(size: 11, weight: .semibold))
+                                                .foregroundStyle(AloTheme.muted)
                                         }
-                                        Text(item.isChannel ? "Паблик" : item.username.withAtPrefix)
-                                            .font(.system(size: 14, weight: .semibold))
-                                            .foregroundStyle(AloTheme.muted)
+                                        Text(messagePreview(hit.message))
+                                            .font(.system(size: 14, weight: .medium))
+                                            .foregroundStyle(AloTheme.text)
+                                            .lineLimit(2)
                                     }
                                 }
-                                .foregroundStyle(AloTheme.text)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 10)
                             }
                             .buttonStyle(.plain)
-                            Spacer()
-                            if !item.isChannel {
-                                Button(friendButtonTitle(for: item)) {
-                                    app.sendFriendRequest(item)
-                                }
-                                .font(.system(size: 14, weight: .bold))
-                                .foregroundStyle(friendButtonEnabled(for: item) ? Color.white : AloTheme.muted)
-                                .padding(.horizontal, 14)
-                                .frame(height: 36)
-                                .background(friendButtonEnabled(for: item) ? AloTheme.accent : AloTheme.surfaceRaised)
-                                .clipShape(Capsule())
-                                .disabled(!friendButtonEnabled(for: item))
-                            }
+                            Divider().background(AloTheme.border).padding(.leading, 74)
                         }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 12)
-                        Divider().background(AloTheme.border).padding(.leading, 82)
                     }
                 }
-                .padding(.bottom, 100)
+        }
+        .navigationDestination(isPresented: $settingsPresented) { AloSocialSettingsSheet().environmentObject(app) }
+        .confirmationDialog("Заявка в друзья", isPresented: Binding(
+            get: { incomingRequest != nil }, set: { if !$0 { incomingRequest = nil } }
+        ), titleVisibility: .visible) {
+            if let user = incomingRequest, let relation = user.relation {
+                Button("Принять") { app.respondFriendRequest(requestId: relation.incomingRequestId, accept: true) }
+                Button("Отклонить", role: .destructive) { app.respondFriendRequest(requestId: relation.incomingRequestId, accept: false) }
             }
+            Button("Отмена", role: .cancel) {}
+        }
+        .task(id: "\(app.searchQuery):\(app.bootstrap?.me.id ?? 0)") {
+            let query = app.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+            let ownerUserId = app.bootstrap?.me.id ?? 0
+            guard !query.isEmpty, ownerUserId > 0 else {
+                localMessageHits = []
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
+            let hits = await Task.detached(priority: .userInitiated) {
+                AloSecureOfflineCacheStore.shared.searchAllMessages(
+                    ownerUserId: ownerUserId,
+                    query: query,
+                    limit: 100
+                )
+            }.value
+            guard !Task.isCancelled,
+                  query == app.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines) else {
+                return
+            }
+            localMessageHits = hits
         }
         .fullScreenCover(item: $selectedRelationList) { kind in
             SearchRelationListScreen(
@@ -91,6 +127,59 @@ struct SearchView: View {
                 onClose: { selectedRelationList = nil }
             )
             .environmentObject(app)
+        }
+    }
+
+    private func searchResult(_ item: AloEntitySummary) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 12) {
+                Button { app.openProfile(item) } label: {
+                    HStack(spacing: 12) {
+                        AloAvatar(name: item.name, url: item.avatarUrl, size: 56, colorSeed: String(item.id))
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 5) {
+                                Text(item.name).font(.headline)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                if item.verified {
+                                    Image(systemName: "checkmark.seal.fill")
+                                        .foregroundStyle(AloTheme.accent).accessibilityHidden(true)
+                                }
+                            }
+                            Text(item.isChannel ? "Сообщество" : item.username.withAtPrefix)
+                                .font(.subheadline).foregroundStyle(AloTheme.muted).lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }.foregroundStyle(AloTheme.text)
+                }
+                .buttonStyle(AloFeedPressStyle())
+                .accessibilityLabel("Профиль: \(item.name), \(item.username.withAtPrefix)")
+                if !item.isChannel && !dynamicType.isAccessibilitySize { friendAction(item) }
+            }
+            if !item.isChannel && dynamicType.isAccessibilitySize {
+                friendAction(item).padding(.leading, 68)
+            }
+        }
+        .padding(.horizontal, AloSocialMetrics.inset).padding(.vertical, 12)
+    }
+
+    private func friendAction(_ item: AloEntitySummary) -> some View {
+        Button {
+            if item.relation?.friendStatus == "incoming" {
+                if (item.relation?.incomingRequestId ?? 0) > 0 { incomingRequest = item }
+                else { app.openProfile(item) }
+            } else { app.sendFriendRequest(item) }
+        } label: {
+            Text(friendButtonTitle(for: item)).fixedSize(horizontal: true, vertical: false)
+        }
+        .buttonStyle(AloSocialRequestButtonStyle(prominent: friendButtonEnabled(for: item)))
+        .disabled(!friendButtonEnabled(for: item))
+    }
+
+    private var connectionSubtitle: String {
+        switch app.connectionState {
+        case .connected: return ""
+        case .updating: return "Обновление…"
+        case .unavailable: return "Нет связи с сервером"
         }
     }
 
@@ -108,7 +197,23 @@ struct SearchView: View {
     }
 
     private func friendButtonEnabled(for item: AloEntitySummary) -> Bool {
-        (item.relation?.friendStatus ?? "none") == "none"
+        let status = item.relation?.friendStatus ?? "none"
+        let pending = app.pendingFriendRequestIds.contains(item.relation?.incomingRequestId ?? 0)
+        return ["none", "incoming"].contains(status) && !pending
+    }
+
+    private func openLocalMessageHit(_ hit: AloOfflineMessageSearchHit) {
+        guard let summary = app.bootstrap?.conversations.first(where: {
+            $0.peerId == hit.conversation.peerId
+        }) else {
+            app.notice = "Этот чат больше недоступен."
+            return
+        }
+        app.openConversation(summary)
+    }
+
+    private func messagePreview(_ message: AloChatMessage) -> String {
+        message.body.ifBlank(message.attachmentName).ifBlank("Вложение")
     }
 
     private func relationItems(for kind: SearchRelationListKind) -> [AloEntitySummary] {
@@ -133,34 +238,38 @@ private struct SearchRelationsOverview: View {
     let onTap: (SearchRelationListKind) -> Void
 
     var body: some View {
-        LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
-            relationTile(.friends, "Друзья", stats.friends)
-            relationTile(.followers, "Подписчики", stats.followers)
-            relationTile(.following, "Подписки", stats.following)
-            relationTile(.channels, "Каналы", stats.channels)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                relationTile(.friends, "Друзья", stats.friends)
+                relationTile(.followers, "Подписчики", stats.followers)
+                relationTile(.following, "Подписки", stats.following)
+                relationTile(.channels, "Сообщества", stats.channels)
+            }
         }
+        .scrollClipDisabled()
     }
 
     private func relationTile(_ kind: SearchRelationListKind, _ title: String, _ value: Int) -> some View {
         Button {
             onTap(kind)
         } label: {
-            HStack {
+            HStack(spacing: 6) {
                 Text(title)
-                    .font(.system(size: 18, weight: .heavy))
-                    .foregroundStyle(AloTheme.muted)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(AloTheme.text)
                     .lineLimit(1)
-                Spacer()
                 Text("\(value)")
-                    .font(.system(size: 18, weight: .heavy))
+                    .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(AloTheme.accent)
             }
-            .padding(.horizontal, 18)
-            .frame(height: 58)
-            .background(AloTheme.surface)
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .padding(.horizontal, 12)
+            .frame(minHeight: 32)
+            .background(AloTheme.surfaceRaised.opacity(0.84), in: Capsule())
+            .overlay(Capsule().stroke(AloTheme.border.opacity(0.5), lineWidth: 0.5))
+            .frame(minHeight: 44)
+            .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(AloControlPressStyle())
     }
 }
 
@@ -181,7 +290,7 @@ private enum SearchRelationListKind: String, Identifiable {
         case .following:
             return "Подписки"
         case .channels:
-            return "Каналы"
+            return "Сообщества"
         }
     }
 }
@@ -245,7 +354,7 @@ private struct SearchRelationListScreen: View {
                                                 }
                                             }
 
-                                            Text(item.isChannel ? "Паблик" : item.username.withAtPrefix)
+                                            Text(item.isChannel ? "Сообщество" : item.username.withAtPrefix)
                                                 .font(.system(size: 14, weight: .semibold))
                                                 .foregroundStyle(AloTheme.muted)
                                         }
@@ -294,7 +403,7 @@ private struct SearchRelationListScreen: View {
         case .following:
             return "На кого подписан ты."
         case .channels:
-            return "Паблики и каналы, доступные в подборке."
+            return "Сообщества, доступные в подборке."
         }
     }
 
