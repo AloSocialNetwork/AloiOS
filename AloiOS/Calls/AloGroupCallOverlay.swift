@@ -118,7 +118,7 @@ struct AloGroupCallOverlay: View {
                 }
 
                 controls(call)
-                    .padding(.horizontal, 24)
+                    .padding(.horizontal, 16)
                     .padding(.top, 14)
                     .padding(.bottom, max(18, safeArea.bottom + 6))
             }
@@ -321,9 +321,10 @@ struct AloGroupCallOverlay: View {
                              icon: call.isSpeakerOn ? "speaker.wave.2.fill" : "iphone",
                              selected: call.isSpeakerOn, action: coordinator.toggleSpeaker)
             }
-            Spacer(minLength: 8)
+            Spacer(minLength: 4)
             microphoneButton(call)
-            Spacer(minLength: 8)
+                .layoutPriority(1)
+            Spacer(minLength: 4)
             VStack(spacing: 14) {
                 smallControl(title: "Выйти", icon: "xmark", destructive: true, action: coordinator.leave)
                     .accessibilityIdentifier("alo.group-call.leave")
@@ -357,7 +358,8 @@ struct AloGroupCallOverlay: View {
                     Text(state.subtitle).font(.system(size: 13)).foregroundStyle(Color.white.opacity(0.6))
                         .multilineTextAlignment(.center).lineLimit(2)
                 }
-                .frame(width: 230)
+                // Flexible, so the row of controls never grows wider than the screen.
+                .frame(maxWidth: 230)
             }
         }
         .buttonStyle(AloPressBounceButtonStyle(pressedScale: 0.94))
