@@ -8,8 +8,15 @@ import WebRTC
 
 @MainActor
 final class AloCallCoordinator: NSObject, ObservableObject {
-    @Published private(set) var activeCall: AloDirectCallState?
-    @Published var isMinimized = false
+    @Published private(set) var activeCall: AloDirectCallState? {
+        didSet { updateLinkSampling() }
+    }
+    @Published var isMinimized = false {
+        didSet { updateLinkSampling() }
+    }
+    /// Voice level and link quality for the call screen; sampled only while it shows a live call.
+    let meter = AloCallMeter()
+    private var linkSampling: Timer?
     @Published private(set) var isScreenShareStarting = false
     @Published private(set) var isCameraStarting = false
     @Published private(set) var isCameraSwitching = false
@@ -28,7 +35,9 @@ final class AloCallCoordinator: NSObject, ObservableObject {
     private var securityBootstrapRetryTask: Task<Void, Never>?
     private var terminalDismissTask: Task<Void, Never>?
     private var rtcConfiguration: AloRTCConfiguration?
-    private var client: AloWebRTCCallClient?
+    private var client: AloWebRTCCallClient? {
+        didSet { updateLinkSampling() }
+    }
     private let localVideoRenderers = AloVideoRendererRegistry()
     private let remoteVideoRenderers = AloVideoRendererRegistry()
     private var lastSignalId = 0
@@ -166,6 +175,18 @@ final class AloCallCoordinator: NSObject, ObservableObject {
         let remoteVideo = UserDefaults.standard.bool(
             forKey: "ALO_UI_CALL_REMOTE_VIDEO_PREVIEW"
         )
+        // Screenshots of each state: -ALO_UI_CALL_PHASE active|incoming|declined,
+        // -ALO_UI_CALL_QUALITY 0…1 and -ALO_UI_CALL_VOICE 0…5 feed the meter.
+        let phase: AloDirectCallPhase
+        switch UserDefaults.standard.string(forKey: "ALO_UI_CALL_PHASE") {
+        case "active": phase = .active
+        case "incoming": phase = .incoming
+        case "declined": phase = .declined
+        default: phase = remoteVideo ? .active : .outgoing
+        }
+        let debugDefaults = UserDefaults.standard
+        meter.debugSet(level: Double(debugDefaults.string(forKey: "ALO_UI_CALL_VOICE") ?? "") ?? 0,
+                       quality: Double(debugDefaults.string(forKey: "ALO_UI_CALL_QUALITY") ?? ""))
         activeCall = AloDirectCallState(
             id: -42,
             uuid: AloCallSecurity.callUUID(callId: -42),
@@ -177,14 +198,14 @@ final class AloCallCoordinator: NSObject, ObservableObject {
                 verified: false
             ),
             type: video ? "video" : "voice",
-            phase: remoteVideo ? .active : .outgoing,
-            isIncoming: false,
+            phase: phase,
+            isIncoming: phase == .incoming,
             isMuted: false,
             isSpeakerOn: video,
             isVideoEnabled: video,
             isFrontCamera: true,
             isRemoteVideoEnabled: remoteVideo,
-            startedAt: remoteVideo ? Date() : nil,
+            startedAt: phase == .active ? Date().addingTimeInterval(remoteVideo ? 0 : -83) : nil,
             callSecret: "ui-test-call",
             safetyEmojis: ["🔐", "🟢", "🎯", "💎"],
             isSecurityConfirmed: true
@@ -2248,5 +2269,27 @@ extension AloCallCoordinator: CXProviderDelegate {
 
     nonisolated func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
         RTCAudioSession.sharedInstance().audioSessionDidDeactivate(audioSession)
+    }
+}
+
+extension AloCallCoordinator {
+    /// Seven samples a second of WebRTC statistics while a connected call is on screen; none when
+    /// the call is minimized, still ringing or over.
+    fileprivate func updateLinkSampling() {
+        let wanted = client != nil && activeCall?.phase == .active && !isMinimized
+        if wanted, linkSampling == nil {
+            let timer = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
+                guard let self, let client = self.client else { return }
+                client.sampleLink { [weak self] level, lost, received, roundTrip in
+                    self?.meter.ingest(audioLevel: level, packetsLost: lost, packetsReceived: received, roundTrip: roundTrip)
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            linkSampling = timer
+        } else if !wanted, let timer = linkSampling {
+            timer.invalidate()
+            linkSampling = nil
+            if activeCall?.phase != .active { meter.reset() }
+        }
     }
 }
