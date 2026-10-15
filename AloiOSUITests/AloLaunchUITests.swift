@@ -36,6 +36,70 @@ final class AloLaunchUITests: XCTestCase {
         XCTAssertTrue(app.buttons["alo.call-end"].exists)
     }
 
+    /// Telegram's call palettes: blue–violet while calling, green while talking (signal bars and
+    /// timer), orange–pink on a weak link; the minimized bar takes the same colours.
+    func testCaptureTelegramCallStates() {
+        let states: [(String, [String])] = [
+            ("calling", []),
+            ("talking", ["-ALO_UI_CALL_PHASE", "active", "-ALO_UI_CALL_VOICE", "2.5", "-ALO_UI_CALL_QUALITY", "0.8"]),
+            ("weak", ["-ALO_UI_CALL_PHASE", "active", "-ALO_UI_CALL_QUALITY", "0.1"]),
+            ("incoming", ["-ALO_UI_CALL_PHASE", "incoming"])
+        ]
+        for (name, arguments) in states {
+            let app = XCUIApplication()
+            app.launchArguments += ["-ALO_UI_CALL_PREVIEW", "1", "-ALO_UI_CALL_VIDEO_PREVIEW", "0"] + arguments
+            app.launch()
+            let avatar = app.descendants(matching: .any).matching(identifier: "alo.call-peer-avatar").firstMatch
+            if !avatar.waitForExistence(timeout: 4) {
+                let bar = app.buttons["alo.compact-call-bar"]
+                XCTAssertTrue(bar.waitForExistence(timeout: 6), name)
+                bar.tap()
+            }
+            XCTAssertTrue(avatar.waitForExistence(timeout: 5), name)
+            Thread.sleep(forTimeInterval: 1.5)
+            attachScreenshot("call-\(name)")
+            if name == "talking" || name == "calling" {
+                app.buttons["alo.call.minimize"].tap()
+                Thread.sleep(forTimeInterval: 1.2)
+                attachScreenshot("call-bar-\(name)")
+            }
+            app.terminate()
+        }
+    }
+
+    private func attachScreenshot(_ name: String) {
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        shot.name = name
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
+    /// The bar fills the status bar; a tap on the clock or the battery must open the call too.
+    func testCompactCallBarOpensFromTheStatusBarArea() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_CALL_PREVIEW", "1"]
+        app.launch()
+        let bar = app.buttons["alo.compact-call-bar"]
+        XCTAssertTrue(bar.waitForExistence(timeout: 10))
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        shot.name = "call-compact-bar"
+        shot.lifetime = .keepAlways
+        add(shot)
+        let minimize = app.buttons["alo.call.minimize"]
+        for (index, point) in [CGVector(dx: 0.16, dy: 0.5), CGVector(dx: 0.86, dy: 0.5), CGVector(dx: 0.16, dy: 0.15)].enumerated() {
+            // Points inside the bar, measured from its top-left corner: clock, battery, the very top.
+            bar.coordinate(withNormalizedOffset: .zero)
+                .withOffset(CGVector(dx: bar.frame.width * point.dx, dy: bar.frame.height * point.dy * 0.6))
+                .tap()
+            XCTAssertTrue(minimize.waitForExistence(timeout: 3), "tap \(index) at the top opens the call")
+            minimize.tap()
+            // The call slides away first; only then does the bar take touches again.
+            let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: minimize)
+            XCTAssertEqual(XCTWaiter.wait(for: [gone], timeout: 5), .completed)
+            Thread.sleep(forTimeInterval: 1.0)
+        }
+    }
+
     func testCompactCallBarIsTopmostAndDismissesWithoutNetwork() {
         let app = XCUIApplication()
         app.launchArguments += ["-ALO_UI_CALL_PREVIEW", "1"]
@@ -57,9 +121,8 @@ final class AloLaunchUITests: XCTestCase {
         )
         safetyButton.tap()
 
-        let avatar = app.descendants(matching: .any)[
-            "alo.call-peer-avatar"
-        ]
+        let avatar = app.descendants(matching: .any)
+            .matching(identifier: "alo.call-peer-avatar").firstMatch
         XCTAssertTrue(avatar.waitForExistence(timeout: 5))
         let avatarFrameBeforeMute = avatar.frame
 
@@ -103,9 +166,8 @@ final class AloLaunchUITests: XCTestCase {
         ]
         app.launch()
 
-        let avatar = app.descendants(matching: .any)[
-            "alo.call-peer-avatar"
-        ]
+        let avatar = app.descendants(matching: .any)
+            .matching(identifier: "alo.call-peer-avatar").firstMatch
         let preview = app.descendants(matching: .any)[
             "alo.call-video-preview"
         ]

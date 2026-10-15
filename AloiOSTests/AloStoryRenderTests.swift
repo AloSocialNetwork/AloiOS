@@ -36,9 +36,12 @@ final class AloStoryRenderTests: XCTestCase {
     }
 
     func testTurnsSnapStraightNearRightAngles() {
-        XCTAssertEqual(AloStoryRotation.snapped(.degrees(87)).degrees, 90)
-        XCTAssertEqual(AloStoryRotation.snapped(.degrees(-3)).degrees, 0)
-        XCTAssertEqual(AloStoryRotation.snapped(.degrees(183)).degrees, 180)
+        // Within 3° of a right angle it snaps; a little further it stays where it was put.
+        XCTAssertEqual(AloStoryRotation.snapped(.degrees(88)).degrees, 90)
+        XCTAssertEqual(AloStoryRotation.snapped(.degrees(87)).degrees, 87, accuracy: 0.001)
+        XCTAssertEqual(AloStoryRotation.snapped(.degrees(-2)).degrees, 0)
+        XCTAssertEqual(AloStoryRotation.snapped(.degrees(4)).degrees, 4, accuracy: 0.001)
+        XCTAssertEqual(AloStoryRotation.snapped(.degrees(182)).degrees, 180)
         XCTAssertEqual(AloStoryRotation.snapped(.degrees(-268)).degrees, 90)
         XCTAssertEqual(AloStoryRotation.snapped(.degrees(40)).degrees, 40, accuracy: 0.001)
         XCTAssertEqual(AloStoryRotation.normalized(370), 10, accuracy: 0.001)

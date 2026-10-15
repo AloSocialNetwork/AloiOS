@@ -161,6 +161,10 @@ struct AloStoryEditorScreen: View {
     @State private var selectedStickerID: UUID?
     @State private var editingTextID: UUID?
     @State private var draftText = ""
+    /// Brush thickness on the slider, 0…1 of the current tool's range; its colour for the preview.
+    @State private var brushLevel: CGFloat = 0.3
+    @State private var brushColor: Color = .white
+    @State private var isSizingBrush = false
     @State private var lifetimeHours = 24
     @State private var publishRequested = false
     @State private var isPreparing = false
@@ -288,9 +292,13 @@ struct AloStoryEditorScreen: View {
             AloStoryDrawingCanvas(drawing: Binding(
                 get: { edits[currentPageID]?.drawing ?? PKDrawing() },
                 set: { edits[currentPageID, default: AloStoryPageEdits()].drawing = $0 }
-            ), isActive: mode == .draw)
+            ), isActive: mode == .draw, brushLevel: brushLevel, onToolColor: { brushColor = Color(uiColor: $0) })
             .id(currentPageID)
             .allowsHitTesting(mode == .draw)
+
+            if mode == .draw {
+                brushSizeControl(canvasSize: size)
+            }
 
             // A tap on the empty page drops the selection or, on a text story, starts typing.
             if mode == .sticker || (mode == .none && attachments.isEmpty) {
@@ -382,6 +390,27 @@ struct AloStoryEditorScreen: View {
                 .disabled(app.isCreatingStory)
                 .accessibilityLabel("Текст истории")
                 .accessibilityIdentifier("alo.story.text")
+        }
+    }
+
+    /// Instagram's brush size: a tapered slider on the left; while it moves, a dot of the brush's
+    /// real size and colour shows in the middle of the page.
+    private func brushSizeControl(canvasSize: CGSize) -> some View {
+        ZStack {
+            if isSizingBrush {
+                Circle()
+                    .fill(brushColor)
+                    .overlay(Circle().stroke(.black.opacity(0.25), lineWidth: 1))
+                    .frame(width: AloStoryDrawingCanvas.width(level: brushLevel), height: AloStoryDrawingCanvas.width(level: brushLevel))
+                    .shadow(color: .black.opacity(0.3), radius: 4)
+                    .allowsHitTesting(false)
+            }
+            HStack {
+                AloStorySizeSlider(level: $brushLevel, isActive: $isSizingBrush,
+                                   label: "Толщина кисти", height: min(240, canvasSize.height * 0.36))
+                Spacer()
+            }
+            .padding(.leading, 4)
         }
     }
 
@@ -738,7 +767,7 @@ struct AloStoryEditorScreen: View {
         let renderSize = CGSize(width: 720, height: 1_280)
         let scale = renderSize.width / canvasSize.width
         let drawingImage = pageEdits.drawing.strokes.isEmpty ? nil
-            : pageEdits.drawing.image(from: CGRect(origin: .zero, size: canvasSize), scale: scale)
+            : AloStoryDrawingCanvas.image(of: pageEdits.drawing, size: canvasSize, scale: scale)
         let overlayView = AloStoryRenderedPage(background: nil, gradient: [], drawing: drawingImage,
                                                stickers: pageEdits.stickers, size: canvasSize, transparent: true)
         let renderer = ImageRenderer(content: overlayView)
@@ -764,7 +793,7 @@ struct AloStoryEditorScreen: View {
         let pageEdits = edits[pageID] ?? AloStoryPageEdits()
         let scale = 1_080 / canvasSize.width
         let drawingImage = pageEdits.drawing.strokes.isEmpty ? nil
-            : pageEdits.drawing.image(from: CGRect(origin: .zero, size: canvasSize), scale: scale)
+            : AloStoryDrawingCanvas.image(of: pageEdits.drawing, size: canvasSize, scale: scale)
         let content = AloStoryRenderedPage(background: background, gradient: AloStoryTextStyle.gradients[textStyle.gradientIndex],
                                            drawing: drawingImage, stickers: pageEdits.stickers, size: canvasSize)
         let renderer = ImageRenderer(content: content)
@@ -888,7 +917,7 @@ private struct AloStoryTextWrap: Layout {
 /// Angles of turned items: folded into -180…180 and snapped straight near a right angle.
 enum AloStoryRotation {
     /// Within this many degrees of a right angle an item snaps straight.
-    static let snapDegrees = 5.0
+    static let snapDegrees = 3.0
 
     static func normalized(_ degrees: Double) -> Double {
         var value = degrees.truncatingRemainder(dividingBy: 360)
@@ -928,6 +957,7 @@ private struct AloStoryStickerView: View {
     /// The item's size when a handle was grabbed; the stretch is measured against it.
     @State private var stretchBase: CGSize?
     @State private var isSnapped = false
+    @State private var isTurning = false
 
 
     var body: some View {
@@ -941,6 +971,21 @@ private struct AloStoryStickerView: View {
                 if isSelected { selectionFrame() }
             }
             .rotationEffect(AloStoryRotation.snapped(sticker.rotation + twist))
+            // The angle while turning, upright above the item; it lights up when it snaps.
+            .overlay(alignment: .top) {
+                if isTurning {
+                    let degrees = Int(AloStoryRotation.snapped(sticker.rotation + twist).degrees.rounded())
+                    Text("\(degrees)°")
+                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 9).frame(height: 24)
+                        .background(isSnapped ? AloTheme.accent : Color.black.opacity(0.55), in: Capsule())
+                        .fixedSize()
+                        .offset(y: -64)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
             .position(x: origin.x + offset.width, y: origin.y + offset.height)
             // The tap goes first, so a quick touch selects instead of starting a move.
             .gesture(TapGesture().onEnded(onTap).exclusively(before:
@@ -1025,6 +1070,7 @@ private struct AloStoryStickerView: View {
 
     private func turn(to angle: Angle) {
         twist = angle
+        isTurning = true
         let snappedNow = AloStoryRotation.isNearRightAngle(sticker.rotation + angle)
         if snappedNow, !isSnapped { AloHaptics.selection() }
         isSnapped = snappedNow
@@ -1035,6 +1081,7 @@ private struct AloStoryStickerView: View {
         updated.rotation = AloStoryRotation.snapped(sticker.rotation + angle)
         twist = .zero
         isSnapped = false
+        isTurning = false
         onCommit(updated, nil)
     }
 
@@ -1092,6 +1139,27 @@ private struct AloStoryStickerView: View {
 private struct AloStoryDrawingCanvas: UIViewRepresentable {
     @Binding var drawing: PKDrawing
     let isActive: Bool
+    /// 0…1 of the brush range, set from the size slider.
+    var brushLevel: CGFloat = 0.3
+    var onToolColor: (UIColor) -> Void = { _ in }
+
+    /// One scale for every inking tool, so the slider means the same thickness for all of them.
+    static let widths: ClosedRange<CGFloat> = 2...40
+
+    /// The drawing as the canvas shows it (light style, colours not inverted).
+    static func image(of drawing: PKDrawing, size: CGSize, scale: CGFloat) -> UIImage {
+        var image = UIImage()
+        UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+            image = drawing.image(from: CGRect(origin: .zero, size: size), scale: scale)
+        }
+        return image
+    }
+
+    static func width(level: CGFloat) -> CGFloat {
+        let level = min(1, max(0, level))
+        // Finer steps at the thin end, where the difference shows most.
+        return widths.lowerBound + pow(level, 1.6) * (widths.upperBound - widths.lowerBound)
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -1100,35 +1168,141 @@ private struct AloStoryDrawingCanvas: UIViewRepresentable {
         view.backgroundColor = .clear
         view.isOpaque = false
         view.drawingPolicy = .anyInput
-        view.tool = PKInkingTool(.pen, color: .white, width: 8)
+        view.tool = PKInkingTool(.monoline, color: .white, width: Self.width(level: brushLevel))
+        // Ink is shown exactly as chosen: no dark-mode colour inversion, which the flattened
+        // story (drawn in light mode) would not have.
+        view.overrideUserInterfaceStyle = .light
         view.drawing = drawing
         view.delegate = context.coordinator
+        context.coordinator.canvas = view
+        context.coordinator.picker.addObserver(context.coordinator)
         return view
     }
 
     func updateUIView(_ view: PKCanvasView, context: Context) {
         context.coordinator.parent = self
         if view.drawing != drawing { view.drawing = drawing }
-        let picker = context.coordinator.picker
-        if isActive {
+        let coordinator = context.coordinator
+        let picker = coordinator.picker
+        if isActive, !coordinator.isShowingPicker {
+            // Once per entry into draw mode: becoming first responder makes the picker hand the
+            // canvas its own tool, so the slider's thickness is put back right after.
+            coordinator.isShowingPicker = true
             picker.addObserver(view)
             picker.setVisible(true, forFirstResponder: view)
-            DispatchQueue.main.async { view.becomeFirstResponder() }
-        } else if view.isFirstResponder {
+            DispatchQueue.main.async {
+                view.becomeFirstResponder()
+                DispatchQueue.main.async { coordinator.applyBrushWidth() }
+            }
+        } else if !isActive, coordinator.isShowingPicker {
+            coordinator.isShowingPicker = false
             picker.setVisible(false, forFirstResponder: view)
             view.resignFirstResponder()
         }
+        coordinator.applyBrushWidth()
     }
 
-    final class Coordinator: NSObject, PKCanvasViewDelegate {
+    final class Coordinator: NSObject, PKCanvasViewDelegate, PKToolPickerObserver {
         var parent: AloStoryDrawingCanvas
-        let picker = PKToolPicker()
+        /// A finger has no pressure on iPhone, so pressure inks (pen, pencil) stay hairline-thin
+        /// whatever the width. The brush is monoline, like Instagram's; then a marker, the eraser
+        /// (sized by the slider too) and the lasso.
+        let picker: PKToolPicker = {
+            let picker = PKToolPicker(toolItems: [
+                PKToolPickerInkingItem(type: .monoline, color: .white, identifier: "alo.brush"),
+                PKToolPickerInkingItem(type: .marker, color: .systemYellow, identifier: "alo.marker"),
+                PKToolPickerEraserItem(type: .bitmap),
+                PKToolPickerLassoItem()
+            ])
+            picker.colorUserInterfaceStyle = .light
+            picker.overrideUserInterfaceStyle = .dark
+            return picker
+        }()
+        weak var canvas: PKCanvasView?
+        var isShowingPicker = false
 
         init(_ parent: AloStoryDrawingCanvas) { self.parent = parent }
 
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
             if parent.drawing != canvasView.drawing { parent.drawing = canvasView.drawing }
         }
+
+        /// The picker hands the canvas its own tool; our slider's thickness goes back on top.
+        func toolPickerSelectedToolItemDidChange(_ toolPicker: PKToolPicker) {
+            DispatchQueue.main.async { self.applyBrushWidth() }
+        }
+
+        func applyBrushWidth() {
+            guard let canvas else { return }
+            let width = AloStoryDrawingCanvas.width(level: parent.brushLevel)
+            if let eraser = canvas.tool as? PKEraserTool, eraser.eraserType == .bitmap {
+                if abs(eraser.width - width) > 0.01 { canvas.tool = PKEraserTool(.bitmap, width: width) }
+                return
+            }
+            guard let ink = canvas.tool as? PKInkingTool else { return }
+            if abs(ink.width - width) > 0.01 {
+                canvas.tool = PKInkingTool(ink.inkType, color: ink.color, width: width)
+            }
+            parent.onToolColor(ink.color)
+        }
+    }
+}
+
+/// A tapered slider on the left edge, as in Instagram's drawing tools: wide at the top, thin at
+/// the bottom; drag along it. VoiceOver adjusts it in 10 % steps.
+private struct AloStorySizeSlider: View {
+    @Binding var level: CGFloat
+    @Binding var isActive: Bool
+    let label: String
+    let height: CGFloat
+    private let knob: CGFloat = 24
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            AloStoryTaperedTrack()
+                .fill(.white.opacity(0.32))
+                .overlay(AloStoryTaperedTrack().stroke(.white.opacity(0.65), lineWidth: 1))
+                .frame(width: 16, height: height)
+            Circle()
+                .fill(.white)
+                .frame(width: knob, height: knob)
+                .shadow(color: .black.opacity(0.3), radius: 3, y: 1)
+                .offset(y: (1 - level) * (height - knob))
+        }
+        .frame(width: 44, height: height)
+        .contentShape(Rectangle())
+        .gesture(DragGesture(minimumDistance: 0)
+            .onChanged { drag in
+                isActive = true
+                level = min(1, max(0, 1 - (drag.location.y - knob / 2) / (height - knob)))
+            }
+            .onEnded { _ in isActive = false })
+        .accessibilityElement()
+        .accessibilityLabel(label)
+        .accessibilityValue("\(Int((level * 100).rounded())) %")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: level = min(1, level + 0.1)
+            case .decrement: level = max(0, level - 0.1)
+            @unknown default: break
+            }
+        }
+        .accessibilityIdentifier("alo.story.brush-size")
+    }
+}
+
+/// Wide and round at the top, narrowing to a thin end at the bottom.
+private struct AloStoryTaperedTrack: Shape {
+    func path(in rect: CGRect) -> Path {
+        let top = rect.width / 2, bottom = rect.width / 8
+        var path = Path()
+        path.addArc(center: CGPoint(x: rect.midX, y: rect.minY + top), radius: top,
+                    startAngle: .degrees(180), endAngle: .degrees(0), clockwise: false)
+        path.addLine(to: CGPoint(x: rect.midX + bottom, y: rect.maxY - bottom))
+        path.addArc(center: CGPoint(x: rect.midX, y: rect.maxY - bottom), radius: bottom,
+                    startAngle: .degrees(0), endAngle: .degrees(180), clockwise: false)
+        path.closeSubpath()
+        return path
     }
 }
 
