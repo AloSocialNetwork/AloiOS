@@ -312,6 +312,19 @@ extension AloAppModel {
                         "createdAt": iso.string(from: Date()),
                         "expiresAt": iso.string(from: Date().addingTimeInterval(86400))]]])
             }, viewers: viewers)
+            previewFriends = ["Александр", "Даша", "Маша", "Слава"].enumerated().map { index, name in
+                AloEntitySummary(["id": 990010 + index, "name": name, "username": ["alex", "dasha", "masha", "slava"][index]])
+            }
+            // An archive of past stories, and one highlight made from two of them.
+            previewArchive = (0..<7).map { index in
+                AloStory(["id": 990700 + index, "userId": 990001,
+                          "body": index % 3 == 2 ? "Вечер у моря" : "",
+                          "media": index % 3 == 2 ? [] : [["type": "image", "url": sample.imageURI]],
+                          "viewCount": 3 + index,
+                          "createdAt": iso.string(from: Date().addingTimeInterval(-Double(index + 1) * 86_400 * 2)),
+                          "expiresAt": iso.string(from: Date().addingTimeInterval(-Double(index + 1) * 86_400 * 2 + 86_400))])
+            }
+            previewHighlights = [Self.previewHighlight(id: 1, title: "Лето", stories: Array(previewArchive.prefix(2)))]
             if UserDefaults.standard.bool(forKey: "ALO_UI_STORY_EXPIRED") {
                 expiredStory = AloExpiredStoryNotice(author: AloEntitySummary(["id": 990010, "name": "Маша", "username": "masha"]))
             }

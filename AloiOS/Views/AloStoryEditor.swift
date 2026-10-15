@@ -166,6 +166,10 @@ struct AloStoryEditorScreen: View {
     @State private var brushColor: Color = .white
     @State private var isSizingBrush = false
     @State private var lifetimeHours = 24
+    @State private var audience = AloStoryAudience.everyone
+    @State private var selectedPeople: [AloEntitySummary] = []
+    @State private var isPublishSheetPresented = false
+    @State private var publishCanvasSize: CGSize = .zero
     @State private var publishRequested = false
     @State private var isPreparing = false
     @State private var isImporting = false
@@ -229,6 +233,15 @@ struct AloStoryEditorScreen: View {
         .onDisappear {
             importTask?.cancel()
             attachments.forEach(AloDraftAttachmentStore.discard)
+        }
+        .sheet(isPresented: $isPublishSheetPresented) {
+            AloStoryPublishSheet(audience: $audience, selectedPeople: $selectedPeople, lifetimeHours: $lifetimeHours) {
+                isPublishSheetPresented = false
+                publish(canvasSize: publishCanvasSize)
+            }
+            .environmentObject(app)
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
         }
         .sheet(isPresented: $isStickerSheetPresented) {
             AloStoryStickerPicker { emoji in
@@ -664,18 +677,6 @@ struct AloStoryEditorScreen: View {
 
     private func bottomBar(canvasSize: CGSize) -> some View {
         HStack(spacing: 10) {
-            Menu {
-                Picker("Срок жизни", selection: $lifetimeHours) {
-                    ForEach([6, 12, 24, 48], id: \.self) { hours in Text("\(hours) часов").tag(hours) }
-                }
-            } label: {
-                Label("\(lifetimeHours) ч", systemImage: "clock")
-                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
-                    .padding(.horizontal, 14).frame(height: 44)
-                    .modifier(AloChatGlass(interactive: false, role: .chrome))
-            }
-            .accessibilityLabel("История исчезнет через \(lifetimeHours) часов")
-            .accessibilityIdentifier("alo.story.lifetime")
             PhotosPicker(selection: $pickedItems, maxSelectionCount: 10, matching: .any(of: [.images, .videos]),
                          preferredItemEncoding: .compatible) {
                 Image(systemName: "photo.on.rectangle")
@@ -699,14 +700,20 @@ struct AloStoryEditorScreen: View {
                 .accessibilityLabel("Снять на камеру")
             }
             Spacer(minLength: 0)
+            // As in Telegram: "Далее" asks who may see the story and for how long, then publishes.
             Button {
-                publish(canvasSize: canvasSize)
+                if mode == .text { commitText() }
+                publishCanvasSize = canvasSize
+                isPublishSheetPresented = true
             } label: {
                 Group {
                     if app.isCreatingStory || isPreparing {
                         ProgressView().tint(.white)
                     } else {
-                        Text("Опубликовать").font(.system(size: 16, weight: .semibold))
+                        HStack(spacing: 6) {
+                            Text("Далее").font(.system(size: 16, weight: .semibold))
+                            Image(systemName: audience.symbol).font(.system(size: 13, weight: .semibold))
+                        }
                     }
                 }
                 .foregroundStyle(isPublishDisabled ? AloTheme.muted : .white)
@@ -756,7 +763,8 @@ struct AloStoryEditorScreen: View {
                     }
                 }
             }
-            app.createStory(body: body, localAttachments: media, lifetimeHours: lifetimeHours)
+            app.createStory(body: body, localAttachments: media, lifetimeHours: lifetimeHours,
+                            audience: audience, audienceUserIds: audience == .selected ? selectedPeople.map(\.id) : [])
             AloHaptics.impact(.light)
         }
     }

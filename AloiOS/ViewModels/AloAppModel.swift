@@ -167,6 +167,17 @@ final class AloAppModel: ObservableObject {
 #if DEBUG
     /// Who "saw" the fixture's own story, for the viewers list without a server.
     var previewStoryViewers = [AloStoryViewerEntry]()
+    var previewFriends = [AloEntitySummary]()
+    var previewStorySettings = AloStorySettings()
+    var previewArchive = [AloStory]()
+    var previewHighlights = [AloStoryHighlight]()
+
+    static func previewHighlight(id: Int, title: String, stories: [AloStory]) -> AloStoryHighlight {
+        AloStoryHighlight([
+            "id": id, "title": title, "coverStoryId": stories.first?.id ?? 0,
+            "stories": stories.map(\.dictionary)
+        ])
+    }
 #endif
     @Published private(set) var isStoriesLoading = false
     @Published private(set) var isCreatingStory = false
@@ -917,7 +928,9 @@ final class AloAppModel: ObservableObject {
     func createStory(
         body: String,
         localAttachments: [AloLocalAttachment] = [],
-        lifetimeHours: Int = 24
+        lifetimeHours: Int = 24,
+        audience: AloStoryAudience = .everyone,
+        audienceUserIds: [Int] = []
     ) {
         let text = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (!text.isEmpty || !localAttachments.isEmpty), !isCreatingStory else { return }
@@ -934,7 +947,9 @@ final class AloAppModel: ObservableObject {
                 _ = try await api.createStory(
                     body: text,
                     media: media,
-                    lifetimeHours: lifetimeHours
+                    lifetimeHours: lifetimeHours,
+                    audience: audience,
+                    audienceUserIds: audienceUserIds
                 )
                 // Publication has already succeeded. Refreshing the tray must
                 // not keep the editor's submit button spinning.
@@ -945,6 +960,124 @@ final class AloAppModel: ObservableObject {
                 storyPublishingError = "Не удалось опубликовать историю. Проверьте подключение и повторите попытку."
             }
         }
+    }
+
+    // MARK: Story audiences, archive and highlights
+
+    /// Bumped after highlights change, so profile rows reload.
+    @Published var highlightsRevision = 0
+
+    func friends() async throws -> [AloEntitySummary] {
+#if DEBUG
+        if isFeedInteractionPreview { return previewFriends }
+#endif
+        return try await api.loadFriends()
+    }
+
+    func storySettings() async throws -> AloStorySettings {
+#if DEBUG
+        if isFeedInteractionPreview { return previewStorySettings }
+#endif
+        return try await api.loadStorySettings()
+    }
+
+    func saveCloseFriends(_ people: [AloEntitySummary]) async throws {
+#if DEBUG
+        if isFeedInteractionPreview { previewStorySettings.closeFriends = people; return }
+#endif
+        _ = try await api.updateCloseFriends(people.map(\.id))
+    }
+
+    func saveStoryHiddenFrom(_ people: [AloEntitySummary]) async throws {
+#if DEBUG
+        if isFeedInteractionPreview { previewStorySettings.hiddenFrom = people; return }
+#endif
+        _ = try await api.updateStoryHiddenFrom(people.map(\.id))
+    }
+
+    func storyArchive(before: String = "") async throws -> (stories: [AloStory], nextBefore: String) {
+#if DEBUG
+        if isFeedInteractionPreview { return (previewArchive, "") }
+#endif
+        return try await api.loadStoryArchive(before: before)
+    }
+
+    func highlights(userId: Int) async throws -> [AloStoryHighlight] {
+#if DEBUG
+        if isFeedInteractionPreview { return userId == bootstrap?.me.id ? previewHighlights : [] }
+#endif
+        return try await api.loadHighlights(userId: userId)
+    }
+
+    func createHighlight(title: String, stories: [AloStory]) async throws {
+#if DEBUG
+        if isFeedInteractionPreview {
+            previewHighlights.insert(Self.previewHighlight(id: (previewHighlights.map(\.id).max() ?? 0) + 1,
+                                                          title: title, stories: stories), at: 0)
+            highlightsRevision += 1
+            return
+        }
+#endif
+        _ = try await api.createHighlight(title: title, storyIds: stories.map(\.id))
+        highlightsRevision += 1
+    }
+
+    func addToHighlight(_ highlight: AloStoryHighlight, stories: [AloStory]) async throws {
+#if DEBUG
+        if isFeedInteractionPreview {
+            if let index = previewHighlights.firstIndex(where: { $0.id == highlight.id }) {
+                let merged = highlight.stories + stories.filter { story in !highlight.stories.contains { $0.id == story.id } }
+                previewHighlights[index] = Self.previewHighlight(id: highlight.id, title: highlight.title, stories: merged)
+            }
+            highlightsRevision += 1
+            return
+        }
+#endif
+        _ = try await api.updateHighlight(id: highlight.id, addStoryIds: stories.map(\.id))
+        highlightsRevision += 1
+    }
+
+    func removeFromHighlight(_ highlight: AloStoryHighlight, story: AloStory) async throws {
+#if DEBUG
+        if isFeedInteractionPreview {
+            if let index = previewHighlights.firstIndex(where: { $0.id == highlight.id }) {
+                let left = highlight.stories.filter { $0.id != story.id }
+                if left.isEmpty { previewHighlights.remove(at: index) } else {
+                    previewHighlights[index] = Self.previewHighlight(id: highlight.id, title: highlight.title, stories: left)
+                }
+            }
+            highlightsRevision += 1
+            return
+        }
+#endif
+        _ = try await api.updateHighlight(id: highlight.id, removeStoryIds: [story.id])
+        highlightsRevision += 1
+    }
+
+    func renameHighlight(_ highlight: AloStoryHighlight, title: String) async throws {
+#if DEBUG
+        if isFeedInteractionPreview {
+            if let index = previewHighlights.firstIndex(where: { $0.id == highlight.id }) {
+                previewHighlights[index] = Self.previewHighlight(id: highlight.id, title: title, stories: highlight.stories)
+            }
+            highlightsRevision += 1
+            return
+        }
+#endif
+        _ = try await api.updateHighlight(id: highlight.id, title: title)
+        highlightsRevision += 1
+    }
+
+    func deleteHighlight(_ highlight: AloStoryHighlight) async throws {
+#if DEBUG
+        if isFeedInteractionPreview {
+            previewHighlights.removeAll { $0.id == highlight.id }
+            highlightsRevision += 1
+            return
+        }
+#endif
+        try await api.deleteHighlight(id: highlight.id)
+        highlightsRevision += 1
     }
 
     /// The story's link, copied to the clipboard. False when there is none to copy.
@@ -983,18 +1116,7 @@ final class AloAppModel: ObservableObject {
             guard group.stories.contains(where: { $0.id == story.id }) else { return group }
             let updatedStories = group.stories.map { item in
                 guard item.id == story.id else { return item }
-                return AloStory([
-                    "id": item.id,
-                    "userId": item.userId,
-                    "body": item.body,
-                    "media": item.media.map {
-                        ["type": $0.type, "url": $0.url, "posterUrl": $0.posterUrl, "caption": $0.caption]
-                    },
-                    "createdAt": item.createdAt,
-                    "expiresAt": item.expiresAt,
-                    "viewerHasSeen": true,
-                    "viewCount": item.viewCount
-                ])
+                return AloStory(item.dictionary.merging(["viewerHasSeen": true]) { _, new in new })
             }
             return AloStoryGroup([
                 "user": [
@@ -1005,20 +1127,7 @@ final class AloAppModel: ObservableObject {
                     "verified": group.user.verified,
                     "isChannel": group.user.isChannel
                 ],
-                "stories": updatedStories.map {
-                    [
-                        "id": $0.id,
-                        "userId": $0.userId,
-                        "body": $0.body,
-                        "media": $0.media.map {
-                            ["type": $0.type, "url": $0.url, "posterUrl": $0.posterUrl, "caption": $0.caption]
-                        },
-                        "createdAt": $0.createdAt,
-                        "expiresAt": $0.expiresAt,
-                        "viewerHasSeen": $0.viewerHasSeen,
-                        "viewCount": $0.viewCount
-                    ]
-                },
+                "stories": updatedStories.map(\.dictionary),
                 "hasUnseen": false
             ])
         }

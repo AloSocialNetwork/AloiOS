@@ -619,6 +619,8 @@ final class AloSocialConsistencyUITests: XCTestCase {
         capture("s-4-ready")
         // Publishing flattens the page first; offline, the upload then fails with a visible error.
         app.buttons["alo.story.publish"].tap()
+        XCTAssertTrue(app.buttons["alo.story.publish-confirm"].waitForExistence(timeout: 4))
+        app.buttons["alo.story.publish-confirm"].tap()
         let error = app.descendants(matching: .any).matching(identifier: "alo.story.publish-error").firstMatch
         XCTAssertTrue(error.waitForExistence(timeout: 10), "the page was rendered and the upload attempted")
         capture("s-5-publish-offline")
@@ -854,6 +856,81 @@ final class AloSocialConsistencyUITests: XCTestCase {
         capture("sv-5-expired")
     }
 
+    /// Telegram's story privacy, highlights and archive: publish to close friends chosen from your
+    /// friends; your highlights on the profile; pick archived stories into a new highlight.
+    func testStoryAudienceArchiveHighlights() {
+        let app = launch()
+        let story = app.buttons["alo.feed.create-story"]
+        XCTAssertTrue(story.waitForExistence(timeout: 15))
+        story.tap()
+        XCTAssertTrue(app.buttons["alo.story.publish"].waitForExistence(timeout: 4))
+        Thread.sleep(forTimeInterval: 0.6)
+        app.typeText("Только для своих")
+        // The keyboard covers the bottom bar: "Готово" first, as a person would.
+        app.buttons["alo.story.tool-done"].tap()
+        app.buttons["alo.story.tool-done"].tap()
+        app.buttons["alo.story.publish"].tap()
+        let closeFriends = app.descendants(matching: .any)["alo.story.audience.close_friends"]
+        XCTAssertTrue(closeFriends.waitForExistence(timeout: 4))
+        Thread.sleep(forTimeInterval: 0.5)
+        capture("au-1-audience")
+        closeFriends.tap()
+        // No close friends yet: the friend picker opens.
+        let rows = app.buttons.matching(identifier: "alo.people.row")
+        XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 4))
+        XCTAssertEqual(rows.count, 4)
+        rows.matching(NSPredicate(format: "label BEGINSWITH 'Маша'")).firstMatch.tap()
+        rows.matching(NSPredicate(format: "label BEGINSWITH 'Даша'")).firstMatch.tap()
+        capture("au-2-close-friends")
+        app.buttons["alo.people.done"].tap()
+        XCTAssertTrue(app.buttons["2 человека · Изменить"].waitForExistence(timeout: 4), "the sheet counts close friends")
+        XCTAssertEqual(closeFriends.value as? String, "выбрано")
+        capture("au-3-chosen")
+        app.buttons["alo.story.publish-confirm"].tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "alo.story.publish-error").firstMatch
+            .waitForExistence(timeout: 10), "published offline: the editor reports the upload")
+        app.buttons["Закрыть редактор истории"].tap()
+
+        // Highlights on your profile.
+        app.buttons["Профиль"].firstMatch.tap()
+        let summer = app.buttons["alo.highlight.Лето"]
+        XCTAssertTrue(summer.waitForExistence(timeout: 6))
+        XCTAssertTrue(app.buttons["alo.highlights.new"].exists)
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("au-4-highlights")
+        summer.tap()
+        XCTAssertTrue(app.staticTexts["Лето"].waitForExistence(timeout: 4), "the highlight's title shows in the viewer")
+        app.buttons["alo.story.viewer.more"].tap()
+        XCTAssertTrue(app.buttons["Убрать из актуального"].waitForExistence(timeout: 3))
+        capture("au-5-highlight-menu")
+        // iOS 26 shows the actions without a cancel row: a tap outside closes them.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.5)).tap()
+        let close = app.buttons["alo.story.viewer.close"]
+        if close.waitForExistence(timeout: 2) { close.tap() }
+        XCTAssertTrue(app.buttons["alo.highlights.archive"].waitForExistence(timeout: 8), "back on the profile")
+
+        // The archive: choose two stories for a new highlight.
+        app.buttons["alo.highlights.archive"].tap()
+        let cells = app.buttons.matching(identifier: "alo.archive.story")
+        XCTAssertTrue(cells.firstMatch.waitForExistence(timeout: 4))
+        XCTAssertEqual(cells.count, 7)
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("au-6-archive")
+        app.buttons["alo.archive.select"].tap()
+        cells.element(boundBy: 2).tap()
+        cells.element(boundBy: 4).tap()
+        capture("au-7-archive-selected")
+        app.buttons["alo.archive.add"].tap()
+        let title = app.textFields["alo.highlight.title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 4))
+        title.tap()
+        title.typeText("Море")
+        app.buttons["alo.highlight.create"].tap()
+        XCTAssertTrue(app.buttons["alo.highlight.Море"].waitForExistence(timeout: 6), "the new highlight is on the profile")
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("au-8-new-highlight")
+    }
+
     /// Needs a video in the simulator's Photos (`xcrun simctl addmedia <udid> clip.mp4`).
     func testCaptureVideoStoryOverlay() throws {
         let app = XCUIApplication()
@@ -929,6 +1006,8 @@ final class AloSocialConsistencyUITests: XCTestCase {
 
         // Publishing burns the overlay into the video first; offline, the upload then fails visibly.
         app.buttons["alo.story.publish"].tap()
+        XCTAssertTrue(app.buttons["alo.story.publish-confirm"].waitForExistence(timeout: 4))
+        app.buttons["alo.story.publish-confirm"].tap()
         let error = app.descendants(matching: .any).matching(identifier: "alo.story.publish-error").firstMatch
         XCTAssertTrue(error.waitForExistence(timeout: 60), "the video was composed and the upload attempted")
         print("STORYDBG", error.label)
@@ -957,7 +1036,9 @@ final class AloSocialConsistencyUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 1.0)
         capture("p-story-editor")
         app.typeText("Сегодня в парке!")
-        app.buttons["alo.story.lifetime"].tap()
+        app.buttons["alo.story.tool-done"].tap()
+        app.buttons["alo.story.publish"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["alo.story.lifetime"].waitForExistence(timeout: 4))
         Thread.sleep(forTimeInterval: 0.8)
         capture("p-story-lifetime")
     }

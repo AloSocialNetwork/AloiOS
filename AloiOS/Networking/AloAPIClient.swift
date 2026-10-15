@@ -1034,12 +1034,16 @@ final class AloAPIClient {
     func createStory(
         body: String,
         media: [AloMessageAttachment] = [],
-        lifetimeHours: Int = 24
+        lifetimeHours: Int = 24,
+        audience: AloStoryAudience = .everyone,
+        audienceUserIds: [Int] = []
     ) async throws -> AloStory {
         let json = try await request(
             "POST",
             "/api/stories",
             body: [
+                "audience": audience.rawValue,
+                "audienceUserIds": audienceUserIds,
                 "body": body,
                 "media": media.map {
                     [
@@ -1092,6 +1096,53 @@ final class AloAPIClient {
         } catch let error as AloAPIError where error.status == 410 {
             return .expired(author: (error.payload["user"] as? [String: Any]).map(AloEntitySummary.init))
         }
+    }
+
+    func loadFriends() async throws -> [AloEntitySummary] {
+        try await request("GET", "/api/friends").array("friends").map(AloEntitySummary.init)
+    }
+
+    func loadStorySettings() async throws -> AloStorySettings {
+        AloStorySettings(try await request("GET", "/api/stories/settings"))
+    }
+
+    func updateCloseFriends(_ userIds: [Int]) async throws -> [AloEntitySummary] {
+        try await request("PUT", "/api/stories/close-friends", body: ["userIds": userIds]).array("people").map(AloEntitySummary.init)
+    }
+
+    func updateStoryHiddenFrom(_ userIds: [Int]) async throws -> [AloEntitySummary] {
+        try await request("PUT", "/api/stories/hidden-from", body: ["userIds": userIds]).array("people").map(AloEntitySummary.init)
+    }
+
+    /// Your own stories, expired ones too, newest first; `before` pages back.
+    func loadStoryArchive(before: String = "") async throws -> (stories: [AloStory], nextBefore: String) {
+        let query = before.isEmpty ? "" : "?before=\(before.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")"
+        let json = try await request("GET", "/api/stories/archive\(query)")
+        return (json.array("stories").map(AloStory.init), json.string("nextBefore"))
+    }
+
+    func loadHighlights(userId: Int) async throws -> [AloStoryHighlight] {
+        try await request("GET", "/api/users/\(userId)/highlights").array("highlights").map(AloStoryHighlight.init)
+    }
+
+    func createHighlight(title: String, storyIds: [Int]) async throws -> AloStoryHighlight {
+        AloStoryHighlight(try await request("POST", "/api/stories/highlights",
+                                            body: ["title": title, "storyIds": storyIds]).object("highlight"))
+    }
+
+    /// Nil when the change emptied the highlight and the server removed it.
+    func updateHighlight(id: Int, title: String? = nil, addStoryIds: [Int] = [], removeStoryIds: [Int] = [],
+                         coverStoryId: Int? = nil) async throws -> AloStoryHighlight? {
+        var body: [String: Any] = ["addStoryIds": addStoryIds, "removeStoryIds": removeStoryIds]
+        if let title { body["title"] = title }
+        if let coverStoryId { body["coverStoryId"] = coverStoryId }
+        let json = try await request("PATCH", "/api/stories/highlights/\(id)", body: body)
+        let highlight = json.object("highlight")
+        return highlight.isEmpty ? nil : AloStoryHighlight(highlight)
+    }
+
+    func deleteHighlight(id: Int) async throws {
+        _ = try await request("DELETE", "/api/stories/highlights/\(id)")
     }
 
     /// Who has seen a story, newest first; only its author may ask.
