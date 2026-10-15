@@ -3252,6 +3252,12 @@ struct ConversationView: View {
                                     Button("Моноширинный", systemImage: "chevron.left.forwardslash.chevron.right") {
                                         applyDraftFormatting(marker: "`")
                                     }
+                                    Button("Цитата", systemImage: "text.quote") {
+                                        applyDraftQuote()
+                                    }
+                                    Button("Блок кода", systemImage: "curlybraces") {
+                                        applyDraftCodeBlock()
+                                    }
                             }
                             .padding(.trailing, 2)
                         }
@@ -3746,6 +3752,29 @@ struct ConversationView: View {
             app.messageText = String(current.dropFirst(marker.count).dropLast(marker.count))
         } else {
             app.messageText = marker + current + marker
+        }
+        composerFocused = true
+    }
+
+    /// "> " before every line makes the draft a quote; the same again removes it.
+    private func applyDraftQuote() {
+        let lines = app.messageText.components(separatedBy: "\n")
+        guard !app.messageText.isEmpty else { return }
+        let quoted = lines.allSatisfy { $0.hasPrefix("> ") || $0.isEmpty }
+        app.messageText = lines.map { line in
+            quoted ? String(line.dropFirst(line.hasPrefix("> ") ? 2 : 0)) : "> " + line
+        }.joined(separator: "\n")
+        composerFocused = true
+    }
+
+    /// Fences the draft as a code block (``` … ```), or removes the fence.
+    private func applyDraftCodeBlock() {
+        let current = app.messageText
+        guard !current.isEmpty else { return }
+        if current.hasPrefix("```\n"), current.hasSuffix("\n```") {
+            app.messageText = String(current.dropFirst(4).dropLast(4))
+        } else {
+            app.messageText = "```\n" + current + "\n```"
         }
         composerFocused = true
     }
@@ -5065,8 +5094,7 @@ private struct ChatMessageRow: View {
             if !message.body.isEmpty && message.reactions.isEmpty {
                 // A caption is a text bubble under the photo: the time shares its last line when it fits.
                 VStack(alignment: .leading, spacing: 2) {
-                    AloTextStatusLayout(attributedText: AttributedString(
-                        AloRichMessageText.attributedBody(message.body, entities: message.entities))) {
+                    AloTextStatusLayout(attributedText: AloRichMessageText.statusMeasureText(message.body, entities: message.entities)) {
                         AloRichMessageText(body: message.body, entities: message.entities)
                             .accessibilityIdentifier("alo.message.body.\(message.id)")
                         timestamp(checksBleed: 5).layoutPriority(1)
@@ -5120,7 +5148,7 @@ private struct ChatMessageRow: View {
                 senderAttribution
                 replyPreview
                 AloTextStatusLayout(showsStatus: message.reactions.isEmpty,
-                    attributedText: AttributedString(AloRichMessageText.attributedBody(message.body, entities: message.entities))) {
+                    attributedText: AloRichMessageText.statusMeasureText(message.body, entities: message.entities)) {
                     AloRichMessageText(body: message.body, entities: message.entities)
                         .accessibilityIdentifier("alo.message.body.\(message.id)")
                     timestamp(checksBleed: 5).layoutPriority(1)
@@ -5580,12 +5608,106 @@ struct AloRichMessageText: View {
     }
 
     @ViewBuilder private var renderedText: some View {
-        if entities.contains(where: { $0.type == "spoiler" }) {
+        if let blocks = Self.blocks(text, entities: entities) {
+            blockText(blocks)
+        } else if entities.contains(where: { $0.type == "spoiler" }) {
             messageText.onTapGesture {
                 withAnimation(.easeOut(duration: 0.18)) { revealsSpoilers = true }
             }
         } else {
             messageText
+        }
+    }
+
+    // MARK: Quotes and code blocks
+
+    struct Block: Identifiable {
+        enum Kind { case plain, quote, code }
+        let id: Int
+        let kind: Kind
+        let range: NSRange
+        let language: String
+    }
+
+    /// The message cut into plain runs, quotes and code blocks; nil when it has neither.
+    static func blocks(_ text: String, entities: [AloMessageTextEntity]) -> [Block]? {
+        let blockEntities = entities.filter { $0.type == "blockquote" || $0.type == "pre" }.sorted { $0.offset < $1.offset }
+        guard !blockEntities.isEmpty, AloPollCodec.previewText(for: text) == nil else { return nil }
+        let string = text as NSString
+        var result = [Block]()
+        var cursor = 0
+        func appendPlain(_ start: Int, _ end: Int) {
+            var range = NSRange(location: start, length: end - start)
+            // Newlines around a block are its own spacing.
+            while range.length > 0, string.character(at: range.location) == 10 { range.location += 1; range.length -= 1 }
+            while range.length > 0, string.character(at: NSMaxRange(range) - 1) == 10 { range.length -= 1 }
+            if range.length > 0 { result.append(Block(id: result.count, kind: .plain, range: range, language: "")) }
+        }
+        for entity in blockEntities where entity.offset >= cursor && entity.offset + entity.length <= string.length {
+            appendPlain(cursor, entity.offset)
+            result.append(Block(id: result.count, kind: entity.type == "pre" ? .code : .quote,
+                                range: NSRange(location: entity.offset, length: entity.length), language: entity.url))
+            cursor = entity.offset + entity.length
+        }
+        appendPlain(cursor, string.length)
+        return result.isEmpty ? nil : result
+    }
+
+    /// Text for bubble measurement. A message with blocks puts its time on a line of its own.
+    static func statusMeasureText(_ text: String, entities: [AloMessageTextEntity]) -> AttributedString? {
+        blocks(text, entities: entities) == nil ? AttributedString(attributedBody(text, entities: entities)) : nil
+    }
+
+    private func blockText(_ blocks: [Block]) -> some View {
+        let full = attributedText
+        let whole = NSAttributedString(full)
+        return VStack(alignment: .leading, spacing: 6) {
+            ForEach(blocks) { block in
+                let slice = AttributedString(whole.attributedSubstring(from: block.range))
+                switch block.kind {
+                case .plain:
+                    Text(slice).foregroundStyle(Color.white).fixedSize(horizontal: false, vertical: true)
+                case .quote:
+                    // Telegram's quote: a tinted block with a bar on the left and a quote mark.
+                    Text(slice)
+                        .foregroundStyle(Color.white)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, 11).padding(.trailing, 22).padding(.vertical, 5)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.white.opacity(0.12))
+                        .overlay(alignment: .leading) { Rectangle().fill(Color.white.opacity(0.9)).frame(width: 3) }
+                        .overlay(alignment: .topTrailing) {
+                            Image(systemName: "quote.closing").font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(Color.white.opacity(0.75)).padding(6)
+                        }
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .accessibilityLabel("Цитата: \(String(slice.characters))")
+                case .code:
+                    VStack(alignment: .leading, spacing: 4) {
+                        if !block.language.isEmpty {
+                            Text(block.language).font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.white.opacity(0.7))
+                        }
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            Text(slice).foregroundStyle(Color.white).fixedSize()
+                        }
+                    }
+                    .padding(.horizontal, 10).padding(.vertical, 7)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.black.opacity(0.24))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .contextMenu {
+                        Button { UIPasteboard.general.string = String(slice.characters) } label: {
+                            Label("Скопировать код", systemImage: "doc.on.doc")
+                        }
+                    }
+                }
+            }
+        }
+        .font(.system(size: fontSize, weight: .regular))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard entities.contains(where: { $0.type == "spoiler" }) else { return }
+            withAnimation(.easeOut(duration: 0.18)) { revealsSpoilers = true }
         }
     }
 
@@ -5656,6 +5778,8 @@ struct AloRichMessageText: View {
                     ],
                     range: range
                 )
+            case "pre":
+                value.addAttribute(.font, value: UIFont.monospacedSystemFont(ofSize: 15, weight: .regular), range: range)
             case "link", "mention":
                 if let url = URL(string: entity.url) {
                     value.addAttributes(

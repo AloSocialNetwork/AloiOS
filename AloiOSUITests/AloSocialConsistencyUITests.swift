@@ -1052,6 +1052,62 @@ final class AloSocialConsistencyUITests: XCTestCase {
         capture("fc-15-stats-more")
     }
 
+    /// Quotes and code blocks in bubbles, and the composer's formatting menu.
+    func testMessageQuoteAndCodeBlocks() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "formatting"]
+        app.launch()
+        let quote = app.descendants(matching: .any)["alo.message.body.990200"]
+        XCTAssertTrue(quote.waitForExistence(timeout: 15))
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH 'Цитата: Встречаемся'")).firstMatch.exists)
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("fmt-1-quote-code")
+        let composer = app.textFields["alo.chat.composer"].firstMatch.exists
+            ? app.textFields["alo.chat.composer"].firstMatch : app.textViews["alo.chat.composer"].firstMatch
+        composer.tap()
+        composer.typeText("Важная мысль")
+        app.buttons["alo.chat.expressions"].press(forDuration: 1.0)
+        let quoteAction = app.buttons["Цитата"]
+        XCTAssertTrue(quoteAction.waitForExistence(timeout: 3))
+        capture("fmt-2-format-menu")
+        quoteAction.tap()
+        XCTAssertEqual(composer.value as? String, "> Важная мысль")
+    }
+
+    /// Telegram's video chat: the participant list, admin tools, recording and a raised hand.
+    func testGroupCallControls() {
+        let admin = launch(["-ALO_UI_GROUP_CALL_PREVIEW", "1", "-ALO_UI_GROUP_CALL_MEMBER", "0"])
+        let any = admin.descendants(matching: .any)
+        XCTAssertTrue(any["alo.group-call.participants"].waitForExistence(timeout: 8))
+        XCTAssertTrue(any["alo.group-call.recording"].exists, "the recording banner shows")
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("gc-1-admin")
+        admin.buttons["alo.group-call.menu"].tap()
+        XCTAssertTrue(admin.buttons["Выключить микрофон всем"].waitForExistence(timeout: 3))
+        XCTAssertTrue(admin.buttons["Остановить запись"].exists)
+        capture("gc-2-admin-menu")
+        admin.buttons["Выключить микрофон всем"].tap()
+        let dasha = any["alo.group-call.participant.990012"]
+        dasha.press(forDuration: 0.8)
+        let allow = admin.buttons["Разрешить говорить"]
+        XCTAssertTrue(allow.waitForExistence(timeout: 3))
+        capture("gc-3-participant-menu")
+        allow.tap()
+        XCTAssertFalse(dasha.label.contains("хочет говорить"), "letting her speak lowers her hand")
+        admin.terminate()
+
+        let member = launch(["-ALO_UI_GROUP_CALL_PREVIEW", "1", "-ALO_UI_GROUP_CALL_MEMBER", "1"])
+        let microphone = member.buttons["alo.group-call.microphone"]
+        XCTAssertTrue(microphone.waitForExistence(timeout: 8))
+        XCTAssertEqual(microphone.label, "Поднять руку")
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("gc-4-member-muted")
+        microphone.tap()
+        XCTAssertEqual(microphone.label, "Вы подняли руку")
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("gc-5-hand-raised")
+    }
+
     /// Needs a video in the simulator's Photos (`xcrun simctl addmedia <udid> clip.mp4`).
     func testCaptureVideoStoryOverlay() throws {
         let app = XCUIApplication()

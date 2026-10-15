@@ -598,6 +598,31 @@ final class AloAPIClient {
         )
     }
 
+    // MARK: Video-chat controls
+
+    func loadGroupCallControls(callId: Int) async throws -> AloGroupCallControls {
+        let json = try await request("GET", "/api/group-calls/\(callId)/state")
+        return AloGroupCallControls(json.object("state"))
+    }
+
+    func setGroupCallHand(callId: Int, raised: Bool) async throws {
+        _ = try await request("POST", "/api/group-calls/\(callId)/hand", body: ["raised": raised])
+    }
+
+    func muteGroupCallParticipant(callId: Int, userId: Int, muted: Bool) async throws {
+        _ = try await request("POST", "/api/group-calls/\(callId)/mute", body: ["userId": userId, "muted": muted])
+    }
+
+    /// Mutes (or lets speak) everyone but admins; returns whom it changed.
+    func muteGroupCallEveryone(callId: Int, muted: Bool) async throws -> Set<Int> {
+        let json = try await request("POST", "/api/group-calls/\(callId)/mute", body: ["all": true, "muted": muted])
+        return Set((json["userIds"] as? [Any] ?? []).compactMap { ($0 as? NSNumber)?.intValue })
+    }
+
+    func setGroupCallRecording(callId: Int, active: Bool, title: String) async throws {
+        _ = try await request("POST", "/api/group-calls/\(callId)/recording", body: ["active": active, "title": title])
+    }
+
     func pollGroupCallSignals(afterId: Int) async throws -> [AloGroupCallSignal] {
         let response = try await request(
             "GET",

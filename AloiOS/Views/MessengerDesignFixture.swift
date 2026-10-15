@@ -216,6 +216,13 @@ extension AloAppModel {
                 items = [message(990200, body: "Открыть сайт", extra: ["entities": [["type": "link", "offset": 0,
                     "length": 11, "url": "https://telegram.org"]]]),
                     message(990201, body: "https://telegram.org/blog")]
+            case "formatting":
+                // A quote and a code block, parsed the way the composer sends them.
+                let quoted = AloMessageMarkup.parse("> Встречаемся в **семь**, не опаздывай\nХорошо, буду вовремя ||сюрприз||")
+                let code = AloMessageMarkup.parse("Вот функция:\n```swift\nfunc hello() {\n    print(\"Привет, Alo\")\n}\n```")
+                let entities: (AloMessageMarkupResult) -> [[String: Any]] = { $0.entities.map(\.payload) }
+                items = [message(990200, body: quoted.body, extra: ["entities": entities(quoted)]),
+                    message(990201, body: code.body, extra: ["entities": entities(code), "senderId": 990001, "recipientId": 990002])]
             default: break
             }
         }
@@ -353,6 +360,9 @@ extension AloAppModel {
             if UserDefaults.standard.bool(forKey: "ALO_UI_STORY_EXPIRED") {
                 expiredStory = AloExpiredStoryNotice(author: AloEntitySummary(["id": 990010, "name": "Маша", "username": "masha"]))
             }
+        }
+        if UserDefaults.standard.bool(forKey: "ALO_UI_GROUP_CALL_PREVIEW") {
+            calls.groupCall.installDebugPreview(meId: 990001)
         }
         activeTab = content == "notifications" ? .alerts : (["feed-surface", "feed-timeline", "feed-video", "social-overview"].contains(content) ? .feed : (content == "own-profile" ? .profile : .messages))
         activeConversation = activeTab == .messages && content != "chat-list"

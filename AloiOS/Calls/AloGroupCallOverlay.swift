@@ -12,7 +12,7 @@ struct AloGroupCallOverlay: View {
         Group {
             if let call = coordinator.activeCall, !coordinator.isMinimized {
                 GeometryReader { geometry in
-                    callRoom(call, safeArea: geometry.safeAreaInsets)
+                    callRoom(call, safeArea: AloCallSafeArea.resolved(geometry.safeAreaInsets))
                         .offset(y: max(0, dragOffset))
                         .gesture(
                             DragGesture(minimumDistance: 8)
@@ -45,17 +45,10 @@ struct AloGroupCallOverlay: View {
         let hasSFUVideo = coordinator.sfuRoom.map {
             $0.localVideoTrack != nil || !$0.remoteVideoTracks.isEmpty
         } ?? false
+        let showsVideo = hasSFUVideo || remoteVideoPeer != nil
 
         return ZStack {
-            LinearGradient(
-                colors: [
-                    Color(red: 0.05, green: 0.12, blue: 0.15),
-                    Color(red: 0.04, green: 0.27, blue: 0.24),
-                    Color(red: 0.02, green: 0.10, blue: 0.12)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+            AloGroupCallTheme.background
 
             if let sfuRoom = coordinator.sfuRoom, hasSFUVideo {
                 AloGroupSFUVideoGrid(
@@ -76,30 +69,31 @@ struct AloGroupCallOverlay: View {
                 .transition(.opacity)
             }
 
-            LinearGradient(
-                colors: [
-                    Color.black.opacity(remoteVideoPeer == nil ? 0.08 : 0.42),
-                    Color.clear,
-                    Color.black.opacity(0.58)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
+            if showsVideo {
+                LinearGradient(colors: [Color.black.opacity(0.5), .clear, Color.black.opacity(0.62)],
+                               startPoint: .top, endPoint: .bottom)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
 
             VStack(spacing: 0) {
                 header(call)
-                    .padding(.top, safeArea.top + 10)
-                    .padding(.horizontal, 18)
+                    .padding(.top, safeArea.top + 6)
+                    .padding(.horizontal, 12)
 
-                if remoteVideoPeer == nil && !hasSFUVideo {
-                    participantGrid(call)
-                        .padding(.top, 34)
-                } else {
-                    Spacer(minLength: 0)
+                if let recording = coordinator.controls.recording {
+                    recordingBanner(recording)
+                        .padding(.top, 8)
+                        .transition(.move(edge: .top).combined(with: .opacity))
                 }
 
-                Spacer(minLength: 18)
+                if showsVideo {
+                    Spacer(minLength: 0)
+                } else {
+                    participantList(call)
+                        .padding(.horizontal, 12)
+                        .padding(.top, 14)
+                }
 
                 if call.isVideoEnabled && coordinator.sfuRoom == nil {
                     HStack {
@@ -119,13 +113,14 @@ struct AloGroupCallOverlay: View {
                         )
                     }
                     .padding(.horizontal, 18)
+                    .padding(.top, 10)
                     .transition(.scale(scale: 0.92).combined(with: .opacity))
                 }
 
                 controls(call)
-                    .padding(.horizontal, 18)
-                    .padding(.top, 18)
-                    .padding(.bottom, max(22, safeArea.bottom + 12))
+                    .padding(.horizontal, 24)
+                    .padding(.top, 14)
+                    .padding(.bottom, max(18, safeArea.bottom + 6))
             }
 
             if isCameraPickerVisible {
@@ -134,111 +129,244 @@ struct AloGroupCallOverlay: View {
                     .zIndex(30)
             }
         }
+        .animation(.spring(response: 0.34, dampingFraction: 0.86), value: coordinator.controls)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("alo.group-call-overlay")
     }
 
+    /// Telegram's voice-chat bar: minimise, the title with the count, and the options menu.
     private func header(_ call: AloGroupCallState) -> some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(call.roomTitle)
-                    .font(.system(size: 20, weight: .bold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                Text(participantLabel(call.participants.count))
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(Color.white.opacity(0.72))
+        HStack(spacing: 10) {
+            headerButton("chevron.down", label: "Свернуть") {
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) { coordinator.isMinimized = true }
             }
-            Spacer()
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(Color.green)
-                    .frame(width: 7, height: 7)
-                Text("Видеочат")
-                    .font(.system(size: 13, weight: .semibold))
-            }
-            .foregroundStyle(Color.white.opacity(0.82))
-            .padding(.horizontal, 12)
-            .frame(height: 36)
-            .background(.ultraThinMaterial.opacity(0.72))
-            .clipShape(Capsule())
-        }
-    }
-
-    private func participantGrid(_ call: AloGroupCallState) -> some View {
-        let columns = Array(
-            repeating: GridItem(.flexible(), spacing: 18),
-            count: min(3, max(1, call.participants.count))
-        )
-        return LazyVGrid(columns: columns, spacing: 24) {
-            ForEach(call.participants, id: \.id) { participant in
-                VStack(spacing: 10) {
-                    ZStack(alignment: .bottomTrailing) {
-                        AloAvatar(
-                            name: participant.name,
-                            url: participant.avatarURL,
-                            size: call.participants.count > 6 ? 68 : 82,
-                            colorSeed: String(participant.id)
-                        )
-                        Circle()
-                            .fill(participant.id == coordinator.localUserId && call.isMuted
-                                  ? Color(red: 0.12, green: 0.48, blue: 0.94)
-                                  : Color(red: 0.13, green: 0.70, blue: 0.36))
-                            .frame(width: 26, height: 26)
-                            .overlay(
-                                Image(systemName: participant.id == coordinator.localUserId && call.isMuted
-                                      ? "mic.slash.fill"
-                                      : "mic.fill")
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundStyle(.white)
-                            )
-                            .overlay(Circle().stroke(Color.white.opacity(0.8), lineWidth: 2))
+            .accessibilityIdentifier("alo.group-call.minimize")
+            Spacer(minLength: 4)
+            VStack(spacing: 2) {
+                HStack(spacing: 6) {
+                    if coordinator.controls.recording != nil {
+                        Circle().fill(AloGroupCallTheme.recording).frame(width: 8, height: 8)
+                            .accessibilityLabel("Идёт запись")
                     }
-                    Text(participant.id == coordinator.localUserId ? "Вы" : participant.name)
-                        .font(.system(size: 14, weight: .semibold))
+                    Text(call.roomTitle)
+                        .font(.system(size: 17, weight: .semibold))
                         .foregroundStyle(.white)
                         .lineLimit(1)
                 }
+                Text(participantLabel(call.participants.count))
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.white.opacity(0.6))
             }
-        }
-        .padding(.horizontal, 24)
-    }
-
-    private func controls(_ call: AloGroupCallState) -> some View {
-        HStack(spacing: 12) {
-            groupControl(
-                title: call.isSpeakerOn ? "Динамик" : "Телефон",
-                icon: call.isSpeakerOn ? "speaker.wave.2.fill" : "iphone",
-                selected: call.isSpeakerOn,
-                action: coordinator.toggleSpeaker
-            )
-            groupControl(
-                title: "Видео",
-                icon: call.isVideoEnabled ? "video.fill" : "video.slash.fill",
-                selected: call.isVideoEnabled,
-                loading: coordinator.isCameraStarting,
-                action: {
-                    selectedCamera = call.isFrontCamera ? .front : .back
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) {
-                        isCameraPickerVisible = true
+            Spacer(minLength: 4)
+            Menu {
+                if coordinator.controls.canManage {
+                    Section("Администратор") {
+                        Button {
+                            coordinator.muteEveryone(!coordinator.controls.joinMuted)
+                        } label: {
+                            Label(coordinator.controls.joinMuted ? "Разрешить всем говорить" : "Выключить микрофон всем",
+                                  systemImage: coordinator.controls.joinMuted ? "mic" : "mic.slash")
+                        }
+                        Button(role: coordinator.isRecordingHere ? .destructive : nil) {
+                            coordinator.toggleRecording()
+                        } label: {
+                            Label(coordinator.isRecordingHere ? "Остановить запись" : "Начать запись",
+                                  systemImage: coordinator.isRecordingHere ? "stop.circle" : "record.circle")
+                        }
+                        .disabled(coordinator.controls.recording != nil && !coordinator.isRecordingHere)
                     }
                 }
-            )
-            groupControl(
-                title: call.isMuted ? "Включить" : "Микрофон",
-                icon: call.isMuted ? "mic.slash.fill" : "mic.fill",
-                selected: !call.isMuted,
-                action: coordinator.toggleMute
-            )
-            groupControl(
-                title: "Выйти",
-                icon: "phone.down.fill",
-                destructive: true,
-                action: coordinator.leave
-            )
+                Button {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) { coordinator.isMinimized = true }
+                } label: {
+                    Label("Свернуть", systemImage: "rectangle.compress.vertical")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 40, height: 40)
+                    .background(Color.white.opacity(0.12), in: Circle())
+                    .frame(width: 44, height: 44)
+                    .contentShape(Circle())
+            }
+            .accessibilityLabel("Настройки видеочата")
+            .accessibilityIdentifier("alo.group-call.menu")
         }
     }
 
-    private func groupControl(
+    private func headerButton(_ icon: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 40, height: 40)
+                .background(Color.white.opacity(0.12), in: Circle())
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+        }
+        .buttonStyle(AloPressBounceButtonStyle(pressedScale: 0.9))
+        .accessibilityLabel(label)
+    }
+
+    private func recordingBanner(_ recording: AloGroupCallControls.Recording) -> some View {
+        TimelineView(.periodic(from: recording.startedAt, by: 1)) { context in
+            HStack(spacing: 7) {
+                Circle().fill(AloGroupCallTheme.recording).frame(width: 8, height: 8)
+                    .opacity(Int(context.date.timeIntervalSince(recording.startedAt)) % 2 == 0 ? 1 : 0.35)
+                Text(coordinator.isRecordingHere ? "Запись · \(Self.clock(context.date.timeIntervalSince(recording.startedAt)))"
+                     : "Идёт запись видеочата")
+                    .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(.white)
+            }
+            .padding(.horizontal, 12).frame(height: 30)
+            .background(AloGroupCallTheme.recording.opacity(0.22), in: Capsule())
+        }
+        .accessibilityIdentifier("alo.group-call.recording")
+    }
+
+    static func clock(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds))
+        return total >= 3600
+            ? String(format: "%d:%02d:%02d", total / 3600, total / 60 % 60, total % 60)
+            : String(format: "%02d:%02d", total / 60, total % 60)
+    }
+
+    /// Everyone in the call as Telegram lists them: who speaks, who listens, who wants to speak.
+    private func participantList(_ call: AloGroupCallState) -> some View {
+        let raised = coordinator.controls.raisedHands
+        let ordered = call.participants.sorted { left, right in
+            // Raised hands first (oldest first), then everyone in join order.
+            switch (raised[left.id], raised[right.id]) {
+            case let (l?, r?): return l < r
+            case (.some, nil): return true
+            case (nil, .some): return false
+            default: return false
+            }
+        }
+        return ScrollView {
+            VStack(spacing: 0) {
+                ForEach(ordered, id: \.id) { participant in
+                    participantRow(participant, call: call)
+                    if participant.id != ordered.last?.id {
+                        Divider().overlay(Color.white.opacity(0.08)).padding(.leading, 70)
+                    }
+                }
+            }
+            .background(AloGroupCallTheme.panel, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .scrollIndicators(.hidden)
+        .accessibilityIdentifier("alo.group-call.participants")
+    }
+
+    private func participantRow(_ participant: AloDirectCallPeer, call: AloGroupCallState) -> some View {
+        let isMe = participant.id == coordinator.localUserId
+        let speaking = coordinator.sfuRoom?.speakingParticipantIds.contains(participant.id) == true && !(isMe && call.isMuted)
+        let muted = isMe ? call.isMuted : (coordinator.sfuRoom?.mutedParticipantIds.contains(participant.id) ?? false)
+        let byAdmin = coordinator.controls.mutedByAdmin.contains(participant.id)
+        let hand = coordinator.controls.raisedHands[participant.id] != nil
+        let status: (text: String, color: Color) = hand ? ("хочет говорить", AloGroupCallTheme.hand)
+            : speaking ? ("говорит", AloGroupCallTheme.live)
+            : byAdmin ? ("микрофон выключен", Color.white.opacity(0.5))
+            : ("слушает", Color.white.opacity(0.5))
+        return HStack(spacing: 12) {
+            AloAvatar(name: participant.name, url: participant.avatarURL, size: 44, colorSeed: String(participant.id))
+                .overlay(Circle().stroke(AloGroupCallTheme.live, lineWidth: speaking ? 2.5 : 0).padding(-3))
+                .animation(.easeOut(duration: 0.18), value: speaking)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(isMe ? "\(participant.name) (вы)" : participant.name)
+                    .font(.system(size: 16, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
+                HStack(spacing: 4) {
+                    if hand { Image(systemName: "hand.raised.fill").font(.system(size: 11)) }
+                    Text(status.text).lineLimit(1)
+                }
+                .font(.system(size: 13)).foregroundStyle(status.color)
+            }
+            Spacer(minLength: 6)
+            Image(systemName: speaking ? "mic.fill" : (muted || byAdmin) ? "mic.slash.fill" : "mic")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(speaking ? AloGroupCallTheme.live : byAdmin ? AloGroupCallTheme.recording : Color.white.opacity(0.55))
+                .frame(width: 30)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 9)
+        .contentShape(Rectangle())
+        .contextMenu {
+            if coordinator.controls.canManage && !isMe {
+                if byAdmin || hand {
+                    Button { coordinator.setMicrophone(of: participant.id, allowed: true) } label: {
+                        Label("Разрешить говорить", systemImage: "mic")
+                    }
+                }
+                if !byAdmin {
+                    Button(role: .destructive) { coordinator.setMicrophone(of: participant.id, allowed: false) } label: {
+                        Label("Выключить микрофон", systemImage: "mic.slash")
+                    }
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("alo.group-call.participant.\(participant.id)")
+    }
+
+    /// Video and speaker on the left, Telegram's big microphone button in the middle, leave on the right.
+    private func controls(_ call: AloGroupCallState) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            VStack(spacing: 14) {
+                smallControl(title: "Видео", icon: call.isVideoEnabled ? "video.fill" : "video.slash.fill",
+                             selected: call.isVideoEnabled, loading: coordinator.isCameraStarting) {
+                    selectedCamera = call.isFrontCamera ? .front : .back
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) { isCameraPickerVisible = true }
+                }
+                smallControl(title: call.isSpeakerOn ? "Динамик" : "Телефон",
+                             icon: call.isSpeakerOn ? "speaker.wave.2.fill" : "iphone",
+                             selected: call.isSpeakerOn, action: coordinator.toggleSpeaker)
+            }
+            Spacer(minLength: 8)
+            microphoneButton(call)
+            Spacer(minLength: 8)
+            VStack(spacing: 14) {
+                smallControl(title: "Выйти", icon: "xmark", destructive: true, action: coordinator.leave)
+                    .accessibilityIdentifier("alo.group-call.leave")
+            }
+        }
+    }
+
+    private func microphoneButton(_ call: AloGroupCallState) -> some View {
+        let state = AloGroupCallMicState(call: call, coordinator: coordinator)
+        let speaking = coordinator.sfuRoom?.speakingParticipantIds.contains(coordinator.localUserId) == true && !call.isMuted
+        return Button(action: coordinator.toggleMute) {
+            VStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .fill(LinearGradient(colors: state.colors, startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .opacity(0.28)
+                        .frame(width: 136, height: 136)
+                        .scaleEffect(speaking ? 1.08 : 0.94)
+                        .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true), value: speaking)
+                    Circle()
+                        .fill(LinearGradient(colors: state.colors, startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .frame(width: 112, height: 112)
+                        .shadow(color: state.colors.first!.opacity(0.45), radius: 18)
+                    Image(systemName: state.icon)
+                        .font(.system(size: 38, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .contentTransition(.symbolEffect(.replace))
+                }
+                VStack(spacing: 2) {
+                    Text(state.title).font(.system(size: 17, weight: .semibold)).foregroundStyle(.white)
+                    Text(state.subtitle).font(.system(size: 13)).foregroundStyle(Color.white.opacity(0.6))
+                        .multilineTextAlignment(.center).lineLimit(2)
+                }
+                .frame(width: 230)
+            }
+        }
+        .buttonStyle(AloPressBounceButtonStyle(pressedScale: 0.94))
+        .accessibilityLabel(state.title)
+        .accessibilityIdentifier("alo.group-call.microphone")
+        .sensoryFeedback(.impact(weight: .medium), trigger: call.isMuted)
+    }
+
+    private func smallControl(
         title: String,
         icon: String,
         selected: Bool = false,
@@ -247,33 +375,19 @@ struct AloGroupCallOverlay: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            VStack(spacing: 7) {
+            VStack(spacing: 6) {
                 ZStack {
-                    Circle()
-                        .fill(
-                            destructive
-                                ? Color(red: 1.0, green: 0.20, blue: 0.22)
-                                : selected
-                                    ? Color.white
-                                    : Color.white.opacity(0.17)
-                        )
+                    Circle().fill(destructive ? AloGroupCallTheme.leave : selected ? Color.white.opacity(0.28) : Color.white.opacity(0.14))
                     if loading {
-                        ProgressView()
-                            .tint(selected ? .black : .white)
+                        ProgressView().tint(.white)
                     } else {
-                        Image(systemName: icon)
-                            .font(.system(size: 20, weight: .semibold))
-                            .foregroundStyle(selected && !destructive ? Color.black : Color.white)
+                        Image(systemName: icon).font(.system(size: 20, weight: .semibold)).foregroundStyle(.white)
                     }
                 }
-                .frame(width: 58, height: 58)
-                Text(title)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.75)
+                .frame(width: 54, height: 54)
+                Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(.white).lineLimit(1)
             }
-            .frame(maxWidth: .infinity)
+            .frame(width: 72)
         }
         .buttonStyle(AloPressBounceButtonStyle(pressedScale: 0.90))
     }
@@ -307,7 +421,56 @@ struct AloGroupCallOverlay: View {
     }
 
     private func participantLabel(_ count: Int) -> String {
-        count == 1 ? "1 участник" : "\(count) участников"
+        let mod10 = count % 10, mod100 = count % 100
+        let word = mod10 == 1 && mod100 != 11 ? "участник"
+            : (2...4).contains(mod10) && !(12...14).contains(mod100) ? "участника" : "участников"
+        return "\(count) \(word)"
+    }
+}
+
+/// Telegram's voice-chat colours.
+enum AloGroupCallTheme {
+    static let background = Color(red: 0.07, green: 0.07, blue: 0.09)
+    static let panel = Color(red: 0.14, green: 0.14, blue: 0.17)
+    static let live = Color(red: 0.20, green: 0.80, blue: 0.47)
+    static let hand = Color(red: 0.36, green: 0.62, blue: 1.0)
+    static let recording = Color(red: 1.0, green: 0.27, blue: 0.27)
+    static let leave = Color(red: 1.0, green: 0.23, blue: 0.19).opacity(0.9)
+    static let muted = [Color(red: 0.23, green: 0.55, blue: 0.96), Color(red: 0.35, green: 0.35, blue: 0.85)]
+    static let speaking = [Color(red: 0.20, green: 0.80, blue: 0.47), Color(red: 0.19, green: 0.69, blue: 0.78)]
+    static let raiseHand = [Color(red: 0.61, green: 0.35, blue: 0.96), Color(red: 0.96, green: 0.42, blue: 0.61)]
+}
+
+/// What the big button says: muted, live, or (muted by an admin) raise / lower your hand.
+struct AloGroupCallMicState {
+    let colors: [Color]
+    let icon: String
+    let title: String
+    let subtitle: String
+
+    @MainActor init(call: AloGroupCallState, coordinator: AloGroupCallCoordinator) {
+        if coordinator.isMutedByAdmin && call.isMuted {
+            colors = AloGroupCallTheme.raiseHand
+            if coordinator.isHandRaised {
+                icon = "hand.raised.fill"
+                title = "Вы подняли руку"
+                subtitle = "Ждём разрешения администратора"
+            } else {
+                icon = "hand.raised"
+                title = "Поднять руку"
+                subtitle = "Микрофон выключен администратором"
+            }
+        } else if call.isMuted {
+            colors = AloGroupCallTheme.muted
+            icon = "mic.slash.fill"
+            title = "Микрофон выключен"
+            subtitle = "Нажмите, чтобы говорить"
+        } else {
+            colors = AloGroupCallTheme.speaking
+            icon = "mic.fill"
+            title = "Вы в эфире"
+            subtitle = "Нажмите, чтобы выключить микрофон"
+        }
     }
 }
 
