@@ -975,6 +975,38 @@ final class AloSecurityTests: XCTestCase {
         XCTAssertEqual(reparsed.entities, initial.entities)
     }
 
+    func testQuotesAndCodeBlocksBecomeBlockEntities() {
+        let result = AloMessageMarkup.parse(
+            "Смотри:\n> первая **строка**\n> вторая\nдальше\n```swift\nlet x = **1**\n```\nконец"
+        )
+
+        XCTAssertEqual(result.body, "Смотри:\nпервая строка\nвторая\nдальше\nlet x = **1**\nконец")
+        let body = result.body as NSString
+        let quote = result.entities.first { $0.type == "blockquote" }
+        XCTAssertEqual(quote.map { body.substring(with: NSRange(location: $0.offset, length: $0.length)) }, "первая строка\nвторая")
+        let bold = result.entities.first { $0.type == "bold" }
+        XCTAssertEqual(bold.map { body.substring(with: NSRange(location: $0.offset, length: $0.length)) }, "строка")
+        let code = result.entities.first { $0.type == "pre" }
+        XCTAssertEqual(code?.url, "swift")
+        XCTAssertEqual(code.map { body.substring(with: NSRange(location: $0.offset, length: $0.length)) }, "let x = **1**",
+                       "markers inside code stay literal")
+        XCTAssertFalse(result.entities.contains { $0.type == "bold" && $0.offset >= code!.offset })
+
+        let restored = AloMessageMarkup.source(body: result.body, entities: result.entities)
+        let reparsed = AloMessageMarkup.parse(restored)
+        XCTAssertEqual(reparsed.body, result.body)
+        XCTAssertEqual(reparsed.entities, result.entities)
+    }
+
+    func testTextThatOnlyLooksLikeBlocksStaysPlain() {
+        XCTAssertEqual(AloMessageMarkup.parse("5 >3 и a>b").entities, [])
+        XCTAssertEqual(AloMessageMarkup.parse("```не закрыто").body, "```не закрыто")
+        let blocks = AloRichMessageText.blocks("Цитата\nпосле", entities: [
+            AloMessageTextEntity(type: "blockquote", offset: 0, length: 6)
+        ])
+        XCTAssertEqual(blocks?.map(\.range.length), [6, 5])
+    }
+
     func testUsernameMentionStaysInsideEncryptedEntityPayload() {
         let result = AloMessageMarkup.parse("😀 привет @Alo_User")
 

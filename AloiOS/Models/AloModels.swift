@@ -862,7 +862,7 @@ struct AloMessageTextEntity: Identifiable, Equatable {
     }
 
     private static let allowedTypes: Set<String> = [
-        "bold", "italic", "underline", "strikethrough", "spoiler", "code", "link", "mention"
+        "bold", "italic", "underline", "strikethrough", "spoiler", "code", "link", "mention", "blockquote", "pre"
     ]
 }
 
@@ -1358,7 +1358,76 @@ enum AloMessageMarkup {
         Marker(token: "`", type: "code")
     ]
 
+    /// Lines starting with "> " are a quote, and text between ``` fences (an optional language after
+    /// the opening one) is a code block, as in Telegram; inline markers work everywhere but in code.
     static func parse(_ source: String) -> AloMessageMarkupResult {
+        guard source.contains("```") || source.contains(">") else { return parseInline(source) }
+        enum Kind { case plain, quote, code }
+        var segments = [(kind: Kind, text: String, language: String)]()
+        let lines = source.components(separatedBy: "\n")
+        var plain = [String]()
+        func flushPlain() {
+            if !plain.isEmpty { segments.append((.plain, plain.joined(separator: "\n"), "")) }
+            plain = []
+        }
+        func isQuoteLine(_ line: String) -> Bool { line == ">" || line.hasPrefix("> ") }
+        var index = 0
+        while index < lines.count {
+            let line = lines[index]
+            if line.hasPrefix("```"),
+               let close = lines[(index + 1)...].firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "```" }) {
+                flushPlain()
+                let language = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                segments.append((.code, lines[(index + 1)..<close].joined(separator: "\n"), String(language.prefix(24))))
+                index = close + 1
+                continue
+            }
+            if isQuoteLine(line) {
+                flushPlain()
+                var quoted = [String]()
+                while index < lines.count, isQuoteLine(lines[index]) {
+                    quoted.append(String(lines[index].dropFirst(lines[index] == ">" ? 1 : 2)))
+                    index += 1
+                }
+                segments.append((.quote, quoted.joined(separator: "\n"), ""))
+                continue
+            }
+            // An unclosed fence is just text: its backticks are not inline code markers.
+            plain.append(line.hasPrefix("```") ? "\\`\\`\\`" + line.dropFirst(3) : line)
+            index += 1
+        }
+        flushPlain()
+        guard segments.contains(where: { $0.kind != .plain }) else {
+            return parseInline(segments.map(\.text).joined(separator: "\n"))
+        }
+
+        var body = ""
+        var entities = [AloMessageTextEntity]()
+        for (position, segment) in segments.enumerated() {
+            if position > 0 { body += "\n" }
+            let offset = body.utf16.count
+            switch segment.kind {
+            case .code:
+                body += segment.text
+                if !segment.text.isEmpty {
+                    entities.append(AloMessageTextEntity(type: "pre", offset: offset, length: segment.text.utf16.count,
+                                                         url: segment.language))
+                }
+            case .plain, .quote:
+                let inline = parseInline(segment.text)
+                body += inline.body
+                entities += inline.entities.map {
+                    AloMessageTextEntity(type: $0.type, offset: $0.offset + offset, length: $0.length, url: $0.url)
+                }
+                if segment.kind == .quote, !inline.body.isEmpty {
+                    entities.append(AloMessageTextEntity(type: "blockquote", offset: offset, length: inline.body.utf16.count))
+                }
+            }
+        }
+        return AloMessageMarkupResult(body: body, entities: normalized(entities, utf16Length: body.utf16.count))
+    }
+
+    private static func parseInline(_ source: String) -> AloMessageMarkupResult {
         guard !source.isEmpty else { return AloMessageMarkupResult(body: "", entities: []) }
         var output = ""
         var entities = [AloMessageTextEntity]()
@@ -1410,10 +1479,23 @@ enum AloMessageMarkup {
         guard !body.isEmpty, !entities.isEmpty else { return body }
         let markersByType = Dictionary(uniqueKeysWithValues: markers.map { ($0.type, $0.token) })
         var insertions = [Int: [(closing: Bool, token: String)]]()
+        let utf16 = Array(body.utf16)
         for entity in normalized(entities, utf16Length: body.utf16.count) {
-            guard let token = markersByType[entity.type] else { continue }
-            insertions[entity.offset, default: []].append((false, token))
-            insertions[entity.offset + entity.length, default: []].append((true, token))
+            switch entity.type {
+            case "pre":
+                // Opening fence first at its offset, closing fence last at its end.
+                insertions[entity.offset, default: []].insert((false, "```\(entity.url)\n"), at: 0)
+                insertions[entity.offset + entity.length, default: []].append((true, "\n```"))
+            case "blockquote":
+                insertions[entity.offset, default: []].insert((false, "> "), at: 0)
+                for position in entity.offset..<(entity.offset + entity.length) where utf16[position] == 10 {
+                    insertions[position + 1, default: []].insert((false, "> "), at: 0)
+                }
+            default:
+                guard let token = markersByType[entity.type] else { continue }
+                insertions[entity.offset, default: []].append((false, token))
+                insertions[entity.offset + entity.length, default: []].append((true, token))
+            }
         }
         let result = NSMutableString(string: body)
         for position in insertions.keys.sorted(by: >) {

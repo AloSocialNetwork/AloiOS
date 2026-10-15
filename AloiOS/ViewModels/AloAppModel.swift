@@ -4662,6 +4662,47 @@ final class AloAppModel: ObservableObject {
         }
     }
 
+    /// A video-chat recording goes to "Избранное" through the normal outbox, as in Telegram.
+    func saveCallRecording(fileURL: URL, duration: TimeInterval, title: String) async {
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        guard let me = bootstrap?.me.id, me > 0 else { return }
+        let safeTitle = title.replacingOccurrences(of: "/", with: "-").trimmingCharacters(in: .whitespacesAndNewlines)
+        let attachment: AloLocalAttachment
+        do {
+            attachment = try await Task.detached(priority: .userInitiated) {
+                try AloDraftAttachmentStore.makePickedMedia(sourceURL: fileURL, mime: "audio/mp4", type: "audio",
+                                                            name: "Запись видеочата \(safeTitle).m4a")
+            }.value.withDuration(duration)
+        } catch {
+            errorMessage = "Не удалось сохранить запись видеочата."
+            return
+        }
+        let minutes = Int(duration) / 60, seconds = Int(duration) % 60
+        let body = "Запись видеочата «\(safeTitle)» · \(minutes):\(String(format: "%02d", seconds))"
+        let localId = nextLocalMessageId
+        nextLocalMessageId -= 1
+        let target = PendingChatTarget(peerId: me, roomId: 0, kind: "direct")
+        let createdAt = currentTimestamp()
+        if let conversation = activeConversation, pendingTarget(for: conversation) == target {
+            let message = AloChatMessage(
+                localId: localId, senderId: me, recipientId: me, body: body, topicId: 0, replyToMessageId: 0,
+                createdAt: createdAt, attachments: [AloMessageAttachment(local: attachment, includeInlineData: false)],
+                forwardFrom: nil, scheduledAt: "", silent: true, sendWhenOnline: false)
+            pendingChatMessageIds.insert(localId)
+            activeConversation = conversation.replacingItems(conversation.items + [message])
+        }
+        enqueuePendingChatOperation(
+            .sendDraft(
+                localId: localId, target: target, body: body, topicId: 0, replyToMessageId: 0, createdAt: createdAt,
+                attachments: [attachment], uploadedAttachments: [], forwardFrom: nil,
+                clientMessageId: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
+                encryptedPayload: nil, silent: true, scheduledAt: "", sendWhenOnline: false
+            )
+        )
+        notice = "Запись видеочата сохранена в «Избранное»"
+        Task { await processPendingChatOperations() }
+    }
+
     private func sendUploadedAttachmentsOptimistically(
         body: String,
         conversation: AloConversationDetail,

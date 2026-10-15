@@ -68,6 +68,47 @@ struct AloGroupCallSignal {
     let payload: [String: Any]
 }
 
+/// Telegram's video-chat controls: raised hands, who an admin muted, "mute everyone" and recording.
+struct AloGroupCallControls: Equatable {
+    struct Recording: Equatable {
+        let startedAt: Date
+        let byUserId: Int
+        let title: String
+    }
+
+    var canManage = false
+    var joinMuted = false
+    var raisedHands: [Int: Date] = [:]
+    var mutedByAdmin: Set<Int> = []
+    var recording: Recording?
+
+    init() {}
+
+    init(_ json: [String: Any]) {
+        canManage = json.bool("canManage")
+        joinMuted = json.bool("joinMuted")
+        for member in json.array("members") {
+            let userId = member.int("userId")
+            guard userId > 0 else { continue }
+            if let raised = AloGroupCallControls.date(member.string("handRaisedAt")) { raisedHands[userId] = raised }
+            if member.bool("mutedByAdmin") { mutedByAdmin.insert(userId) }
+        }
+        recording = Self.recording(json.object("recording"))
+    }
+
+    static func recording(_ json: [String: Any]) -> Recording? {
+        guard json.bool("active"), let startedAt = date(json.string("startedAt")) else { return nil }
+        return Recording(startedAt: startedAt, byUserId: json.int("byUserId"), title: json.string("title"))
+    }
+
+    static func date(_ raw: String) -> Date? {
+        guard !raw.isEmpty else { return nil }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: raw) ?? ISO8601DateFormatter().date(from: raw)
+    }
+}
+
 struct AloGroupCallState: Identifiable {
     let id: Int
     let roomId: Int

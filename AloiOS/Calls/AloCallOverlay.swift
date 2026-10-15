@@ -20,7 +20,7 @@ enum AloCallLayoutMetrics {
     }
 }
 
-private enum AloCallSafeArea {
+enum AloCallSafeArea {
     static func resolved(_ proposed: EdgeInsets) -> EdgeInsets {
         guard let window = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })

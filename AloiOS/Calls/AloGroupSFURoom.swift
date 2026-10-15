@@ -8,6 +8,8 @@ final class AloGroupSFURoom: NSObject, ObservableObject, RoomDelegate, @unchecke
     @Published private(set) var connectionState: ConnectionState = .disconnected
     @Published private(set) var participantIds: Set<Int> = []
     @Published private(set) var speakingParticipantIds: Set<Int> = []
+    /// Remote people whose microphone is off (muted, or not published at all).
+    @Published private(set) var mutedParticipantIds: Set<Int> = []
     @Published private(set) var localVideoTrack: VideoTrack?
     @Published private(set) var remoteVideoTracks: [Int: VideoTrack] = [:]
 
@@ -19,7 +21,8 @@ final class AloGroupSFURoom: NSObject, ObservableObject, RoomDelegate, @unchecke
 
     func connect(join: AloGroupCallSFUJoin, muted: Bool) async throws {
         try await room.connect(url: join.serverURL, token: join.token)
-        try await room.localParticipant.setMicrophone(enabled: !muted)
+        // Someone an admin muted has no microphone permission; they still listen.
+        try? await room.localParticipant.setMicrophone(enabled: !muted)
         refreshState()
     }
 
@@ -31,6 +34,7 @@ final class AloGroupSFURoom: NSObject, ObservableObject, RoomDelegate, @unchecke
         connectionState = .disconnected
         participantIds = []
         speakingParticipantIds = []
+        mutedParticipantIds = []
         localVideoTrack = nil
         remoteVideoTracks = [:]
     }
@@ -138,16 +142,20 @@ final class AloGroupSFURoom: NSObject, ObservableObject, RoomDelegate, @unchecke
         connectionState = room.connectionState
 
         var ids = Set<Int>()
+        var muted = Set<Int>()
         var tracks: [Int: VideoTrack] = [:]
         for participant in room.remoteParticipants.values {
             let userId = Self.userId(from: participant.identity)
             guard userId > 0 else { continue }
             ids.insert(userId)
+            let microphone = participant.audioTracks.first { $0.source == .microphone }
+            if microphone == nil || microphone?.isMuted == true { muted.insert(userId) }
             if let track = preferredVideoTrack(for: participant) {
                 tracks[userId] = track
             }
         }
         participantIds = ids
+        mutedParticipantIds = muted
         remoteVideoTracks = tracks
         localVideoTrack = preferredVideoTrack(for: room.localParticipant)
     }

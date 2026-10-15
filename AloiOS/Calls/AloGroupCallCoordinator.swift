@@ -10,6 +10,13 @@ final class AloGroupCallCoordinator: ObservableObject {
     @Published private(set) var sfuRoom: AloGroupSFURoom?
     @Published var isMinimized = false
     @Published private(set) var isCameraStarting = false
+    /// Raised hands, admin mutes and recording, from the server.
+    @Published private(set) var controls = AloGroupCallControls()
+    /// This phone is recording the call into "Избранное".
+    @Published private(set) var isRecordingHere = false
+    private var recorder: AloGroupCallRecorder?
+    /// A UI-test call with no server behind it.
+    private var isPreview = false
 
     private weak var app: AloAppModel?
     private let api: AloAPIClient
@@ -37,6 +44,7 @@ final class AloGroupCallCoordinator: ObservableObject {
                 if Task.isCancelled { return }
                 if let callId = activeCall?.id, callId > 0 {
                     try? await api.heartbeatGroupCall(callId: callId)
+                    await refreshControls()
                 }
                 await refreshSignals()
             }
@@ -61,7 +69,9 @@ final class AloGroupCallCoordinator: ObservableObject {
     func stop() {
         heartbeatTask?.cancel()
         heartbeatTask = nil
+        finishRecording(saving: true)
         closeMedia()
+        controls = AloGroupCallControls()
         activeCall = nil
         isMinimized = false
         isCameraStarting = false
@@ -83,13 +93,15 @@ final class AloGroupCallCoordinator: ObservableObject {
         do {
             let session = try await api.startGroupCall(roomId: conversation.roomId)
             let participants = participantsIncludingCurrentUser(session.participants)
+            // A call muted for everyone lets newcomers in muted; they can raise a hand.
+            controls = (try? await api.loadGroupCallControls(callId: session.id)) ?? AloGroupCallControls()
             let state = AloGroupCallState(
                 id: session.id,
                 roomId: session.roomId,
                 roomTitle: session.roomTitle.ifBlank(conversation.title),
                 participants: participants,
                 videoParticipantIds: [],
-                isMuted: false,
+                isMuted: controls.mutedByAdmin.contains(currentUserId),
                 isSpeakerOn: true,
                 isVideoEnabled: false,
                 isFrontCamera: true,
@@ -118,14 +130,24 @@ final class AloGroupCallCoordinator: ObservableObject {
 
     func leave() {
         guard let call = activeCall else { return }
+        finishRecording(saving: true)
         activeCall = nil
+        controls = AloGroupCallControls()
         isMinimized = false
         closeMedia()
         Task { try? await api.leaveGroupCall(callId: call.id) }
     }
 
+    /// Muted by an admin: the microphone button raises or lowers your hand instead.
+    var isMutedByAdmin: Bool { controls.mutedByAdmin.contains(currentUserId) && !controls.canManage }
+    var isHandRaised: Bool { controls.raisedHands[currentUserId] != nil }
+
     func toggleMute() {
         guard let call = activeCall else { return }
+        if isMutedByAdmin && call.isMuted {
+            toggleHand()
+            return
+        }
         let muted = !call.isMuted
         let updated = call.updating(isMuted: muted)
         activeCall = updated
@@ -286,10 +308,186 @@ final class AloGroupCallCoordinator: ObservableObject {
         clients[userId]?.bindRemoteRenderer(renderer)
     }
 
+    // MARK: Hands, admin mutes and recording
+
+    func toggleHand() {
+        guard let call = activeCall else { return }
+        let raise = !isHandRaised
+        let me = currentUserId
+        controls.raisedHands[me] = raise ? Date() : nil
+        AloHaptics.impact(.medium)
+        guard !isPreview else { return }
+        Task {
+            do {
+                try await api.setGroupCallHand(callId: call.id, raised: raise)
+            } catch {
+                controls.raisedHands[me] = raise ? nil : Date()
+                app?.errorMessage = (error as? AloAPIError)?.message ?? "Не удалось поднять руку."
+            }
+        }
+    }
+
+    /// Admins: take someone's microphone away, or let them speak.
+    func setMicrophone(of userId: Int, allowed: Bool) {
+        guard let call = activeCall, controls.canManage else { return }
+        if allowed {
+            controls.mutedByAdmin.remove(userId)
+            controls.raisedHands[userId] = nil
+        } else {
+            controls.mutedByAdmin.insert(userId)
+        }
+        guard !isPreview else { return }
+        Task {
+            do {
+                try await api.muteGroupCallParticipant(callId: call.id, userId: userId, muted: !allowed)
+            } catch {
+                await refreshControls()
+                app?.errorMessage = (error as? AloAPIError)?.message ?? "Не удалось изменить микрофон участника."
+            }
+        }
+    }
+
+    /// Admins: mute everyone but admins (newcomers too), or let everyone speak again.
+    func muteEveryone(_ muted: Bool) {
+        guard let call = activeCall, controls.canManage else { return }
+        controls.joinMuted = muted
+        guard !isPreview else {
+            let others = Set(call.participants.map(\.id)).subtracting([currentUserId])
+            if muted { controls.mutedByAdmin.formUnion(others) } else { controls.mutedByAdmin.subtract(others) }
+            return
+        }
+        Task {
+            do {
+                let userIds = try await api.muteGroupCallEveryone(callId: call.id, muted: muted)
+                if muted { controls.mutedByAdmin.formUnion(userIds) } else { controls.mutedByAdmin.subtract(userIds) }
+                app?.notice = muted ? "Микрофоны участников выключены" : "Все участники могут говорить"
+            } catch {
+                await refreshControls()
+                app?.errorMessage = (error as? AloAPIError)?.message ?? "Не удалось выключить микрофоны."
+            }
+        }
+    }
+
+    /// Admins: start recording on this phone, or stop it and save the file to "Избранное".
+    func toggleRecording() {
+        guard let call = activeCall, controls.canManage else { return }
+        if isRecordingHere {
+            finishRecording(saving: true)
+            return
+        }
+        guard controls.recording == nil else {
+            app?.notice = "Запись уже ведёт другой администратор"
+            return
+        }
+        let recorder = AloGroupCallRecorder()
+        do {
+            try recorder.start()
+        } catch {
+            app?.errorMessage = "Не удалось начать запись: \(error.localizedDescription)"
+            return
+        }
+        self.recorder = recorder
+        isRecordingHere = true
+        controls.recording = .init(startedAt: Date(), byUserId: currentUserId, title: call.roomTitle)
+        Task {
+            do {
+                try await api.setGroupCallRecording(callId: call.id, active: true, title: call.roomTitle)
+            } catch {
+                _ = recorder.stop()
+                self.recorder = nil
+                isRecordingHere = false
+                controls.recording = nil
+                app?.errorMessage = (error as? AloAPIError)?.message ?? "Не удалось начать запись."
+            }
+        }
+    }
+
+    private func finishRecording(saving: Bool) {
+        if isPreview, isRecordingHere {
+            isRecordingHere = false
+            controls.recording = nil
+            return
+        }
+        guard let recorder else { return }
+        self.recorder = nil
+        isRecordingHere = false
+        controls.recording = nil
+        let callId = activeCall?.id ?? 0
+        let title = activeCall?.roomTitle ?? "Видеочат"
+        let result = recorder.stop()
+        Task {
+            if callId > 0 { try? await api.setGroupCallRecording(callId: callId, active: false, title: "") }
+            guard saving, let result else { return }
+            await app?.saveCallRecording(fileURL: result.url, duration: result.duration, title: title)
+        }
+    }
+
+    #if DEBUG
+    /// `-ALO_UI_GROUP_CALL_PREVIEW 1`: a running video chat with a raised hand, admin mutes and a
+    /// recording; `-ALO_UI_GROUP_CALL_MEMBER 1` shows it as a member the admin muted.
+    func installDebugPreview(meId: Int) {
+        let member = UserDefaults.standard.bool(forKey: "ALO_UI_GROUP_CALL_MEMBER")
+        let people = [(meId, "Тест интерфейса"), (990010, "Маша"), (990011, "Александр"), (990012, "Даша"), (990013, "Слава")]
+        isPreview = true
+        activeCall = AloGroupCallState(
+            id: 4242, roomId: 77, roomTitle: "Команда Alo",
+            participants: people.map { AloDirectCallPeer(id: $0.0, name: $0.1, username: "", avatarURL: "", verified: false) },
+            videoParticipantIds: [], isMuted: member, isSpeakerOn: true, isVideoEnabled: false, isFrontCamera: true,
+            startedAt: Date().addingTimeInterval(-600))
+        var preview = AloGroupCallControls()
+        preview.canManage = !member
+        preview.raisedHands = [990012: Date().addingTimeInterval(-40)]
+        preview.mutedByAdmin = member ? [meId, 990012, 990013] : [990012, 990013]
+        preview.joinMuted = member
+        preview.recording = .init(startedAt: Date().addingTimeInterval(-95), byUserId: member ? 990011 : meId, title: "Команда Alo")
+        controls = preview
+        isRecordingHere = !member
+        isMinimized = false
+    }
+    #endif
+
+    func refreshControls() async {
+        guard !isPreview, let call = activeCall, let state = try? await api.loadGroupCallControls(callId: call.id) else { return }
+        var merged = state
+        // A recording this phone runs stays shown as its own until it stops.
+        if isRecordingHere { merged.recording = controls.recording }
+        controls = merged
+    }
+
     private func process(_ signals: [AloGroupCallSignal]) async {
         for signal in signals {
             guard let call = activeCall, signal.callId == call.id else { continue }
             switch signal.kind {
+            case "hand_state":
+                let userId = signal.payload.int("userId")
+                controls.raisedHands[userId] = signal.payload.bool("raised")
+                    ? (AloGroupCallControls.date(signal.payload.string("raisedAt")) ?? Date()) : nil
+            case "mute_state":
+                let userIds = Set((signal.payload["userIds"] as? [Any] ?? []).compactMap { ($0 as? NSNumber)?.intValue })
+                let muted = signal.payload.bool("muted")
+                if signal.payload.bool("all") { controls.joinMuted = muted }
+                for userId in userIds {
+                    if muted {
+                        controls.mutedByAdmin.insert(userId)
+                    } else {
+                        controls.mutedByAdmin.remove(userId)
+                        controls.raisedHands[userId] = nil
+                    }
+                }
+                if userIds.contains(currentUserId) {
+                    if muted, !call.isMuted {
+                        activeCall = call.updating(isMuted: true)
+                        if let sfuRoom { try? await sfuRoom.setMuted(true) } else { clients.values.forEach { $0.setMuted(true) } }
+                        app?.notice = "Администратор выключил ваш микрофон"
+                    } else if !muted {
+                        app?.notice = "Вам разрешили говорить"
+                        AloHaptics.notification(.success)
+                    }
+                }
+            case "recording_state":
+                if !isRecordingHere {
+                    controls.recording = AloGroupCallControls.recording(signal.payload)
+                }
             case "participant_joined":
                 guard let peer = parsePeer(signal.payload.object("user")) else { continue }
                 let participants = (call.participants + [peer])
