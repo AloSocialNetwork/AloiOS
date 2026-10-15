@@ -7,6 +7,20 @@ struct AloAvatarCropRequest: Identifiable {
     let image: UIImage
 }
 
+/// What the cropper cuts: a circle for avatars, a rounded rectangle of a fixed ratio for banners.
+enum AloCropShape: Equatable {
+    case circle
+    case banner(aspect: CGFloat)
+
+    /// Width over height of the crop.
+    var aspect: CGFloat {
+        switch self {
+        case .circle: return 1
+        case .banner(let aspect): return max(0.2, aspect)
+        }
+    }
+}
+
 /// Photo preparation for profile and group avatars.
 enum AloAvatarImage {
     /// Decodes a picked photo off the main thread, upright and at most `maxSide` pixels, so the
@@ -24,18 +38,19 @@ enum AloAvatarImage {
         }.value
     }
 
-    /// The square under the crop circle as a JPEG, at most `side` pixels.
+    /// The part under the crop as a JPEG, at most `side` pixels wide, keeping its proportions.
     static func jpeg(cropping image: UIImage, to rect: CGRect, side: CGFloat = 1024) -> Data? {
         let rect = rect.intersection(CGRect(origin: .zero, size: image.size))
         guard rect.width >= 1, rect.height >= 1 else { return nil }
-        let output = max(1, min(side, (rect.width * image.scale).rounded(.down)))
-        let scale = output / rect.width
+        let outputWidth = max(1, min(side, (rect.width * image.scale).rounded(.down)))
+        let scale = outputWidth / rect.width
+        let output = CGSize(width: outputWidth, height: max(1, (rect.height * scale).rounded()))
         let format = UIGraphicsImageRendererFormat.default()
         format.scale = 1
         format.opaque = true
-        let rendered = UIGraphicsImageRenderer(size: CGSize(width: output, height: output), format: format).image { context in
+        let rendered = UIGraphicsImageRenderer(size: output, format: format).image { context in
             UIColor.black.setFill()
-            context.fill(CGRect(x: 0, y: 0, width: output, height: output))
+            context.fill(CGRect(origin: .zero, size: output))
             image.draw(in: CGRect(x: -rect.minX * scale, y: -rect.minY * scale,
                                   width: image.size.width * scale, height: image.size.height * scale))
         }
@@ -43,31 +58,45 @@ enum AloAvatarImage {
     }
 }
 
-/// Telegram-style avatar crop: the photo moves and zooms under a fixed circle, everything outside
-/// it is dimmed. "Выбрать" returns the square under the circle; the avatar is drawn round anyway.
+/// Telegram-style photo crop: the photo moves and zooms under a fixed frame, everything outside
+/// it is dimmed. For an avatar the frame is a circle and "Выбрать" returns the square under it (the
+/// avatar is drawn round anyway); for a banner it is a rounded rectangle of the banner's ratio.
 struct AloAvatarCropView: View {
+    let shape: AloCropShape
     let onCancel: () -> Void
     let onChoose: (Data) -> Void
     @State private var image: UIImage
     @State private var canvas = AloAvatarCropHandle()
 
-    init(image: UIImage, onCancel: @escaping () -> Void, onChoose: @escaping (Data) -> Void) {
+    init(image: UIImage, shape: AloCropShape = .circle, onCancel: @escaping () -> Void, onChoose: @escaping (Data) -> Void) {
         _image = State(initialValue: image)
+        self.shape = shape
         self.onCancel = onCancel
         self.onChoose = onChoose
     }
 
+    private var identifierPrefix: String { shape == .circle ? "alo.avatar.crop" : "alo.banner.crop" }
+
     var body: some View {
         ZStack(alignment: .bottom) {
-            AloAvatarCropCanvas(image: image, handle: canvas)
+            AloAvatarCropCanvas(image: image, shape: shape, handle: canvas)
                 .ignoresSafeArea()
                 .accessibilityLabel("Фото. Перемещайте и масштабируйте пальцами")
-                .accessibilityIdentifier("alo.avatar.crop.canvas")
+                .accessibilityIdentifier("\(identifierPrefix).canvas")
+            if case .banner = shape {
+                Text("Подвиньте и приблизите фото — так обложка будет видна в профиле")
+                    .font(.system(size: 14)).foregroundStyle(.white.opacity(0.75))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 70)
+                    .allowsHitTesting(false)
+            }
 
             HStack {
                 Button("Отмена", action: onCancel)
                     .frame(minWidth: 44, minHeight: 44, alignment: .leading)
-                    .accessibilityIdentifier("alo.avatar.crop.cancel")
+                    .accessibilityIdentifier("\(identifierPrefix).cancel")
                 Spacer()
                 Button {
                     image = image.aloRotatedCounterClockwise()
@@ -78,12 +107,12 @@ struct AloAvatarCropView: View {
                         .contentShape(Rectangle())
                 }
                 .accessibilityLabel("Повернуть")
-                .accessibilityIdentifier("alo.avatar.crop.rotate")
+                .accessibilityIdentifier("\(identifierPrefix).rotate")
                 Spacer()
                 Button("Выбрать", action: choose)
                     .fontWeight(.semibold)
                     .frame(minWidth: 44, minHeight: 44, alignment: .trailing)
-                    .accessibilityIdentifier("alo.avatar.crop.choose")
+                    .accessibilityIdentifier("\(identifierPrefix).choose")
             }
             .font(.system(size: 17))
             .foregroundStyle(.white)
@@ -105,7 +134,7 @@ struct AloAvatarCropView: View {
 
     private func choose() {
         guard let rect = canvas.view?.cropRectInImage,
-              let jpeg = AloAvatarImage.jpeg(cropping: image, to: rect) else { return }
+              let jpeg = AloAvatarImage.jpeg(cropping: image, to: rect, side: shape == .circle ? 1024 : 1600) else { return }
         AloHaptics.impact(.light)
         onChoose(jpeg)
     }
@@ -118,16 +147,19 @@ final class AloAvatarCropHandle {
 
 private struct AloAvatarCropCanvas: UIViewRepresentable {
     let image: UIImage
+    let shape: AloCropShape
     let handle: AloAvatarCropHandle
 
     func makeUIView(context: Context) -> AloAvatarCropUIView {
         let view = AloAvatarCropUIView()
+        view.shape = shape
         view.image = image
         handle.view = view
         return view
     }
 
     func updateUIView(_ view: AloAvatarCropUIView, context: Context) {
+        view.shape = shape
         view.image = image
         handle.view = view
     }
@@ -149,6 +181,14 @@ final class AloAvatarCropUIView: UIView, UIScrollViewDelegate {
         didSet {
             guard image !== oldValue else { return }
             imageView.image = image
+            configuredFor = nil
+            setNeedsLayout()
+        }
+    }
+
+    var shape: AloCropShape = .circle {
+        didSet {
+            guard shape != oldValue else { return }
             configuredFor = nil
             setNeedsLayout()
         }
@@ -186,12 +226,27 @@ final class AloAvatarCropUIView: UIView, UIScrollViewDelegate {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    /// The crop circle's square, centred in the space above the buttons.
+    /// The crop frame (the circle's square, or the banner's rectangle), as wide as the screen
+    /// allows and centred in the space above the buttons.
     private var cropFrame: CGRect {
         let safe = bounds.inset(by: safeAreaInsets)
         let available = CGRect(x: safe.minX, y: safe.minY, width: safe.width, height: max(0, safe.height - Self.bottomBar))
-        let side = max(1, min(available.width - Self.inset * 2, available.height - Self.inset * 2))
-        return CGRect(x: available.midX - side / 2, y: available.midY - side / 2, width: side, height: side)
+        let aspect = shape.aspect
+        var width = max(1, available.width - Self.inset * 2)
+        var height = width / aspect
+        let maxHeight = max(1, available.height - Self.inset * 2)
+        if height > maxHeight {
+            height = maxHeight
+            width = height * aspect
+        }
+        return CGRect(x: available.midX - width / 2, y: available.midY - height / 2, width: width, height: height)
+    }
+
+    private func outline(_ rect: CGRect) -> UIBezierPath {
+        switch shape {
+        case .circle: return UIBezierPath(ovalIn: rect)
+        case .banner: return UIBezierPath(roundedRect: rect, cornerRadius: 18)
+        }
     }
 
     override func layoutSubviews() {
@@ -199,29 +254,29 @@ final class AloAvatarCropUIView: UIView, UIScrollViewDelegate {
         let crop = cropFrame
         if scrollView.frame != crop { scrollView.frame = crop }
         let dim = UIBezierPath(rect: bounds)
-        dim.append(UIBezierPath(ovalIn: crop))
+        dim.append(outline(crop))
         dimLayer.path = dim.cgPath
-        ringLayer.path = UIBezierPath(ovalIn: crop.insetBy(dx: 0.5, dy: 0.5)).cgPath
+        ringLayer.path = outline(crop.insetBy(dx: 0.5, dy: 0.5)).cgPath
         guard let image, crop.width > 1 else { return }
         if configuredFor?.size != bounds.size || configuredFor?.image !== image {
             configuredFor = (bounds.size, image)
-            configure(for: image, side: crop.width)
+            configure(for: image, frame: crop.size)
         }
     }
 
-    /// The photo starts filling the circle, centred, and can zoom up to six times closer.
-    private func configure(for image: UIImage, side: CGFloat) {
+    /// The photo starts filling the frame, centred, and can zoom up to six times closer.
+    private func configure(for image: UIImage, frame: CGSize) {
         scrollView.minimumZoomScale = 1
         scrollView.maximumZoomScale = 1
         scrollView.zoomScale = 1
         imageView.frame = CGRect(origin: .zero, size: image.size)
         scrollView.contentSize = image.size
-        let fill = max(side / image.size.width, side / image.size.height)
+        let fill = max(frame.width / image.size.width, frame.height / image.size.height)
         scrollView.minimumZoomScale = fill
         scrollView.maximumZoomScale = fill * 6
         scrollView.zoomScale = fill
-        scrollView.contentOffset = CGPoint(x: (scrollView.contentSize.width - side) / 2,
-                                           y: (scrollView.contentSize.height - side) / 2)
+        scrollView.contentOffset = CGPoint(x: (scrollView.contentSize.width - frame.width) / 2,
+                                           y: (scrollView.contentSize.height - frame.height) / 2)
     }
 
     /// The part of the image under the circle, in image points.

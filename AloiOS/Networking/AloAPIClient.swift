@@ -1068,6 +1068,38 @@ final class AloAPIClient {
         _ = try await request("DELETE", "/api/stories/\(storyId)")
     }
 
+    /// The story's share code (one per story); the app builds the link from it.
+    func createStoryLink(storyId: Int) async throws -> String {
+        let json = try await request("POST", "/api/stories/\(storyId)/link", body: [:])
+        let code = json.string("code")
+        guard AloDeepLinkTarget.isStoryCode(code) else {
+            throw AloAPIError(status: 0, code: "BAD_RESPONSE", message: "Не удалось создать ссылку.", payload: json)
+        }
+        return code
+    }
+
+    /// 410 means the story expired or was deleted; the author still comes back.
+    func resolveStoryLink(code: String) async throws -> AloStoryLinkResult {
+        guard AloDeepLinkTarget.isStoryCode(code) else { return .expired(author: nil) }
+        do {
+            let json = try await request("GET", "/api/stories/link/\(code)")
+            let story = json.object("story")
+            return .live(AloStoryGroup([
+                "user": json.object("user"),
+                "stories": [story],
+                "hasUnseen": !story.bool("viewerHasSeen")
+            ]))
+        } catch let error as AloAPIError where error.status == 410 {
+            return .expired(author: (error.payload["user"] as? [String: Any]).map(AloEntitySummary.init))
+        }
+    }
+
+    /// Who has seen a story, newest first; only its author may ask.
+    func loadStoryViewers(storyId: Int) async throws -> [AloStoryViewerEntry] {
+        let json = try await request("GET", "/api/stories/\(storyId)/viewers")
+        return json.array("viewers").map(AloStoryViewerEntry.init)
+    }
+
     func loadBusinessProfile() async throws -> AloBusinessProfileData {
         AloBusinessProfileData(try await request("GET", "/api/business/profile"))
     }
@@ -2004,11 +2036,14 @@ final class AloAPIClient {
         _ = try await request("DELETE", "/api/users/\(userId)/block")
     }
 
-    func updateProfileCover(coverStyle: String) async throws -> AloCurrentUser {
+    /// `coverImageUrl`: nil keeps the photo, "" removes it, a path sets a freshly uploaded one.
+    func updateProfileCover(coverStyle: String, coverImageUrl: String? = nil) async throws -> AloCurrentUser {
+        var body: [String: Any] = ["coverStyle": coverStyle]
+        if let coverImageUrl { body["coverImageUrl"] = coverImageUrl }
         let json = try await request(
             "PATCH",
             "/api/profile/cover",
-            body: ["coverStyle": coverStyle]
+            body: body
         )
         return AloCurrentUser(json.object("user"))
     }

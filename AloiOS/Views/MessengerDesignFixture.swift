@@ -292,13 +292,29 @@ extension AloAppModel {
         bootstrap = data
         if ["feed-timeline", "feed-video", "social-overview"].contains(content) {
             let sample = await AloMessengerSampleMedia.make()
-            installFeedStoryPreview(["Маша", "Александр", "Даша", "Друзья"].enumerated().map { index, name in
+            let iso = ISO8601DateFormatter()
+            // The signed-in fixture user's own story first, seen by four people.
+            let own = AloStoryGroup(["user": ["id": 990001, "name": "Тест интерфейса", "username": "ui_fixture"],
+                "hasUnseen": false,
+                "stories": [["id": 990799, "userId": 990001, "media": [["type": "image", "url": sample.imageURI]],
+                    "viewCount": 4,
+                    "createdAt": iso.string(from: Date().addingTimeInterval(-3_600)),
+                    "expiresAt": iso.string(from: Date().addingTimeInterval(82_800))]]])
+            let viewers = [("Маша", "masha", 2), ("Александр", "alex", 14), ("Даша", "dasha", 47), ("Слава", "slava", 130)]
+                .enumerated().map { index, viewer in
+                    AloStoryViewerEntry(["user": ["id": 990010 + index, "name": viewer.0, "username": viewer.1],
+                                         "viewedAt": iso.string(from: Date().addingTimeInterval(-Double(viewer.2) * 60))])
+                }
+            installFeedStoryPreview([own] + ["Маша", "Александр", "Даша", "Друзья"].enumerated().map { index, name in
                 AloStoryGroup(["user": ["id": 990010 + index, "name": name], "hasUnseen": true,
                     "stories": [["id": 990800 + index, "userId": 990010 + index,
                         "media": [["type": "image", "url": sample.imageURI]],
-                        "createdAt": ISO8601DateFormatter().string(from: Date()),
-                        "expiresAt": ISO8601DateFormatter().string(from: Date().addingTimeInterval(86400))]]])
-            })
+                        "createdAt": iso.string(from: Date()),
+                        "expiresAt": iso.string(from: Date().addingTimeInterval(86400))]]])
+            }, viewers: viewers)
+            if UserDefaults.standard.bool(forKey: "ALO_UI_STORY_EXPIRED") {
+                expiredStory = AloExpiredStoryNotice(author: AloEntitySummary(["id": 990010, "name": "Маша", "username": "masha"]))
+            }
         }
         activeTab = content == "notifications" ? .alerts : (["feed-surface", "feed-timeline", "feed-video", "social-overview"].contains(content) ? .feed : (content == "own-profile" ? .profile : .messages))
         activeConversation = activeTab == .messages && content != "chat-list"

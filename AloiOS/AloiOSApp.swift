@@ -8,6 +8,7 @@ enum AloDeepLinkTarget: Equatable {
     case channel(Int)
     case forumTopic(roomId: Int, topicId: Int)
     case handle(String)
+    case story(String)
 
     init?(url: URL) {
         self.init(url: url, configuredWebHost: Self.configuredWebLinkHost)
@@ -69,6 +70,9 @@ enum AloDeepLinkTarget: Equatable {
         case "ch", "feed-channel":
             guard let channelId = Int(value), channelId > 0 else { return nil }
             self = .channel(channelId)
+        case "s", "story":
+            guard Self.isStoryCode(value) else { return nil }
+            self = .story(value)
         case "r", "resolve":
             let handle = value.replacingOccurrences(of: "@", with: "").lowercased()
             guard handle.range(of: #"^[a-z0-9_][a-z0-9_-]{1,48}[a-z0-9_]$"#, options: .regularExpression) != nil else {
@@ -106,6 +110,14 @@ enum AloDeepLinkTarget: Equatable {
     static func forumTopicURL(roomId: Int, topicId: Int) -> URL? {
         guard roomId > 0, topicId > 0 else { return nil }
         return linkURL(path: "t/\(roomId)/\(topicId)")
+    }
+
+    static func storyURL(code: String) -> URL? {
+        isStoryCode(code) ? linkURL(kind: "s", value: code) : nil
+    }
+
+    static func isStoryCode(_ value: String) -> Bool {
+        value.range(of: #"^[A-Za-z0-9_-]{8,32}$"#, options: .regularExpression) != nil
     }
 
     static func handleURL(_ handle: String) -> URL? {

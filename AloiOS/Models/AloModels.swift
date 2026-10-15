@@ -100,6 +100,15 @@ struct AloCurrentUser: Identifiable, Equatable {
         coverStyle = json.string("coverStyle").ifBlank("violet")
         coverImageUrl = json.string("coverImageUrl")
     }
+
+    /// The same person with another banner.
+    func withCover(style: String, imageURL: String) -> AloCurrentUser {
+        AloCurrentUser([
+            "id": id, "name": name, "username": username, "email": email, "bio": bio, "avatarUrl": avatarUrl,
+            "verified": verified, "online": online, "registeredLabel": registeredLabel,
+            "coverStyle": style, "coverImageUrl": imageURL
+        ])
+    }
 }
 
 struct AloMediaItem: Identifiable, Equatable {
@@ -164,6 +173,31 @@ struct AloStoryGroup: Identifiable, Equatable {
         stories = json.array("stories").map(AloStory.init)
         hasUnseen = json.bool("hasUnseen")
     }
+}
+
+/// Someone who opened your story, for the viewers list.
+struct AloStoryViewerEntry: Identifiable, Equatable {
+    let user: AloEntitySummary
+    let viewedAt: String
+
+    var id: Int { user.id }
+
+    init(_ json: [String: Any]) {
+        user = AloEntitySummary(json.object("user"))
+        viewedAt = json.string("viewedAt")
+    }
+}
+
+/// What a story link turned out to be: the story, or a note that it has gone.
+enum AloStoryLinkResult {
+    case live(AloStoryGroup)
+    case expired(author: AloEntitySummary?)
+}
+
+/// Shown when a story link is opened after the story expired or was deleted.
+struct AloExpiredStoryNotice: Identifiable {
+    let id = UUID()
+    let author: AloEntitySummary?
 }
 
 struct AloBusinessProfile: Equatable {

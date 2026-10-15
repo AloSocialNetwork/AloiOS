@@ -161,6 +161,13 @@ final class AloAppModel: ObservableObject {
     @Published private(set) var postPublishingError = ""
     @Published private(set) var lastPublishedPostId = 0
     @Published private(set) var stories = [AloStoryGroup]()
+    /// A story opened from a link, shown over everything; or a note that it has expired.
+    @Published var linkedStory: AloStoryGroup?
+    @Published var expiredStory: AloExpiredStoryNotice?
+#if DEBUG
+    /// Who "saw" the fixture's own story, for the viewers list without a server.
+    var previewStoryViewers = [AloStoryViewerEntry]()
+#endif
     @Published private(set) var isStoriesLoading = false
     @Published private(set) var isCreatingStory = false
     @Published private(set) var storyPublishingError = ""
@@ -390,6 +397,13 @@ final class AloAppModel: ObservableObject {
                 UserDefaults.standard.removeObject(forKey: pendingDeepLinkKey)
                 activeTab = .feed
                 openChannelProfile(channelId: channelId)
+            case .story(let code):
+                let result = try await api.resolveStoryLink(code: code)
+                UserDefaults.standard.removeObject(forKey: pendingDeepLinkKey)
+                switch result {
+                case .live(let group): linkedStory = group
+                case .expired(let author): expiredStory = AloExpiredStoryNotice(author: author)
+                }
             case .forumTopic(let roomId, let topicId):
                 let target = try await api.resolveForumTopicLink(roomId: roomId, topicId: topicId)
                 try await finishForumTopicDeepLink(target)
@@ -933,6 +947,36 @@ final class AloAppModel: ObservableObject {
         }
     }
 
+    /// The story's link, copied to the clipboard. False when there is none to copy.
+    func copyStoryLink(_ story: AloStory) async -> Bool {
+        do {
+            let code: String
+#if DEBUG
+            if isFeedInteractionPreview { code = "PreviewStory\(story.id)" } else {
+                code = try await api.createStoryLink(storyId: story.id)
+            }
+#else
+            code = try await api.createStoryLink(storyId: story.id)
+#endif
+            guard let url = AloDeepLinkTarget.storyURL(code: code) else { return false }
+            UIPasteboard.general.url = url
+            return true
+        } catch let error as AloAPIError {
+            errorMessage = error.message
+            return false
+        } catch {
+            errorMessage = "Не удалось скопировать ссылку."
+            return false
+        }
+    }
+
+    func storyViewers(storyId: Int) async throws -> [AloStoryViewerEntry] {
+#if DEBUG
+        if isFeedInteractionPreview { return previewStoryViewers }
+#endif
+        return try await api.loadStoryViewers(storyId: storyId)
+    }
+
     func markStoryViewed(_ story: AloStory) {
         guard story.id > 0, !story.viewerHasSeen else { return }
         stories = stories.map { group in
@@ -1231,9 +1275,10 @@ final class AloAppModel: ObservableObject {
         UserDefaults.standard.bool(forKey: "ALO_UI_MESSENGER_PREVIEW") && bootstrap?.me.id == 990001
     }
 
-    func installFeedStoryPreview(_ groups: [AloStoryGroup]) {
+    func installFeedStoryPreview(_ groups: [AloStoryGroup], viewers: [AloStoryViewerEntry] = []) {
         guard isFeedInteractionPreview else { return }
         stories = groups
+        previewStoryViewers = viewers
     }
     #endif
 
@@ -3480,10 +3525,33 @@ final class AloAppModel: ObservableObject {
         }
     }
 
-    func updateProfileCover(style: String) {
+    /// Saves the banner: colour, and the photo kept, removed or replaced (uploaded first).
+    func updateProfileBanner(style: String, photo: AloBannerPhotoChange) {
         Task {
             do {
-                let updated = try await api.updateProfileCover(coverStyle: style)
+#if DEBUG
+                if isFeedInteractionPreview, let data = bootstrap {
+                    // No server in the UI fixture: the banner is applied on the device only.
+                    var imageURL = data.me.coverImageUrl
+                    switch photo {
+                    case .keep: break
+                    case .remove: imageURL = ""
+                    case .replace(let jpeg):
+                        imageURL = "data:image/jpeg;base64,\(jpeg.base64EncodedString())"
+                    }
+                    bootstrap = AloBootstrapDataPatch.replaceMe(data.me.withCover(style: style, imageURL: imageURL), in: data)
+                    return
+                }
+#endif
+                var imageURL: String?
+                switch photo {
+                case .keep: imageURL = nil
+                case .remove: imageURL = ""
+                case .replace(let jpeg):
+                    let attachment = AloLocalAttachment(data: jpeg, mime: "image/jpeg", type: "image", name: "profile-banner.jpg")
+                    imageURL = try await api.uploadAttachment(attachment, purpose: "cover").url
+                }
+                let updated = try await api.updateProfileCover(coverStyle: style, coverImageUrl: imageURL)
                 if let data = bootstrap {
                     bootstrap = AloBootstrapDataPatch.replaceMe(updated, in: data)
                 }

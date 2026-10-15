@@ -66,6 +66,15 @@ struct RootView: View {
             }
 #endif
         }
+        // A story link opens over whatever is on screen.
+        .fullScreenCover(item: $app.linkedStory) { group in
+            AloStoryViewer(groups: [group], startGroupID: group.id)
+                .environmentObject(app)
+        }
+        .sheet(item: $app.expiredStory) { notice in
+            AloStoryExpiredSheet(notice: notice)
+                .environmentObject(app)
+        }
         .animation(.spring(response: 0.36, dampingFraction: 0.86), value: app.phaseKey)
         .animation(.spring(response: 0.32, dampingFraction: 0.88), value: app.humanChallenge?.id)
         // A connection notice must never reserve layout space. In particular it
