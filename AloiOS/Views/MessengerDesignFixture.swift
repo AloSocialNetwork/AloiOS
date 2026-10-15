@@ -239,6 +239,7 @@ extension AloAppModel {
                     "likeCount": index == 0 ? 42 : 18, "commentCount": index == 0 ? 8 : 12,
                     "repostCount": index == 0 ? 3 : 2, "viewCount": index == 0 ? 1200 : 640,
                     "viewerLiked": index == 0, "author": authors[index % 3],
+                    "feedReason": ["own", "friend", "popular"][index % 3],
                     "createdAt": ISO8601DateFormatter().string(from: Date().addingTimeInterval(Double(-720 - index * 960)))]
                 if index % 3 != 1 {
                     post["media"] = (0..<(index % 3 == 0 ? 1 : 2)).map { _ in
@@ -325,6 +326,30 @@ extension AloAppModel {
                           "expiresAt": iso.string(from: Date().addingTimeInterval(-Double(index + 1) * 86_400 * 2 + 86_400))])
             }
             previewHighlights = [Self.previewHighlight(id: 1, title: "Лето", stories: Array(previewArchive.prefix(2)))]
+            previewDrafts = [
+                AloPostDraft(id: 990901, body: "Черновик про поездку на Байкал: лёд, ветер и самый прозрачный…",
+                             media: [AloMediaItem(type: "image", url: sample.imageURI)],
+                             updatedAt: iso.string(from: Date().addingTimeInterval(-1_800))),
+                AloPostDraft(id: 990902, body: "Идеи для следующего поста", updatedAt: iso.string(from: Date().addingTimeInterval(-86_400 * 2)))
+            ]
+            // Thirty days of reach that grow towards today, against a quieter month before.
+            let days = (0..<30).map { index -> AloCreatorStats.Day in
+                let date = Date().addingTimeInterval(-Double(29 - index) * 86_400)
+                let wave = Int(40 * (1 + sin(Double(index) / 3)))
+                return AloCreatorStats.Day(date: String(iso.string(from: date).prefix(10)),
+                                           views: 60 + index * 9 + wave, likes: 6 + index / 2 + wave / 8, comments: 1 + index / 6)
+            }
+            previewCreatorStats = AloCreatorStats(
+                days: 30,
+                views: .init(current: days.reduce(0) { $0 + $1.views }, previous: 3_900),
+                likes: .init(current: days.reduce(0) { $0 + $1.likes }, previous: 520),
+                comments: .init(current: days.reduce(0) { $0 + $1.comments }, previous: 61),
+                reposts: .init(current: 34, previous: 41),
+                followers: .init(current: 58, previous: 31),
+                engagementRate: 12.4, postsInPeriod: 9,
+                allTime: .init(posts: 46, views: 48_200, likes: 5_310, comments: 704, reposts: 212, followers: 1_284),
+                daily: days,
+                topPosts: bootstrap?.feedPopular.filter { $0.author.id == 990001 }.prefix(3).map { $0 } ?? [])
             if UserDefaults.standard.bool(forKey: "ALO_UI_STORY_EXPIRED") {
                 expiredStory = AloExpiredStoryNotice(author: AloEntitySummary(["id": 990010, "name": "Маша", "username": "masha"]))
             }

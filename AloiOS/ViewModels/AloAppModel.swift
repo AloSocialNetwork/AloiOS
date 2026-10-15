@@ -171,6 +171,8 @@ final class AloAppModel: ObservableObject {
     var previewStorySettings = AloStorySettings()
     var previewArchive = [AloStory]()
     var previewHighlights = [AloStoryHighlight]()
+    var previewDrafts = [AloPostDraft]()
+    var previewCreatorStats: AloCreatorStats?
 
     static func previewHighlight(id: Int, title: String, stories: [AloStory]) -> AloStoryHighlight {
         AloStoryHighlight([
@@ -197,7 +199,12 @@ final class AloAppModel: ObservableObject {
     @Published var commentsPost: AloPost?
     @Published var comments = [AloPostComment]()
     @Published var commentText = ""
+    /// The comment a reply is being written to; the composer shows "Ответ для …".
+    @Published var commentReplyTarget: AloPostComment?
     @Published var commentsLoading = false
+    /// Posts hidden from the feed during this session, kept as a "Вернуть" row until a refresh.
+    @Published private(set) var hiddenFeedPosts = [Int: AloFeedHideReason]()
+    @Published private(set) var postDrafts = [AloPostDraft]()
     @Published private(set) var commentsError = ""
     @Published private(set) var isSendingComment = false
     @Published private(set) var lastCreatedCommentId = 0
@@ -877,9 +884,11 @@ final class AloAppModel: ObservableObject {
         return error.message
     }
 
-    func createPost(localAttachments: [AloLocalAttachment] = [], captchaToken: String? = nil) {
+    /// `draftMedia` and `draftId` come from a saved draft opened in the editor.
+    func createPost(localAttachments: [AloLocalAttachment] = [], draftMedia: [AloMediaItem] = [], draftId: Int? = nil,
+                    captchaToken: String? = nil) {
         let body = composeText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (!body.isEmpty || !localAttachments.isEmpty), !isCreatingPost else { return }
+        guard (!body.isEmpty || !localAttachments.isEmpty || !draftMedia.isEmpty), !isCreatingPost else { return }
         errorMessage = ""
         postPublishingError = ""
         lastPublishedPostId = 0
@@ -895,14 +904,18 @@ final class AloAppModel: ObservableObject {
                 for attachment in localAttachments {
                     media.append(try await api.uploadAttachment(attachment, purpose: "post"))
                 }
-                let post = try await api.createPost(body: body, media: media, captchaToken: captchaToken)
+                let post = try await api.createPost(body: body, media: media, draftMedia: draftMedia,
+                                                    draftId: draftId, captchaToken: captchaToken)
                 lastPublishedPostId = post.id
                 composeText = ""
+                if let draftId { postDrafts.removeAll { $0.id == draftId } }
                 if let data = bootstrap {
                     bootstrap = AloBootstrapDataPatch.prepend(post, to: data)
                 }
             } catch let error as AloAPIError {
-                if handleChallenge(error, retry: { token in self.createPost(localAttachments: localAttachments, captchaToken: token) }) { return }
+                if handleChallenge(error, retry: { token in
+                    self.createPost(localAttachments: localAttachments, draftMedia: draftMedia, draftId: draftId, captchaToken: token)
+                }) { return }
                 errorMessage = error.message
                 postPublishingError = error.message
             } catch {
@@ -1404,6 +1417,120 @@ final class AloAppModel: ObservableObject {
                 errorMessage = "Не удалось удалить пост."
             }
         }
+    }
+
+    // MARK: Feed curation: hide, "не интересно", reports
+
+    /// Hides a post from the feed; its place shows "Вернуть" until the next refresh.
+    func hideFeedPost(_ post: AloPost, reason: AloFeedHideReason) {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) { hiddenFeedPosts[post.id] = reason }
+        AloHaptics.impact(.light)
+#if DEBUG
+        if isFeedInteractionPreview { return }
+#endif
+        Task {
+            do {
+                try await api.hideFeedPost(postId: post.id, reason: reason)
+            } catch {
+                withAnimation { hiddenFeedPosts[post.id] = nil }
+                notice = (error as? AloAPIError)?.message ?? "Не удалось скрыть публикацию."
+            }
+        }
+    }
+
+    func undoHideFeedPost(_ post: AloPost) {
+        let reason = hiddenFeedPosts[post.id]
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) { hiddenFeedPosts[post.id] = nil }
+#if DEBUG
+        if isFeedInteractionPreview { return }
+#endif
+        Task {
+            do {
+                _ = try await api.unhideFeedPost(postId: post.id)
+            } catch {
+                if let reason { withAnimation { hiddenFeedPosts[post.id] = reason } }
+                notice = (error as? AloAPIError)?.message ?? "Не удалось вернуть публикацию."
+            }
+        }
+    }
+
+    /// Sends a report; a reported post also leaves your feed.
+    func report(_ target: AloReportTarget, reason: AloReportReason, details: String) async throws {
+#if DEBUG
+        if isFeedInteractionPreview {
+            if case let .post(id) = target, let post = visiblePost(id: id) { hiddenFeedPosts[post.id] = .report }
+            return
+        }
+#endif
+        try await api.report(target, reason: reason, details: details)
+        if case let .post(id) = target, let post = visiblePost(id: id) {
+            withAnimation { hiddenFeedPosts[post.id] = .report }
+            try? await api.hideFeedPost(postId: post.id, reason: .report)
+        }
+    }
+
+    // MARK: Post drafts and creator statistics
+
+    func loadPostDrafts() async {
+#if DEBUG
+        if isFeedInteractionPreview { postDrafts = previewDrafts; return }
+#endif
+        if let drafts = try? await api.loadPostDrafts() { postDrafts = drafts }
+    }
+
+    /// Uploads the editor's new media, then saves the text and all media as a draft.
+    func savePostDraft(id: Int?, body: String, localAttachments: [AloLocalAttachment],
+                       draftMedia: [AloMediaItem]) async throws {
+#if DEBUG
+        if isFeedInteractionPreview {
+            let draft = AloPostDraft(id: id ?? 990950 + previewDrafts.count, body: body, media: draftMedia,
+                                     updatedAt: ISO8601DateFormatter().string(from: Date()))
+            previewDrafts.removeAll { $0.id == draft.id }
+            previewDrafts.insert(draft, at: 0)
+            postDrafts = previewDrafts
+            return
+        }
+#endif
+        var media = draftMedia
+        for attachment in localAttachments {
+            let uploaded = try await api.uploadAttachment(attachment, purpose: "post")
+            media.append(AloMediaItem(uploaded: uploaded, dimensions: attachment.mediaDimensions))
+        }
+        let saved = try await api.savePostDraft(draftId: id, body: body, media: media.map(\.payload))
+        postDrafts.removeAll { $0.id == saved.id }
+        postDrafts.insert(saved, at: 0)
+    }
+
+    func deletePostDraft(_ draft: AloPostDraft) {
+        withAnimation { postDrafts.removeAll { $0.id == draft.id } }
+#if DEBUG
+        if isFeedInteractionPreview { previewDrafts.removeAll { $0.id == draft.id }; return }
+#endif
+        Task {
+            do {
+                try await api.deletePostDraft(draftId: draft.id)
+            } catch {
+                await loadPostDrafts()
+                notice = (error as? AloAPIError)?.message ?? "Не удалось удалить черновик."
+            }
+        }
+    }
+
+    func creatorStats(days: Int) async throws -> AloCreatorStats {
+#if DEBUG
+        if isFeedInteractionPreview, let previewCreatorStats { return previewCreatorStats }
+#endif
+        return try await api.loadCreatorStats(days: days)
+    }
+
+    func mentionSuggestions(_ query: String) async throws -> [AloEntitySummary] {
+#if DEBUG
+        if isFeedInteractionPreview {
+            let needle = query.lowercased()
+            return previewFriends.filter { needle.isEmpty || $0.username.lowercased().contains(needle) || $0.name.lowercased().contains(needle) }
+        }
+#endif
+        return try await api.mentionSuggestions(query: query)
     }
 
     // MARK: Pinned and archived chats (on this device)
@@ -3878,6 +4005,7 @@ final class AloAppModel: ObservableObject {
         commentsPost = nil
         comments = []
         commentText = ""
+        commentReplyTarget = nil
         commentsLoading = false
         commentsError = ""
         isSendingComment = false
@@ -3896,9 +4024,19 @@ final class AloAppModel: ObservableObject {
         }
         #if DEBUG
         if isFeedInteractionPreview {
-            comments = [AloPostComment(["id": 990700, "body": "Отличный кадр! Где это снято?",
-                "createdAt": ISO8601DateFormatter().string(from: Date()), "likeCount": 2,
-                "author": ["id": 990002, "name": "Александр", "username": "alex"]])]
+            let iso = ISO8601DateFormatter()
+            let alex: [String: Any] = ["id": 990002, "name": "Александр", "username": "alex"]
+            let maria: [String: Any] = ["id": 990003, "name": "Мария", "username": "maria"]
+            comments = [
+                AloPostComment(["id": 990700, "body": "Отличный кадр! Где это снято?",
+                    "createdAt": iso.string(from: Date().addingTimeInterval(-3_600)), "likeCount": 2, "author": alex]),
+                AloPostComment(["id": 990703, "body": "@alex похоже на Карелию 🌲", "parentId": 990700, "replyTo": alex,
+                    "createdAt": iso.string(from: Date().addingTimeInterval(-3_000)), "likeCount": 1, "author": maria]),
+                AloPostComment(["id": 990704, "body": "@maria угадала!", "parentId": 990700, "replyTo": maria,
+                    "createdAt": iso.string(from: Date().addingTimeInterval(-2_400)), "author": alex]),
+                AloPostComment(["id": 990705, "body": "Очень атмосферно, сохранила себе.",
+                    "createdAt": iso.string(from: Date().addingTimeInterval(-1_200)), "likeCount": 5, "viewerLiked": true, "author": maria])
+            ]
             return
         }
         #endif
@@ -3921,17 +4059,24 @@ final class AloAppModel: ObservableObject {
         let body = commentText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return }
         let draft = commentText, session = commentsSession, request = UUID()
+        let replyTarget = commentReplyTarget
         commentsSendRequest = request
         isSendingComment = true
         commentsError = ""
         #if DEBUG
         if isFeedInteractionPreview {
             let me = bootstrap!.me
-            comments.append(AloPostComment(["id": 990701 + comments.count, "body": body,
+            var json: [String: Any] = ["id": 990720 + comments.count, "body": body,
                 "createdAt": ISO8601DateFormatter().string(from: Date()),
-                "author": ["id": me.id, "name": me.name, "username": me.username]]))
+                "author": ["id": me.id, "name": me.name, "username": me.username]]
+            if let replyTarget {
+                json["parentId"] = replyTarget.parentId ?? replyTarget.id
+                json["replyTo"] = ["id": replyTarget.author.id, "name": replyTarget.author.name, "username": replyTarget.author.username]
+            }
+            comments.append(AloPostComment(json))
             replacePost(post.withEngagement(commentCount: post.commentCount + 1))
             commentText = ""
+            commentReplyTarget = nil
             isSendingComment = false
             lastCreatedCommentId = comments.last?.id ?? 0
             return
@@ -3940,13 +4085,15 @@ final class AloAppModel: ObservableObject {
         Task {
             defer { if commentsSendRequest == request { isSendingComment = false } }
             do {
-                let result = try await api.createComment(postId: post.id, body: body, captchaToken: captchaToken)
+                let result = try await api.createComment(postId: post.id, body: body,
+                                                         replyToCommentId: replyTarget?.id, captchaToken: captchaToken)
                 guard bootstrap?.me.id == owner else { return }
                 if let current = visiblePost(id: post.id), let updated = result.post {
                     replacePost(current.withEngagement(commentCount: updated.commentCount))
                 }
                 if commentsSession == session, commentsPost?.id == post.id {
                     if commentText == draft { commentText = "" }
+                    if commentReplyTarget?.id == replyTarget?.id { commentReplyTarget = nil }
                     if !comments.contains(where: { $0.id == result.comment.id }) { comments.append(result.comment) }
                     lastCreatedCommentId = result.comment.id
                 }
@@ -3996,8 +4143,9 @@ final class AloAppModel: ObservableObject {
         let session = commentsSession
         #if DEBUG
         if isFeedInteractionPreview {
-            comments.removeAll { $0.id == comment.id }
-            replacePost(post.withEngagement(commentCount: post.commentCount - 1))
+            let removed = comments.filter { $0.id == comment.id || $0.parentId == comment.id }.count
+            comments.removeAll { $0.id == comment.id || $0.parentId == comment.id }
+            replacePost(post.withEngagement(commentCount: post.commentCount - removed))
             return
         }
         #endif
@@ -4006,7 +4154,11 @@ final class AloAppModel: ObservableObject {
                 let updatedPost = try await api.deleteComment(postId: post.id, commentId: comment.id)
                 guard bootstrap?.me.id == owner else { return }
                 if commentsSession == session {
-                    comments.removeAll { $0.id == comment.id }
+                    // A root comment takes its replies with it.
+                    comments.removeAll { $0.id == comment.id || $0.parentId == comment.id }
+                    if let target = commentReplyTarget, target.id == comment.id || target.parentId == comment.id {
+                        commentReplyTarget = nil
+                    }
                 }
                 if let updatedPost, let current = visiblePost(id: post.id) {
                     replacePost(current.withEngagement(commentCount: updatedPost.commentCount))

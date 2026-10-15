@@ -7,6 +7,7 @@ struct ProfileView: View {
     @State private var selectedSection: ProfileSection = .posts
     @State private var isPalettePresented = false
     @State private var isEditPresented = false
+    @State private var isStatsPresented = false
     @State private var selectedAvatarItem: PhotosPickerItem?
     @State private var avatarCrop: AloAvatarCropRequest?
 
@@ -37,6 +38,10 @@ struct ProfileView: View {
                                                 "avatarEmoji": data.me.avatarUrl]),
                         isOwn: true
                     )
+
+                    creatorDashboardEntry
+                        .padding(.horizontal, AloSocialMetrics.inset)
+                        .padding(.bottom, AloTheme.spacingSmall)
 
                     Section {
                         let posts = selectedSection == .posts ? data.profilePosts : ownLikedPosts
@@ -83,6 +88,9 @@ struct ProfileView: View {
         .navigationDestination(isPresented: $isEditPresented) {
             AloSocialSettingsSheet().environmentObject(app)
         }
+        .navigationDestination(isPresented: $isStatsPresented) {
+            AloCreatorStatsScreen().environmentObject(app)
+        }
         .onChange(of: selectedAvatarItem) { _, item in
             guard let item else { return }
             Task {
@@ -102,6 +110,30 @@ struct ProfileView: View {
                 app.updateProfileAvatar(data: jpeg)
             }
         }
+    }
+
+    /// Instagram's "Панель автора": your posts' reach, one tap from the profile.
+    private var creatorDashboardEntry: some View {
+        Button { isStatsPresented = true } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "chart.bar.xaxis")
+                    .font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(LinearGradient(colors: [AloTheme.accent, Color(red: 0.42, green: 0.27, blue: 0.93)],
+                                               startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Панель автора").font(.system(size: 16, weight: .semibold)).foregroundStyle(AloTheme.text)
+                    Text("Просмотры, реакции и подписчики").font(.system(size: 13)).foregroundStyle(AloTheme.muted)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(AloTheme.muted.opacity(0.7))
+            }
+            .padding(.horizontal, 12).padding(.vertical, 10)
+            .background(AloTheme.surfaceRaised.opacity(0.6), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(AloPressBounceButtonStyle(pressedScale: 0.98))
+        .accessibilityIdentifier("alo.profile.creator-stats")
     }
 
     private var ownLikedPosts: [AloPost] {
@@ -124,6 +156,7 @@ struct ProfileDetailView: View {
     let profile: AloUserProfile
     @State private var selectedSection: ProfileSection = .posts
     @State private var isBlockConfirmationPresented = false
+    @State private var reportTarget: AloReportTarget?
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -149,8 +182,11 @@ struct ProfileDetailView: View {
                     .padding(.bottom, AloTheme.spacingSmall)
 
                     if !isOwnProfile {
-                        blockControl
-                            .padding(.horizontal, AloTheme.pageInset)
+                        HStack(spacing: 8) {
+                            blockControl
+                            reportControl
+                        }
+                        .padding(.horizontal, AloTheme.pageInset)
                         if isBlocked {
                             blockedContactNotice
                                 .padding(.horizontal, AloTheme.pageInset)
@@ -318,6 +354,25 @@ struct ProfileDetailView: View {
             Button("Отмена", role: .cancel) {}
         } message: {
             Text("Сообщения и звонки станут недоступны.")
+        }
+    }
+
+    private var reportControl: some View {
+        Button { reportTarget = .user(profile.user.id) } label: {
+            Image(systemName: "exclamationmark.bubble")
+                .font(.system(size: 17, weight: .semibold)).foregroundStyle(AloTheme.muted)
+                .frame(width: 48, height: 48)
+                .background(AloTheme.surface)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(AloTheme.border, lineWidth: 1))
+        }
+        .buttonStyle(AloPressBounceButtonStyle(pressedScale: 0.95))
+        .accessibilityLabel("Пожаловаться")
+        .accessibilityIdentifier("alo.profile.report")
+        .sheet(item: $reportTarget) { target in
+            AloReportSheet(target: target) { reason, details in
+                try await app.report(target, reason: reason, details: details)
+            }
         }
     }
 
