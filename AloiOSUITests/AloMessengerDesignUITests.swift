@@ -1042,7 +1042,8 @@ final class AloMessengerDesignUITests: XCTestCase {
         let subscriptions = app.buttons["alo.feed.tab.subscriptions"]
         XCTAssertTrue(popular.waitForExistence(timeout: 15))
         XCTAssertTrue(popular.isSelected)
-        XCTAssertGreaterThanOrEqual(popular.frame.height, 44)
+        // Layout can land a hair under 44 pt (43.99999…); that is still a 44 pt target.
+        XCTAssertGreaterThanOrEqual(popular.frame.height, 44 - 0.01)
         XCTAssertEqual(subscriptions.frame.minX - popular.frame.maxX, 0, accuracy: 1)
         XCTAssertEqual(popular.frame.width, subscriptions.frame.width, accuracy: 1)
         XCTAssertGreaterThan(popular.frame.width * 2, app.frame.width * 0.8)
@@ -1062,7 +1063,7 @@ final class AloMessengerDesignUITests: XCTestCase {
         likes.tap()
         XCTAssertTrue(likes.isSelected)
         capture("profile-rounded-tabs")
-        XCTAssertGreaterThanOrEqual(likes.frame.height, 44)
+        XCTAssertGreaterThanOrEqual(likes.frame.height, 44 - 0.01)
         app.buttons["alo.profile.tab.posts"].tap()
         app.swipeUp()
         capture("profile-tabs-over-scrolled-posts")

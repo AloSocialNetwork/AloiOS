@@ -410,6 +410,7 @@ struct ChannelProfileDetailView: View {
     let channel: AloChannelProfile
     @State private var managementPresented = false
     @State private var adminLogPresented = false
+    @State private var statsPresented = false
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -468,6 +469,13 @@ struct ChannelProfileDetailView: View {
                                     .frame(maxWidth: .infinity)
                             }
                             Button {
+                                statsPresented = true
+                            } label: {
+                                Label("Статистика", systemImage: "chart.bar.xaxis")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .accessibilityIdentifier("alo.channel.stats-button")
+                            Button {
                                 app.loadChannelAdminLog()
                                 adminLogPresented = true
                             } label: {
@@ -518,6 +526,9 @@ struct ChannelProfileDetailView: View {
         .sheet(isPresented: $managementPresented) {
             ChannelManagementSheet(channel: channel)
                 .environmentObject(app)
+        }
+        .sheet(isPresented: $statsPresented) {
+            AloChannelStatsScreen(channel: channel).environmentObject(app)
         }
         .sheet(isPresented: $adminLogPresented) {
             ChannelAdminLogSheet(events: app.channelAdminEvents) { action in
@@ -889,6 +900,7 @@ enum ProfileSettingsPage: String, CaseIterable, Identifiable {
     case business
     case security
     case passwordChange
+    case moderation
 
     var id: String { rawValue }
 
@@ -901,6 +913,7 @@ enum ProfileSettingsPage: String, CaseIterable, Identifiable {
         case .business: return "Бизнес-профиль"
         case .security: return "Безопасность"
         case .passwordChange: return "Смена пароля"
+        case .moderation: return "Модерация"
         }
     }
 
@@ -913,6 +926,7 @@ enum ProfileSettingsPage: String, CaseIterable, Identifiable {
         case .business: return "Часы работы, приветствие и быстрые ответы"
         case .security: return "Пароль, устройства и защита аккаунта"
         case .passwordChange: return "Введите текущий и новый пароль"
+        case .moderation: return "Жалобы, обжалования, журнал и реклама"
         }
     }
 }
@@ -982,8 +996,12 @@ struct ProfileEditSheet: View {
     var body: some View {
         settingsScreen(.root)
             .navigationDestination(item: $openedPage) { page in
-                settingsScreen(page)
-                    .navigationDestination(isPresented: $isPasswordChangeOpen) { settingsScreen(.passwordChange) }
+                if page == .moderation {
+                    AloModerationPanel()
+                } else {
+                    settingsScreen(page)
+                        .navigationDestination(isPresented: $isPasswordChangeOpen) { settingsScreen(.passwordChange) }
+                }
             }
     }
 
@@ -1116,6 +1134,8 @@ struct ProfileEditSheet: View {
             securityPage
         case .passwordChange:
             passwordChangePage
+        case .moderation:
+            EmptyView()
         }
     }
 
@@ -1129,6 +1149,13 @@ struct ProfileEditSheet: View {
                 settingsNavRow(title: "Уведомления", subtitle: "", systemName: "bell", target: .notifications, showsIconTile: false, showsChevron: false)
                 settingDivider
                 settingsNavRow(title: "Бизнес-профиль", subtitle: "", systemName: "briefcase", target: .business, showsIconTile: false, showsChevron: false)
+                // Admins and moderators only.
+                if !(app.bootstrap?.me.adminCan.isEmpty ?? true) {
+                    settingDivider
+                    settingsNavRow(title: "Модерация", subtitle: "", systemName: "checkmark.shield", target: .moderation,
+                                   showsIconTile: false, showsChevron: false)
+                        .accessibilityIdentifier("alo.settings.moderation")
+                }
             }
 
             let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
@@ -1519,6 +1546,7 @@ struct ProfileEditSheet: View {
         case .business: tint = Color(red: 0.10, green: 0.69, blue: 0.46)
         case .security: tint = Color(red: 1.0, green: 0.62, blue: 0.06)
         case .passwordChange: tint = AloTheme.accent
+        case .moderation: tint = AloTheme.destructive
         case .root: tint = AloTheme.accent
         }
         return Button {

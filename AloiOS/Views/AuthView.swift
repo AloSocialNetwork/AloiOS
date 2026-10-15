@@ -6,6 +6,7 @@ struct AuthView: View {
     @State private var step: AuthStep = .email
     @FocusState private var focusedField: AuthStep?
     @State private var isQRCodeLoginPresented = false
+    @State private var isAccountAppealPresented = false
     @State private var isStoredAccountsPresented = false
 
     var body: some View {
@@ -247,6 +248,18 @@ struct AuthView: View {
 
         if !app.errorMessage.isEmpty {
             AuthStatusRow(text: app.errorMessage, tint: Color(red: 1, green: 0.27, blue: 0.36), systemImage: "exclamationmark.circle.fill")
+            if app.isAccountBlockedByModeration {
+                Button("Обжаловать блокировку") { isAccountAppealPresented = true }
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(AloTheme.accent)
+                    .frame(minHeight: 44)
+                    .accessibilityIdentifier("alo.auth.appeal")
+                    .sheet(isPresented: $isAccountAppealPresented) {
+                        AloAppealSheet(title: "Обжалование блокировки") { text in
+                            try await app.appealAccountBlock(text: text)
+                        }
+                    }
+            }
         }
     }
 

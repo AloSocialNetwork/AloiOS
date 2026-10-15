@@ -86,9 +86,12 @@ struct AloCurrentUser: Identifiable, Equatable {
     let registeredLabel: String
     let coverStyle: String
     let coverImageUrl: String
+    /// What this account may do in the moderation panel: "reports", "moderation", "stats"…
+    let adminCan: Set<String>
 
     init(_ json: [String: Any]) {
         id = json.int("id")
+        adminCan = Set(json.object("adminScope").boolMap("can").filter(\.value).map(\.key))
         name = json.string("name").ifBlank("Alo")
         username = json.string("username")
         email = json.string("email")
@@ -106,7 +109,8 @@ struct AloCurrentUser: Identifiable, Equatable {
         AloCurrentUser([
             "id": id, "name": name, "username": username, "email": email, "bio": bio, "avatarUrl": avatarUrl,
             "verified": verified, "online": online, "registeredLabel": registeredLabel,
-            "coverStyle": style, "coverImageUrl": imageURL
+            "coverStyle": style, "coverImageUrl": imageURL,
+            "adminScope": ["can": Dictionary(uniqueKeysWithValues: adminCan.map { ($0, true) })]
         ])
     }
 }
@@ -1848,6 +1852,8 @@ struct AloGroupPolicy: Equatable {
     var historyVisible: Bool
     var slowModeSeconds: Int
     var autoDeleteSeconds: Int
+    /// "Запретить копирование": no forwarding, copying or saving of this chat's messages.
+    var protectedContent = false
     var defaultPermissions: [String: Bool]
     var memberAdminRights: [String: Bool]
     var memberRestrictions: [String: Bool]
@@ -1874,6 +1880,7 @@ struct AloGroupPolicy: Equatable {
             : json.bool("historyVisible")
         slowModeSeconds = resolvedKind == "channel" ? 0 : max(0, json.int("slowModeSeconds"))
         autoDeleteSeconds = max(0, json.int("autoDeleteSeconds"))
+        protectedContent = json.bool("protectedContent")
         defaultPermissions = json.boolMap("defaultPermissions")
         memberAdminRights = json.boolMap("memberAdminRights")
         memberRestrictions = json.boolMap("memberRestrictions")
@@ -1889,6 +1896,7 @@ struct AloGroupPolicy: Equatable {
             "historyVisible": isChannel ? true : historyVisible,
             "slowModeSeconds": isChannel ? 0 : slowModeSeconds,
             "autoDeleteSeconds": autoDeleteSeconds,
+            "protectedContent": protectedContent,
             "defaultPermissions": defaultPermissions
         ]
     }
@@ -2178,6 +2186,8 @@ struct AloConversationSummary: Identifiable, Equatable {
     let lastSenderId: Int
     /// Messages from the other side not read yet. `hasServerUnreadCount` is false on older servers.
     let unreadCount: Int
+    /// Unread messages in a group that mention you: the chat list's "@".
+    var unreadMentionCount = 0
     let hasServerUnreadCount: Bool
 
     init(_ json: [String: Any]) {
@@ -2192,6 +2202,7 @@ struct AloConversationSummary: Identifiable, Equatable {
         lastMessageId = last.int("id")
         lastSenderId = last.int("senderId")
         unreadCount = max(0, json.int("unreadCount"))
+        unreadMentionCount = max(0, json.int("unreadMentionCount"))
         hasServerUnreadCount = json["unreadCount"] != nil
     }
 

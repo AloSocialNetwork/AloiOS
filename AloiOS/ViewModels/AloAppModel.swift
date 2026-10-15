@@ -205,6 +205,12 @@ final class AloAppModel: ObservableObject {
     /// Posts hidden from the feed during this session, kept as a "Вернуть" row until a refresh.
     @Published private(set) var hiddenFeedPosts = [Int: AloFeedHideReason]()
     @Published private(set) var postDrafts = [AloPostDraft]()
+    /// Alo's own ads for the feed, and how many posts go between two of them.
+    /// Sign-in was refused because moderation blocked the account: the screen offers an appeal.
+    @Published var isAccountBlockedByModeration = false
+    @Published private(set) var feedAds = [AloAd]()
+    @Published private(set) var feedAdEvery = 6
+    @Published private(set) var hiddenAdIds = Set<Int>()
     @Published private(set) var commentsError = ""
     @Published private(set) var isSendingComment = false
     @Published private(set) var lastCreatedCommentId = 0
@@ -252,7 +258,11 @@ final class AloAppModel: ObservableObject {
     private var pendingChatRetryTask: Task<Void, Never>?
     private var pendingChatRefreshTask: Task<Void, Never>?
     private var pendingChatRefreshRevision = 0
-    private var pausedOutgoingMessageIds = Set<Int>()
+    @Published private(set) var pausedOutgoingMessageIds = Set<Int>()
+    /// How far each outgoing attachment upload has got, by local message id.
+    @Published private(set) var outgoingUploadProgress = [Int: AloUploadProgress]()
+    /// The upload running now, so "pause" can stop it; its checkpoint lets it resume later.
+    private var activeUpload: (localId: Int, task: Task<AloMessageAttachment, Error>)?
     private var forumTopicDraftTasks = [String: Task<Void, Never>]()
     private var pendingChatOperations = [PendingChatOperation]()
     private var pendingChatOperationsOwnerUserId: Int?
@@ -545,6 +555,7 @@ final class AloAppModel: ObservableObject {
             } catch let error as AloAPIError {
                 if self.handleChallenge(error, retry: { token in self.submitLogin(captchaToken: token) }) { return }
                 self.errorMessage = error.message
+                self.isAccountBlockedByModeration = error.code == "ACCOUNT_BANNED" || error.code == "ACCOUNT_BLOCKED"
             } catch {
                 self.errorMessage = "Не удалось подключиться к серверу."
             }
@@ -1521,6 +1532,177 @@ final class AloAppModel: ObservableObject {
         if isFeedInteractionPreview, let previewCreatorStats { return previewCreatorStats }
 #endif
         return try await api.loadCreatorStats(days: days)
+    }
+
+    // MARK: Moderation panel and appeals
+
+    func moderationReports() async throws -> [AloModerationReport] {
+#if DEBUG
+        if isFeedInteractionPreview { return Self.previewReports }
+#endif
+        return try await api.loadModerationReports(status: "pending")
+    }
+
+    func resolveModerationReport(_ report: AloModerationReport, approve: Bool, action: AloModerationAction, note: String) async throws {
+#if DEBUG
+        if isFeedInteractionPreview { return }
+#endif
+        try await api.resolveModerationReport(id: report.id, approve: approve, action: action, note: note)
+    }
+
+    func moderationAppeals() async throws -> [AloModerationAppeal] {
+#if DEBUG
+        if isFeedInteractionPreview {
+            return [AloModerationAppeal(["id": 1, "kind": "account", "reportId": 12, "status": "pending", "action": "block",
+                "text": "Это был анонс нашей встречи, а не реклама. Прошу снять ограничение.",
+                "createdAt": ISO8601DateFormatter().string(from: Date().addingTimeInterval(-5_400)),
+                "user": ["id": 990011, "name": "Александр", "username": "alex"]])]
+        }
+#endif
+        return try await api.loadModerationAppeals(status: "pending")
+    }
+
+    func resolveModerationAppeal(_ appeal: AloModerationAppeal, overturn: Bool) async throws {
+#if DEBUG
+        if isFeedInteractionPreview { return }
+#endif
+        try await api.resolveModerationAppeal(id: appeal.id, overturn: overturn, note: "")
+    }
+
+    func moderationAudit(before: Int?) async throws -> (entries: [AloModerationAuditEntry], nextBefore: Int?) {
+#if DEBUG
+        if isFeedInteractionPreview {
+            let iso = ISO8601DateFormatter()
+            let me: [String: Any] = ["id": 990001, "name": "Тест интерфейса"]
+            let rows: [(String, String, String)] = [("report_rejected", "жалоба #14 · нарушений нет", "Маша"),
+                ("appeal_overturned", "доступ к аккаунту восстановлен", "Александр"),
+                ("block", "жалоба #12 · реклама", "Александр"), ("delete_post", "жалоба #9 · спам-ссылки", "Даша")]
+            return (rows.enumerated().map { index, row in
+                AloModerationAuditEntry(["id": 40 - index, "action": row.0, "details": row.1,
+                    "createdAt": iso.string(from: Date().addingTimeInterval(-Double(index + 1) * 3_000)),
+                    "actor": me, "target": ["id": 990010 + index, "name": row.2]])
+            }, nil)
+        }
+#endif
+        return try await api.loadModerationAudit(before: before)
+    }
+
+    /// Contest a decision named in a moderation notification.
+    func appealAccountBlock(text: String) async throws {
+        try await api.appealAccountBlock(email: email, password: password, text: text)
+    }
+
+    func appealModerationDecision(reportId: Int, text: String) async throws {
+        try await api.appealModerationDecision(reportId: reportId, text: text)
+    }
+
+    // MARK: Ads
+
+    func adCampaigns() async throws -> [AloAdCampaign] {
+#if DEBUG
+        if isFeedInteractionPreview {
+            return [AloAdCampaign(["id": 1, "name": "Запуск историй", "status": "active", "placement": "feed", "advertiser": "Alo",
+                                   "title": "Истории в Alo", "body": "Делитесь моментами на 24 часа.", "ctaLabel": "Попробовать",
+                                   "ctaUrl": "alo://stories/new",
+                                   "stats": ["impressions": 12_480, "reach": 4_210, "clicks": 386, "hides": 41, "ctr": 3.1]]),
+                    AloAdCampaign(["id": 2, "name": "Каналы для учёбы", "status": "paused", "placement": "channel", "advertiser": "Alo",
+                                   "body": "Подпишитесь на каналы вашего вуза.", "ctaUrl": "https://alo.example/channels",
+                                   "stats": ["impressions": 3_020, "reach": 1_870, "clicks": 75, "hides": 12, "ctr": 2.5]])]
+        }
+#endif
+        return try await api.loadAdCampaigns()
+    }
+
+    func saveAdCampaign(id: Int?, fields: [String: Any]) async throws -> AloAdCampaign {
+        try await api.saveAdCampaign(id: id, fields: fields)
+    }
+
+    func loadFeedAds() async {
+#if DEBUG
+        if UserDefaults.standard.bool(forKey: "ALO_UI_MESSENGER_PREVIEW") {
+            // Fixture feeds show an ad only when a test asks for one, so other layouts stay as they were.
+            guard UserDefaults.standard.bool(forKey: "ALO_UI_FEED_ADS") else { return }
+            feedAds = [AloAd(["id": 1, "advertiser": "Alo", "title": "Истории в Alo",
+                              "body": "Делитесь моментами, которые исчезнут через сутки. Выберите, кто их увидит.",
+                              "ctaLabel": "Попробовать", "ctaUrl": "alo://stories/new"])]
+            feedAdEvery = 3
+            return
+        }
+#endif
+        guard let loaded = try? await api.loadFeedAds() else { return }
+        feedAds = loaded.ads
+        feedAdEvery = loaded.every
+    }
+
+    func channelAd(roomId: Int) async -> AloAd? {
+#if DEBUG
+        if UserDefaults.standard.bool(forKey: "ALO_UI_MESSENGER_PREVIEW") {
+            guard UserDefaults.standard.bool(forKey: "ALO_UI_FEED_ADS") else { return nil }
+            return AloAd(["id": 2, "placement": "channel", "advertiser": "Alo", "title": "Каналы для учёбы",
+                          "body": "Подпишитесь на каналы вашего вуза и не пропускайте расписание.", "ctaLabel": "Открыть",
+                          "ctaUrl": "https://alo.example/channels"])
+        }
+#endif
+        return try? await api.loadChannelAd(roomId: roomId)
+    }
+
+    func recordAdEvent(_ ad: AloAd, kind: String, placement: String) {
+#if DEBUG
+        if UserDefaults.standard.bool(forKey: "ALO_UI_MESSENGER_PREVIEW") { return }
+#endif
+        Task { try? await api.recordAdEvent(adId: ad.id, kind: kind, placement: placement) }
+    }
+
+    func hideAd(_ ad: AloAd, report: Bool, placement: String) {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) { _ = hiddenAdIds.insert(ad.id) }
+        notice = report ? "Спасибо! Мы проверим это объявление" : "Реклама скрыта"
+#if DEBUG
+        if UserDefaults.standard.bool(forKey: "ALO_UI_MESSENGER_PREVIEW") { return }
+#endif
+        Task { try? await api.hideAd(adId: ad.id, report: report, placement: placement) }
+    }
+
+#if DEBUG
+    static let previewReports: [AloModerationReport] = {
+        let iso = ISO8601DateFormatter()
+        return [
+            AloModerationReport(["id": 14, "targetType": "post", "targetId": 990402, "reason": "Спам",
+                "details": "Одна и та же ссылка во всех комментариях", "status": "pending",
+                "targetPost": ["id": 990402, "body": "Заработок без вложений! Пиши в личку 💸", "mediaCount": 0],
+                "createdAt": iso.string(from: Date().addingTimeInterval(-1_800)),
+                "reporter": ["id": 990010, "name": "Маша", "username": "masha"]]),
+            AloModerationReport(["id": 15, "targetType": "user", "targetId": 990013, "targetUserId": 990013, "reason": "Оскорбления",
+                "status": "pending", "createdAt": iso.string(from: Date().addingTimeInterval(-7_200)),
+                "reporter": ["id": 990012, "name": "Даша", "username": "dasha"]])
+        ]
+    }()
+#endif
+
+    func channelStats(channelId: Int, days: Int) async throws -> AloChannelStats {
+#if DEBUG
+        if isFeedInteractionPreview {
+            let iso = ISO8601DateFormatter()
+            var growth = [[String: Any]]()
+            for index in 0..<days {
+                let date = Date().addingTimeInterval(-Double(index) * 86_400)
+                let joined: Int = 3 + (days - index) / 3 + (index % 4 == 0 ? 6 : 0)
+                growth.append(["day": String(iso.string(from: date).prefix(10)), "joined": joined])
+            }
+            var publications = [[String: Any]]()
+            for index in 0..<8 {
+                let date = Date().addingTimeInterval(-Double(index) * 86_400 * 3)
+                let views: Int = 2_400 - index * 180
+                let likes: Int = 140 - index * 9
+                let reposts: Int = 31 - index * 2
+                publications.append(["postId": 990400 + index, "publishedAt": iso.string(from: date), "views": views,
+                                     "likes": likes, "comments": 22 - index, "reposts": reposts])
+            }
+            return AloChannelStats(["period": ["days": days], "totals": ["subscribers": 12_840, "posts": 18, "views": 41_200,
+                                    "likes": 2_310, "comments": 288, "reposts": 402],
+                                    "audienceGrowth": growth, "publications": publications])
+        }
+#endif
+        return try await api.loadChannelStats(channelId: channelId, days: days)
     }
 
     func mentionSuggestions(_ query: String) async throws -> [AloEntitySummary] {
@@ -3624,6 +3806,29 @@ final class AloAppModel: ObservableObject {
         pendingChatMessageIds.contains(message.id)
     }
 
+    /// Pauses a file that is uploading (or waiting to); it keeps its place and resumes from the
+    /// last acknowledged piece.
+    func pauseOutgoingUpload(localId: Int) {
+        guard pendingChatMessageIds.contains(localId) else { return }
+        pausedOutgoingMessageIds.insert(localId)
+        if activeUpload?.localId == localId { activeUpload?.task.cancel() }
+        AloHaptics.selection()
+    }
+
+    #if DEBUG
+    func installUploadPreview(messageId: Int) {
+        pendingChatMessageIds.insert(messageId)
+        outgoingUploadProgress[messageId] = AloUploadProgress(sent: 512_000_000, total: 1_480_000_000, index: 0, count: 1)
+    }
+    #endif
+
+    func resumeOutgoingUpload(localId: Int) {
+        pausedOutgoingMessageIds.remove(localId)
+        failedChatMessageErrors.removeValue(forKey: localId)
+        AloHaptics.selection()
+        Task { await processPendingChatOperations() }
+    }
+
     func sendFriendRequest(_ user: AloEntitySummary, captchaToken: String? = nil) {
         sendFriendRequest(userId: user.id, captchaToken: captchaToken)
     }
@@ -4855,6 +5060,7 @@ final class AloAppModel: ObservableObject {
                     }
                     try await pendingOutboxWrite?.value
                     guard ownerUserId == pendingChatOperationsOwnerUserId, !Task.isCancelled else { return }
+                    let mentioned = await mentionedMemberIds(in: body, target: target)
                     let acknowledgement = try await api.sendPreparedMessage(
                         peerId: target.peerId,
                         roomId: target.roomId,
@@ -4866,7 +5072,8 @@ final class AloAppModel: ObservableObject {
                         scheduledAt: scheduledAt,
                         sendWhenOnline: sendWhenOnline,
                         scheduledPoll: scheduledPollDefinition,
-                        clientMessageId: clientMessageId
+                        clientMessageId: clientMessageId,
+                        mentionedUserIds: mentioned
                     )
                     guard ownerUserId == pendingChatOperationsOwnerUserId,
                           pendingChatOperations.first?.outgoingLocalId == localId else { return }
@@ -4929,18 +5136,37 @@ final class AloAppModel: ObservableObject {
                                     ownerUserId: ownerUserId
                                 )
                                 : nil
-                            let uploaded = try await api.uploadE2EEAttachment(
-                                attachments[index],
-                                resumeCheckpoint: checkpoint,
-                                onCheckpoint: { checkpoint in
-                                    guard ownerUserId > 0 else { return }
-                                    try? AloSecureOutboxStore.shared.saveUploadCheckpoint(
-                                        checkpoint,
-                                        id: attachmentId,
-                                        ownerUserId: ownerUserId
-                                    )
-                                }
-                            )
+                            let attachment = attachments[index]
+                            let count = attachments.count
+                            if let checkpoint {
+                                outgoingUploadProgress[localId] = AloUploadProgress(
+                                    sent: checkpoint.offset, total: checkpoint.total, index: index, count: count)
+                            }
+                            let uploadTask = Task { [api] in
+                                try await api.uploadE2EEAttachment(
+                                    attachment,
+                                    resumeCheckpoint: checkpoint,
+                                    onCheckpoint: { checkpoint in
+                                        Task { @MainActor [weak self] in
+                                            self?.outgoingUploadProgress[localId] = AloUploadProgress(
+                                                sent: checkpoint.offset, total: checkpoint.total, index: index, count: count)
+                                        }
+                                        guard ownerUserId > 0 else { return }
+                                        try? AloSecureOutboxStore.shared.saveUploadCheckpoint(
+                                            checkpoint,
+                                            id: attachmentId,
+                                            ownerUserId: ownerUserId
+                                        )
+                                    }
+                                )
+                            }
+                            activeUpload = (localId, uploadTask)
+                            defer { if activeUpload?.localId == localId { activeUpload = nil } }
+                            let uploaded = try await withTaskCancellationHandler {
+                                try await uploadTask.value
+                            } onCancel: {
+                                uploadTask.cancel()
+                            }
                             guard ownerUserId == pendingChatOperationsOwnerUserId, !Task.isCancelled,
                                   !pendingChatOperations.isEmpty else { return }
                             if ownerUserId > 0 {
@@ -5004,6 +5230,7 @@ final class AloAppModel: ObservableObject {
                     }
                     try await pendingOutboxWrite?.value
                     guard ownerUserId == pendingChatOperationsOwnerUserId, !Task.isCancelled else { return }
+                    let mentioned = await mentionedMemberIds(in: body, target: target)
                     let acknowledgement = try await api.sendPreparedMessage(
                         peerId: target.peerId,
                         roomId: target.roomId,
@@ -5016,12 +5243,14 @@ final class AloAppModel: ObservableObject {
                         silent: silent,
                         scheduledAt: scheduledAt,
                         sendWhenOnline: sendWhenOnline,
-                        clientMessageId: clientMessageId
+                        clientMessageId: clientMessageId,
+                        mentionedUserIds: mentioned
                     )
                     guard ownerUserId == pendingChatOperationsOwnerUserId,
                           pendingChatOperations.first?.outgoingLocalId == localId else { return }
                     pendingChatOperations.removeFirst()
                     persistPendingChatOperations()
+                    outgoingUploadProgress.removeValue(forKey: localId)
                     deletePersistedAttachments(clientMessageId: clientMessageId, count: attachments.count, drafts: attachments)
                     pendingChatMessageIds.remove(localId)
                     acknowledgePendingMessage(
@@ -5196,6 +5425,13 @@ final class AloAppModel: ObservableObject {
                 }
                 continue
             } catch {
+                // "Пауза" stops only that upload: the rest of the queue goes on.
+                if error is CancellationError, !Task.isCancelled,
+                   let id = operation.outgoingLocalId, pausedOutgoingMessageIds.contains(id) {
+                    pendingChatOperations.append(pendingChatOperations.removeFirst())
+                    persistPendingChatOperations()
+                    continue
+                }
                 guard !Task.isCancelled, !(error is CancellationError) else { return }
                 let retryable = AloAPIClient.shouldRetryUpload(error)
                 if retainFailedSend(operation, message: "Не удалось отправить сообщение. \(error.localizedDescription)", pause: !retryable) {
@@ -5236,6 +5472,41 @@ final class AloAppModel: ObservableObject {
         self.activeConversation = activeConversation.replacingItems(updatedItems)
     }
 
+    // MARK: "@" in group chats
+
+    private var groupMembersCache = [Int: (members: [AloGroupMember], loadedAt: Date)]()
+
+    /// Members of a group, kept for a few minutes, to name whom a message sent from outside the
+    /// open chat mentions.
+    func groupMembers(roomId: Int) async -> [AloGroupMember] {
+        if let cached = groupMembersCache[roomId], Date().timeIntervalSince(cached.loadedAt) < 300 { return cached.members }
+#if DEBUG
+        if isFeedInteractionPreview || UserDefaults.standard.bool(forKey: "ALO_UI_MESSENGER_PREVIEW") {
+            return previewFriends.map { AloGroupMember(["id": $0.id, "name": $0.name, "username": $0.username]) }
+        }
+#endif
+        guard let members = try? await api.loadGroupMembers(roomId: roomId) else { return groupMembersCache[roomId]?.members ?? [] }
+        groupMembersCache[roomId] = (members, Date())
+        return members
+    }
+
+    /// Who an outgoing group message names with "@handle".
+    private func mentionedMemberIds(in body: String, target: PendingChatTarget) async -> [Int] {
+        guard target.kind == "group", target.roomId > 0, body.contains("@") else { return [] }
+        let parsed = AloMessageMarkup.parse(body)
+        let text = parsed.body as NSString
+        let handles = Set(parsed.entities.filter { $0.type == "mention" }.compactMap { entity -> String? in
+            let range = NSRange(location: entity.offset, length: entity.length)
+            guard NSMaxRange(range) <= text.length else { return nil }
+            return String(text.substring(with: range).dropFirst()).lowercased()
+        })
+        guard !handles.isEmpty else { return [] }
+        // The open chat already knows its members; another chat asks the server once.
+        let known = conversation(for: target).groupMembers
+        let members = known.isEmpty ? await groupMembers(roomId: target.roomId) : known
+        return members.filter { handles.contains($0.username.lowercased()) }.map(\.id)
+    }
+
     private func isSavedTarget(_ target: PendingChatTarget) -> Bool {
         target.kind != "group" &&
             target.roomId <= 0 &&
@@ -5246,6 +5517,7 @@ final class AloAppModel: ObservableObject {
         if let id = operation.outgoingLocalId {
             failedChatMessageErrors.removeValue(forKey: id)
             pausedOutgoingMessageIds.remove(id)
+            outgoingUploadProgress.removeValue(forKey: id)
         }
         switch operation {
         case let .sendText(localId, _, _, _, _, _, _, _, _, _, _, _):

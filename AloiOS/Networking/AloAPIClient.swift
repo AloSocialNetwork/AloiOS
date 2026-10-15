@@ -2203,6 +2203,19 @@ final class AloAPIClient {
         return (roomId, peerId)
     }
 
+    /// Removes (or bans) several members at once; returns how many were left untouched.
+    func batchRemoveGroupMembers(roomId: Int, userIds: [Int], ban: Bool) async throws -> (removed: [Int], skipped: Int) {
+        let json = try await request("POST", "/api/group-chats/\(roomId)/members/batch-remove",
+                                     body: ["userIds": userIds, "ban": ban])
+        let removed = (json["removed"] as? [Any] ?? []).compactMap { ($0 as? NSNumber)?.intValue }
+        return (removed, json.array("skipped").count)
+    }
+
+    func loadGroupMembers(roomId: Int) async throws -> [AloGroupMember] {
+        let profile = try await request("GET", "/api/group-chats/\(roomId)/profile")
+        return profile.object("room").array("members").map(AloGroupMember.init)
+    }
+
     func loadGroupManagement(roomId: Int) async throws -> AloGroupManagementSnapshot {
         let profile = try await request("GET", "/api/group-chats/\(roomId)/profile")
         let room = profile.object("room")
@@ -2944,6 +2957,78 @@ final class AloAPIClient {
         return AloCreatorStats(json.object("stats"))
     }
 
+    // MARK: Moderation panel and appeals
+
+    func loadModerationReports(status: String) async throws -> [AloModerationReport] {
+        try await request("GET", "/api/admin/reports?status=\(status)").array("reports").map(AloModerationReport.init)
+    }
+
+    func resolveModerationReport(id: Int, approve: Bool, action: AloModerationAction, note: String) async throws {
+        _ = try await request("POST", "/api/admin/reports/\(id)/resolve", body: [
+            "status": approve ? "approved" : "rejected", "action": approve ? action.rawValue : "none", "note": note, "blockHours": 24
+        ])
+    }
+
+    func loadModerationAppeals(status: String) async throws -> [AloModerationAppeal] {
+        try await request("GET", "/api/admin/appeals?status=\(status)").array("appeals").map(AloModerationAppeal.init)
+    }
+
+    func resolveModerationAppeal(id: Int, overturn: Bool, note: String) async throws {
+        _ = try await request("POST", "/api/admin/appeals/\(id)/resolve",
+                              body: ["decision": overturn ? "overturned" : "upheld", "note": note])
+    }
+
+    func loadModerationAudit(before: Int? = nil) async throws -> (entries: [AloModerationAuditEntry], nextBefore: Int?) {
+        let json = try await request("GET", "/api/admin/audit-log?limit=50\(before.map { "&before=\($0)" } ?? "")")
+        let next = json.int("nextBefore")
+        return (json.array("entries").map(AloModerationAuditEntry.init), next > 0 ? next : nil)
+    }
+
+    func appealModerationDecision(reportId: Int, text: String) async throws {
+        _ = try await request("POST", "/api/appeals", body: ["reportId": reportId, "text": text])
+    }
+
+    /// A blocked account cannot sign in, so it appeals with its email and password.
+    func appealAccountBlock(email: String, password: String, text: String) async throws {
+        _ = try await request("POST", "/api/appeals/account", body: ["email": email, "password": password, "text": text])
+    }
+
+    // MARK: Ads
+
+    func loadFeedAds() async throws -> (ads: [AloAd], every: Int) {
+        let json = try await request("GET", "/api/ads/feed")
+        return (json.array("ads").map(AloAd.init), max(3, json.int("every")))
+    }
+
+    func loadChannelAd(roomId: Int) async throws -> AloAd? {
+        try await request("GET", "/api/ads/channel?roomId=\(roomId)").optionalObject("ad").map(AloAd.init)
+    }
+
+    func recordAdEvent(adId: Int, kind: String, placement: String) async throws {
+        _ = try await request("POST", "/api/ads/\(adId)/\(kind)", body: ["placement": placement])
+    }
+
+    func hideAd(adId: Int, report: Bool, placement: String) async throws {
+        _ = try await request("POST", "/api/ads/\(adId)/hide", body: ["reason": report ? "report" : "hide", "placement": placement])
+    }
+
+    func loadAdCampaigns() async throws -> [AloAdCampaign] {
+        try await request("GET", "/api/admin/ads").array("campaigns").map(AloAdCampaign.init)
+    }
+
+    func saveAdCampaign(id: Int?, fields: [String: Any]) async throws -> AloAdCampaign {
+        let json = if let id {
+            try await request("PATCH", "/api/admin/ads/\(id)", body: fields)
+        } else {
+            try await request("POST", "/api/admin/ads", body: fields)
+        }
+        return AloAdCampaign(json.object("campaign"))
+    }
+
+    func loadChannelStats(channelId: Int, days: Int) async throws -> AloChannelStats {
+        try AloChannelStats(await request("GET", "/api/channels/\(channelId)/statistics?days=\(days)"))
+    }
+
     func mentionSuggestions(query: String) async throws -> [AloEntitySummary] {
         let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         let json = try await request("GET", "/api/mentions/suggest?q=\(encoded)")
@@ -3026,7 +3111,8 @@ final class AloAPIClient {
         sendWhenOnline: Bool = false,
         scheduledPoll: AloPollDefinition? = nil,
         captchaToken: String? = nil,
-        clientMessageId: String
+        clientMessageId: String,
+        mentionedUserIds: [Int] = []
     ) async throws -> AloMessageSendAcknowledgement {
         var payload: [String: Any?] = [
             "encrypted": encryptedPayload,
@@ -3053,6 +3139,8 @@ final class AloAPIClient {
         }
         let response: [String: Any]
         if kind == "group", roomId > 0 {
+            // The text is encrypted: only who was mentioned goes along, for their notification.
+            if !mentionedUserIds.isEmpty { payload["mentionedUserIds"] = mentionedUserIds }
             response = try await request(
                 "POST",
                 "/api/group-chats/\(roomId)/messages/send",

@@ -245,3 +245,80 @@ enum AloMentionQuery {
         return String(text[..<at]) + "@\(username) "
     }
 }
+
+/// Bytes of an outgoing attachment the server has acknowledged, for the bubble's progress ring.
+struct AloUploadProgress: Equatable {
+    let sent: Int64
+    let total: Int64
+    let index: Int
+    let count: Int
+
+    var fraction: Double { total > 0 ? min(1, Double(sent) / Double(total)) : 0 }
+
+    /// "120 МБ из 1,4 ГБ", and "файл 2 из 3" when a message has several.
+    var label: String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        let bytes = "\(formatter.string(fromByteCount: sent)) из \(formatter.string(fromByteCount: total))"
+        return count > 1 ? "\(bytes) · файл \(index + 1) из \(count)" : bytes
+    }
+}
+
+/// A channel's statistics for a period, as the channel's admins see them.
+struct AloChannelStats: Equatable {
+    struct Growth: Equatable, Identifiable {
+        let day: String
+        let joined: Int
+        var id: String { day }
+    }
+
+    struct Publication: Equatable, Identifiable {
+        let postId: Int
+        let publishedAt: String
+        let views: Int
+        let likes: Int
+        let comments: Int
+        let reposts: Int
+        var id: Int { postId }
+    }
+
+    let days: Int
+    let subscribers: Int
+    let posts: Int
+    let views: Int
+    let likes: Int
+    let comments: Int
+    let reposts: Int
+    let growth: [Growth]
+    let publications: [Publication]
+
+    init(_ json: [String: Any]) {
+        days = json.object("period").int("days")
+        let totals = json.object("totals")
+        subscribers = totals.int("subscribers")
+        posts = totals.int("posts")
+        views = totals.int("views")
+        likes = totals.int("likes")
+        comments = totals.int("comments")
+        reposts = totals.int("reposts")
+        growth = json.array("audienceGrowth").map { Growth(day: $0.string("day"), joined: $0.int("joined")) }
+        publications = json.array("publications").map {
+            Publication(postId: $0.int("postId"), publishedAt: $0.string("publishedAt"), views: $0.int("views"),
+                        likes: $0.int("likes"), comments: $0.int("comments"), reposts: $0.int("reposts"))
+        }
+    }
+
+    var viewsPerPost: Int { posts > 0 ? views / posts : 0 }
+    var joinedInPeriod: Int { growth.reduce(0) { $0 + $1.joined } }
+
+    /// Every day of the period with how many people joined, zeros included, for the chart.
+    func growthByDay(now: Date = Date()) -> [AloCreatorStats.Day] {
+        let joined = Dictionary(growth.map { ($0.day, $0.joined) }, uniquingKeysWith: +)
+        let viewsByDay = Dictionary(publications.map { (String($0.publishedAt.prefix(10)), $0.views) }, uniquingKeysWith: +)
+        return (0..<max(1, days)).reversed().map { offset in
+            let key = String(ISO8601DateFormatter().string(from: now.addingTimeInterval(-Double(offset) * 86_400)).prefix(10))
+            return AloCreatorStats.Day(date: key, views: viewsByDay[key] ?? 0, likes: joined[key] ?? 0, comments: 0)
+        }
+    }
+}
