@@ -36,6 +36,26 @@ final class AloLaunchUITests: XCTestCase {
         XCTAssertTrue(app.buttons["alo.call-end"].exists)
     }
 
+    /// The minimize button and the encryption key are one row of the same 40 pt glass.
+    func testCallTopControlsShareOneLine() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_CALL_PREVIEW", "1", "-ALO_UI_CALL_VIDEO_PREVIEW", "0"]
+        app.launch()
+        let minimize = app.buttons["alo.call.minimize"]
+        if !minimize.waitForExistence(timeout: 4) {
+            let bar = app.buttons["alo.compact-call-bar"]
+            XCTAssertTrue(bar.waitForExistence(timeout: 6))
+            bar.tap()
+        }
+        XCTAssertTrue(minimize.waitForExistence(timeout: 5))
+        let key = app.buttons["alo.call-safety-verification"]
+        XCTAssertTrue(key.waitForExistence(timeout: 5))
+        Thread.sleep(forTimeInterval: 1.5)
+        XCTAssertEqual(key.frame.midY, minimize.frame.midY, accuracy: 0.5, "one line")
+        XCTAssertEqual(key.frame.height, 40, accuracy: 0.5, "the minimize button's glass is 40 pt too")
+        attachScreenshot("call-top-row")
+    }
+
     /// Telegram's call palettes: blue–violet while calling, green while talking (signal bars and
     /// timer), orange–pink on a weak link; the minimized bar takes the same colours.
     func testCaptureTelegramCallStates() {

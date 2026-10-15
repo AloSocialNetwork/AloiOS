@@ -162,8 +162,10 @@ struct AloCallOverlay: View {
 
             if call.isSecurityConfirmed, !call.safetyEmojis.isEmpty {
                 safetyVerification(call)
-                    // The expanded card sits below the minimize button, not over it.
-                    .padding(.top, safeAreaInsets.top + (isSafetyDetailsPresented ? 60 : 18))
+                    // Collapsed, the key is a 40 pt glass capsule on the minimize button's line
+                    // (its 40 pt circle sits 10 pt below the safe area); the expanded card sits
+                    // below that button, not over it.
+                    .padding(.top, safeAreaInsets.top + (isSafetyDetailsPresented ? 60 : 10))
                     .padding(.horizontal, 24)
                     .frame(
                         maxWidth: .infinity,
@@ -399,7 +401,7 @@ struct AloCallOverlay: View {
                     } else {
                         AloCallEmojiKey(emojis: call.safetyEmojis, reduceMotion: reduceMotion)
                             .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
+                            .frame(height: 40)
                             .modifier(AloChatGlass(interactive: false, role: .chrome))
                             .contentShape(Capsule())
                             .accessibilityElement(children: .ignore)
@@ -859,7 +861,7 @@ private struct AloCallEmojiKey: View {
     var body: some View {
         HStack(spacing: 8) {
             ForEach(Array(emojis.enumerated()), id: \.offset) { index, emoji in
-                Text(emoji).font(.system(size: 22))
+                Text(emoji).font(.system(size: 20))
                     .offset(y: shown || reduceMotion ? 0 : -26)
                     .opacity(shown || reduceMotion ? 1 : 0)
                     .animation(.spring(response: 0.5, dampingFraction: 0.78).delay(0.2 + 0.3 * Double(index)), value: shown)
