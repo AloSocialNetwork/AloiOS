@@ -216,6 +216,10 @@ extension AloAppModel {
                 items = [message(990200, body: "Открыть сайт", extra: ["entities": [["type": "link", "offset": 0,
                     "length": 11, "url": "https://telegram.org"]]]),
                     message(990201, body: "https://telegram.org/blog")]
+            case "upload":
+                // A large file on its way out: the bubble shows the upload ring with pause.
+                items = [items[0], message(990250, body: "Лекции за семестр", extra: ["senderId": 990001, "recipientId": 990002,
+                    "attachments": [["type": "file", "url": "", "name": "Лекции-семестр.zip", "mime": "application/zip"]]])]
             case "formatting":
                 // A quote and a code block, parsed the way the composer sends them.
                 let quoted = AloMessageMarkup.parse("> Встречаемся в **семь**, не опаздывай\nХорошо, буду вовремя ||сюрприз||")
@@ -291,7 +295,9 @@ extension AloAppModel {
             chatPrefs.replace(owner: 990001, pinned: ["direct:990101"], archived: ["direct:990108", "direct:990110"])
         }
         let data = AloBootstrapData(["data": [
-            "me": ["id": 990001, "name": "Тест интерфейса", "username": "ui_fixture"],
+            "me": ["id": 990001, "name": "Тест интерфейса", "username": "ui_fixture",
+                   "adminScope": (UserDefaults.standard.bool(forKey: "ALO_UI_ADMIN")
+                       ? ["can": ["reports": true, "moderation": true, "stats": true]] : [:]) as [String: Any]],
             "feed": ["popular": feedPosts, "subs": Array(feedPosts.suffix(3))],
             "profile": ["posts": feedPosts],
             "messages": ["conversations": fixtureConversations, "items": items, "activePeerId": 990002],
@@ -360,6 +366,16 @@ extension AloAppModel {
             if UserDefaults.standard.bool(forKey: "ALO_UI_STORY_EXPIRED") {
                 expiredStory = AloExpiredStoryNotice(author: AloEntitySummary(["id": 990010, "name": "Маша", "username": "masha"]))
             }
+        }
+        if content == "upload" { installUploadPreview(messageId: 990250) }
+        if UserDefaults.standard.bool(forKey: "ALO_UI_CHANNEL_PROFILE") {
+            // A channel this account runs, for its admin tools and statistics.
+            selectedChannelProfile = AloChannelProfile(["profile": [
+                "channel": ["id": 990600, "name": "Alo Новости", "username": "alo_news", "canManage": true, "isOwner": true,
+                            "description": "Обновления приложения и истории команды."],
+                "stats": ["subscribersCount": 12_840, "postsCount": 18],
+                "posts": Array(feedPosts.prefix(3))
+            ]])
         }
         if UserDefaults.standard.bool(forKey: "ALO_UI_GROUP_CALL_PREVIEW") {
             calls.groupCall.installDebugPreview(meId: 990001)

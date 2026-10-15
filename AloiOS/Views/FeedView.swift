@@ -54,7 +54,7 @@ struct FeedView: View {
                     LazyVStack(spacing: 0) {
                         storiesTray
 
-                        ForEach(posts) { post in
+                        ForEach(Array(posts.enumerated()), id: \.element.id) { index, post in
                             if let reason = app.hiddenFeedPosts[post.id] {
                                 AloHiddenPostRow(reason: reason) { app.undoHideFeedPost(post) }
                                     .transition(.opacity)
@@ -76,6 +76,13 @@ struct FeedView: View {
                                 }
                                 .equatable()
                                 .transition(.opacity)
+                            }
+                            // Alo's own ad after every few posts, labelled and hideable.
+                            if let ad = adAfter(index: index) {
+                                AloSponsoredSlot(ad: ad)
+                                    .padding(.horizontal, 14).padding(.vertical, 10)
+                                    .overlay(alignment: .bottom) { Rectangle().fill(AloTheme.feedDivider).frame(height: 0.5) }
+                                    .transition(.opacity)
                             }
                         }
                         if posts.isEmpty {
@@ -127,8 +134,12 @@ struct FeedView: View {
             }
         }
         .onDisappear { noticeTask?.cancel(); visibleNotice = "" }
-        .refreshable { await app.loadBootstrap() }
+        .refreshable {
+            await app.loadBootstrap()
+            await app.loadFeedAds()
+        }
         .task {
+            await app.loadFeedAds()
             #if DEBUG
             if UserDefaults.standard.bool(forKey: "ALO_UI_MESSENGER_PREVIEW") { return }
             #endif
@@ -157,6 +168,14 @@ struct FeedView: View {
                 try await app.report(target, reason: reason, details: details)
             }
         }
+    }
+
+    private func adAfter(index: Int) -> AloAd? {
+        let every = max(3, app.feedAdEvery)
+        guard (index + 1) % every == 0 else { return nil }
+        let visible = app.feedAds.filter { !app.hiddenAdIds.contains($0.id) }
+        let slot = (index + 1) / every - 1
+        return visible.indices.contains(slot) ? visible[slot] : nil
     }
 
     private func readerAction(_ action: AloPostReaderAction, on post: AloPost) {

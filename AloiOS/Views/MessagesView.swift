@@ -702,6 +702,24 @@ private struct ConversationRow: View, Equatable {
 
     @ViewBuilder
     private var status: some View {
+        HStack(spacing: 4) {
+            // Telegram's "@" before the counter: someone mentioned you here.
+            if conversation.unreadMentionCount > 0 {
+                Text("@")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 22, height: 22)
+                    .background(AloTheme.accent, in: Circle())
+                    .transition(.scale.combined(with: .opacity))
+                    .accessibilityLabel("Вас упомянули")
+                    .accessibilityIdentifier("alo.chat.mention")
+            }
+            unreadStatus
+        }
+    }
+
+    @ViewBuilder
+    private var unreadStatus: some View {
         if unreadCount > 0 {
             // Telegram's counter: a capsule that grows with the number.
             Text(unreadCount > 999 ? "999+" : "\(unreadCount)")
@@ -1472,6 +1490,9 @@ private extension ConversationView {
                 )
                 .environmentObject(app)
             }
+            .task(id: conversation.roomId) {
+                channelAd = isChannelConversation ? await app.channelAd(roomId: conversation.roomId) : nil
+            }
             .sheet(isPresented: $isChatAppearancePresented) {
                 ChatAppearanceSheet(
                     appearance: chatAppearance,
@@ -1877,6 +1898,8 @@ struct ConversationView: View {
     @State private var isCallMinimized = false
     @State private var keyboardHeight: CGFloat = 0
     @State private var composerChromeHeight: CGFloat = ChatComposerMetrics.collapsedChromeHeight
+    /// Alo's sponsored message at the bottom of a channel.
+    @State private var channelAd: AloAd?
     @State private var keyboardAnimationDuration: TimeInterval = 0.25
     @State private var keyboardAnimationCurveRaw = UIView.AnimationCurve.easeInOut.rawValue
     @State private var previousMessageCount: Int
@@ -2378,6 +2401,7 @@ struct ConversationView: View {
                 canEditMessage: canEditMessage(actionMessage),
                 canPinMessage: canPinMessages && actionMessage.chatCallLogMeta == nil,
                 isPinned: conversation.pinnedMessageIds.contains(actionMessage.id),
+                isProtected: conversation.groupPolicy?.protectedContent == true,
                 onCopy: {
                     if AloPollCodec.decode(actionMessage.body) == nil,
                        !actionMessage.body.isEmpty {
@@ -2687,7 +2711,9 @@ struct ConversationView: View {
                                                 activeMediaViewer = ChatMediaViewerState(
                                                     items: items,
                                                     startIndex: startIndex,
-                                                    isSensitive: item.selfDestructSeconds > 0,
+                                                    // A protected chat hides its media from screen capture too.
+                                                    isSensitive: item.selfDestructSeconds > 0 ||
+                                                        conversation.groupPolicy?.protectedContent == true,
                                                     topicId: item.topicId,
                                                     reportsScreenshot: item.selfDestructSeconds > 0 &&
                                                         item.senderId != app.bootstrap?.me.id &&
@@ -2719,6 +2745,14 @@ struct ConversationView: View {
                                     }
                                 }
                             }
+                        }
+                        // Telegram's sponsored message under a channel's newest posts.
+                        if isChannelConversation, let channelAd, !app.hiddenAdIds.contains(channelAd.id) {
+                            AloSponsoredSlot(ad: channelAd, placement: "channel")
+                                .frame(maxWidth: 360)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.top, 8)
+                                .transition(.opacity)
                         }
                         // Keep the destination outside LazyVStack: an
                         // unrealized footer cannot resolve a reliable scroll ID.
@@ -4993,14 +5027,27 @@ private struct ChatMessageRow: View {
                             openMediaAttachment(at: 0)
                         }
                     } else {
-                        MessageMediaGrid(
-                            attachments: mediaAttachments,
-                            isTapSuppressed: { shouldSuppressMediaOpen },
-                            onOpenAt: { index in
-                                openMediaAttachment(at: index)
+                        // Photos and videos as a mosaic; documents as Telegram's file rows.
+                        let visual = mediaAttachments.filter { ["image", "video"].contains($0.chatMediaItem.type) }
+                        let documents = mediaAttachments.filter { !["image", "video"].contains($0.chatMediaItem.type) }
+                        if !visual.isEmpty {
+                            MessageMediaGrid(
+                                attachments: visual,
+                                isTapSuppressed: { shouldSuppressMediaOpen },
+                                onOpenAt: { index in
+                                    openMediaAttachment(at: mediaAttachments.firstIndex(of: visual[index]) ?? index)
+                                }
+                            )
+                                .frame(maxWidth: 310)
+                        }
+                        ForEach(documents) { document in
+                            AloFileAttachmentRow(attachment: document, isMine: isMine,
+                                                 accent: isMine ? Color.white : appearance.outgoingColor,
+                                                 uploadLocalId: isPending && !previewOnly ? message.id : nil) {
+                                openMediaAttachment(at: mediaAttachments.firstIndex(of: document) ?? 0)
                             }
-                        )
-                            .frame(maxWidth: 310)
+                            .frame(maxWidth: 290, alignment: .leading)
+                        }
                     }
                 }
 
@@ -5085,6 +5132,12 @@ private struct ChatMessageRow: View {
                 }
             }
             .accessibilityIdentifier("alo.message.media.\(message.id)")
+            .overlay(alignment: .topLeading) {
+                // A photo or video still uploading shows its progress, with pause and resume.
+                if isPending, !previewOnly {
+                    AloUploadProgressBadge(localId: message.id).padding(8)
+                }
+            }
             .overlay(alignment: .bottomTrailing) {
                 if message.body.isEmpty && message.reactions.isEmpty {
                     messageTimestamp.padding(.horizontal, 6).padding(.vertical, 3)
@@ -8651,6 +8704,8 @@ private struct MessageActionOverlay: View {
     let canEditMessage: Bool
     let canPinMessage: Bool
     let isPinned: Bool
+    /// The chat forbids copying and forwarding ("Запретить копирование").
+    var isProtected = false
     let onCopy: () -> Void
     let onForward: () -> Void
     let onTranslate: () -> Void
@@ -8864,7 +8919,7 @@ private struct MessageActionOverlay: View {
                     if canPinMessage {
                         action(isPinned ? "Открепить" : "Закрепить", isPinned ? "pin.slash" : "pin", perform: onPin)
                     }
-                    if message.chatCallLogMeta == nil, message.selfDestructSeconds <= 0 {
+                    if message.chatCallLogMeta == nil, message.selfDestructSeconds <= 0, !isProtected {
                         action("Переслать", "arrowshape.turn.up.right", perform: onForward)
                     }
                     if canTranslate { action("Перевести", "translate", perform: onTranslate) }
@@ -8937,7 +8992,7 @@ private struct MessageActionOverlay: View {
     }
 
     private var canCopy: Bool {
-        message.selfDestructSeconds <= 0 && AloPollCodec.decode(message.body) == nil &&
+        !isProtected && message.selfDestructSeconds <= 0 && AloPollCodec.decode(message.body) == nil &&
             !message.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -11258,7 +11313,7 @@ private struct MentionSuggestionsBar: View {
                                 Text(member.name)
                                     .font(.system(size: 13, weight: .bold))
                                     .lineLimit(1)
-                                Text("@\\(member.username)")
+                                Text(member.username.withAtPrefix)
                                     .font(.system(size: 11, weight: .semibold))
                                     .foregroundStyle(AloTheme.muted)
                                     .lineLimit(1)
@@ -12238,6 +12293,10 @@ private struct GroupManagementSheet: View {
     @State private var selectedInviteStats: AloGroupInviteLink?
     @State private var createdInviteToken = ""
     @State private var memberQuery = ""
+    /// Telegram's multi-select in the member list.
+    @State private var isSelectingMembers = false
+    @State private var selectedMemberIds = Set<Int>()
+    @State private var pendingBatchBan: Bool?
     @State private var memberRoleFilter = "all"
     @State private var isLoading = true
     @State private var isLoadingEarlierEvents = false
@@ -12536,6 +12595,15 @@ private struct GroupManagementSheet: View {
                     }
                 }
 
+                Section {
+                    Toggle("Запретить копирование", isOn: policyBinding(\.protectedContent, fallback: false))
+                        .accessibilityIdentifier("alo.group.protected-content")
+                } footer: {
+                    Text(isChannelCommunity
+                         ? "Подписчики не смогут пересылать, копировать и сохранять публикации канала."
+                         : "Участники не смогут пересылать, копировать и сохранять сообщения из группы.")
+                }
+
                 if !isChannelCommunity {
                     Section("Разрешения участников") {
                         ForEach(permissionItems, id: \.0) { key, title in
@@ -12761,13 +12829,26 @@ private struct GroupManagementSheet: View {
                         Text(memberQuery.isEmpty ? "Список пуст" : "Ничего не найдено")
                             .foregroundStyle(AloTheme.muted)
                     }
+                    if canBatchManageMembers {
+                        memberSelectionControls
+                    }
                     ForEach(filteredMembers) { member in
+                        let selectable = member.role != "owner" && member.id != (app.bootstrap?.me.id ?? 0)
                         Button {
-                            guard member.role != "owner",
-                                  member.id != (app.bootstrap?.me.id ?? 0) else { return }
-                            selectedMember = member
+                            guard selectable else { return }
+                            if isSelectingMembers {
+                                if selectedMemberIds.contains(member.id) { selectedMemberIds.remove(member.id) } else { selectedMemberIds.insert(member.id) }
+                            } else {
+                                selectedMember = member
+                            }
                         } label: {
                             HStack(spacing: 11) {
+                                if isSelectingMembers {
+                                    Image(systemName: selectedMemberIds.contains(member.id) ? "checkmark.circle.fill" : "circle")
+                                        .font(.system(size: 22))
+                                        .foregroundStyle(selectedMemberIds.contains(member.id) ? AloTheme.accent : AloTheme.muted.opacity(selectable ? 0.7 : 0.25))
+                                        .transition(.move(edge: .leading).combined(with: .opacity))
+                                }
                                 AloAvatar(
                                     name: member.name,
                                     url: member.avatarUrl,
@@ -12786,7 +12867,7 @@ private struct GroupManagementSheet: View {
                                 Text(member.roleLabel)
                                     .font(.system(size: 12, weight: .bold))
                                     .foregroundStyle(AloTheme.accent)
-                                if member.role != "owner", member.id != (app.bootstrap?.me.id ?? 0) {
+                                if !isSelectingMembers, member.role != "owner", member.id != (app.bootstrap?.me.id ?? 0) {
                                     Image(systemName: "chevron.right")
                                         .font(.system(size: 12, weight: .bold))
                                         .foregroundStyle(AloTheme.muted)
@@ -12794,7 +12875,21 @@ private struct GroupManagementSheet: View {
                             }
                         }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier("alo.group.member.\(member.id)")
                     }
+                }
+                .animation(.spring(response: 0.3, dampingFraction: 0.88), value: isSelectingMembers)
+                .confirmationDialog(pendingBatchBan == true ? "Заблокировать выбранных?" : "Удалить выбранных?",
+                                    isPresented: Binding(get: { pendingBatchBan != nil }, set: { if !$0 { pendingBatchBan = nil } }),
+                                    titleVisibility: .visible) {
+                    Button(pendingBatchBan == true ? "Заблокировать (\(selectedMemberIds.count))" : "Удалить (\(selectedMemberIds.count))",
+                           role: .destructive) {
+                        removeSelectedMembers(ban: pendingBatchBan == true)
+                    }
+                } message: {
+                    Text(pendingBatchBan == true
+                         ? "Они покинут \(isChannelCommunity ? "канал" : "группу") и не смогут вернуться по ссылке."
+                         : "Они покинут \(isChannelCommunity ? "канал" : "группу"), но смогут вернуться по приглашению.")
                 }
 
                 if !snapshot.bans.isEmpty {
@@ -13239,6 +13334,56 @@ private struct GroupManagementSheet: View {
                 )
             } catch {
                 report(error, fallback: "Не удалось объединить темы.")
+            }
+        }
+    }
+
+    /// The owner, or an admin allowed to remove people (the server checks the same).
+    private var canBatchManageMembers: Bool {
+        let me = app.bootstrap?.me.id ?? 0
+        let members = snapshot?.members ?? conversation.groupMembers
+        guard let mine = members.first(where: { $0.id == me }) else { return conversation.canManageGroup }
+        return mine.role == "owner" || (mine.role == "admin" && (mine.adminRights["banUsers"] ?? true))
+    }
+
+    /// "Выбрать" → checkmarks → remove or ban everyone chosen in one go.
+    private var memberSelectionControls: some View {
+        HStack(spacing: 10) {
+            Button(isSelectingMembers ? "Отмена" : "Выбрать") {
+                withAnimation { isSelectingMembers.toggle() }
+                selectedMemberIds.removeAll()
+            }
+            .font(.system(size: 15, weight: .semibold))
+            .buttonStyle(.borderless)
+            .accessibilityIdentifier("alo.group.members.select")
+            Spacer()
+            if isSelectingMembers {
+                Button("Удалить (\(selectedMemberIds.count))", role: .destructive) { pendingBatchBan = false }
+                    .disabled(selectedMemberIds.isEmpty)
+                    .buttonStyle(.borderless)
+                    .accessibilityIdentifier("alo.group.members.remove")
+                Button("Заблокировать", role: .destructive) { pendingBatchBan = true }
+                    .disabled(selectedMemberIds.isEmpty)
+                    .buttonStyle(.borderless)
+            }
+        }
+        .font(.system(size: 14, weight: .semibold))
+    }
+
+    private func removeSelectedMembers(ban: Bool) {
+        let ids = Array(selectedMemberIds)
+        pendingBatchBan = nil
+        Task {
+            do {
+                let result = try await app.api.batchRemoveGroupMembers(roomId: conversation.roomId, userIds: ids, ban: ban)
+                selectedMemberIds.removeAll()
+                isSelectingMembers = false
+                if result.skipped > 0 {
+                    errorMessage = "Некоторых участников нельзя \(ban ? "заблокировать" : "удалить"): владельца и администраторов может убрать только владелец."
+                }
+                await load(showProgress: false)
+            } catch {
+                report(error, fallback: "Не удалось удалить участников.")
             }
         }
     }
@@ -14571,5 +14716,142 @@ enum AloSquareImage {
         return UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: format).image { _ in
             image.draw(at: CGPoint(x: (side - image.size.width) / 2, y: (side - image.size.height) / 2))
         }
+    }
+}
+
+
+/// Telegram's upload ring over a sending attachment: progress, size, and pause / resume.
+struct AloUploadProgressBadge: View {
+    @EnvironmentObject private var app: AloAppModel
+    let localId: Int
+
+    var body: some View {
+        let progress = app.outgoingUploadProgress[localId]
+        let paused = app.pausedOutgoingMessageIds.contains(localId)
+        Button {
+            if paused { app.resumeOutgoingUpload(localId: localId) } else { app.pauseOutgoingUpload(localId: localId) }
+        } label: {
+            HStack(spacing: 8) {
+                ZStack {
+                    Circle().stroke(Color.white.opacity(0.25), lineWidth: 2.5)
+                    Circle()
+                        .trim(from: 0, to: max(0.02, progress?.fraction ?? 0.02))
+                        .stroke(Color.white, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                        .animation(.easeOut(duration: 0.25), value: progress?.fraction)
+                    Image(systemName: paused ? "arrow.up" : "pause.fill")
+                        .font(.system(size: 11, weight: .bold))
+                        .contentTransition(.symbolEffect(.replace))
+                }
+                .frame(width: 26, height: 26)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(paused ? "Пауза" : progress == nil ? "Подготовка…" : "\(Int((progress?.fraction ?? 0) * 100))%")
+                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                    if let progress {
+                        Text(progress.label).font(.system(size: 11).monospacedDigit()).opacity(0.8)
+                    }
+                }
+            }
+            .foregroundStyle(.white)
+            .padding(.leading, 5).padding(.trailing, 10).padding(.vertical, 5)
+            .background(Color.black.opacity(0.55), in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(AloControlPressStyle())
+        .accessibilityLabel(paused ? "Продолжить загрузку" : "Приостановить загрузку")
+        .accessibilityValue(progress.map { "\(Int($0.fraction * 100)) процентов" } ?? "")
+        .accessibilityIdentifier("alo.upload.\(localId)")
+    }
+}
+
+
+/// Telegram's file row: a round icon in the accent colour, the name, then type and size.
+struct AloFileAttachmentRow: View {
+    @EnvironmentObject private var app: AloAppModel
+    let attachment: AloMessageAttachment
+    let isMine: Bool
+    let accent: Color
+    /// While the message is sending, the icon becomes the upload ring with pause / resume.
+    var uploadLocalId: Int? = nil
+    let onOpen: () -> Void
+
+    private var size: Int64? {
+        AloChunkedMediaCrypto.Metadata(attachment.mediaEncryption.reduce(into: [String: Any]()) { $0[$1.key] = $1.value })?
+            .plaintextSize ?? attachment.metadata["size"].flatMap(Int64.init)
+    }
+
+    private var details: String {
+        let ext = (attachment.name as NSString).pathExtension.uppercased()
+        let formatted = size.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }
+        return [ext.isEmpty ? "Файл" : ext, formatted].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            if let uploadLocalId {
+                uploadRing(uploadLocalId)
+            } else {
+                Button(action: onOpen) { icon }
+                    .buttonStyle(.plain)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(attachment.name.ifBlank("Файл"))
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1).truncationMode(.middle)
+                Text(uploadLocalId.flatMap { uploadDetails($0) } ?? details)
+                    .font(.system(size: 13).monospacedDigit())
+                    .foregroundStyle(Color.white.opacity(0.7))
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .onTapGesture { if uploadLocalId == nil { onOpen() } }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Файл \(attachment.name), \(details)")
+    }
+
+    private var icon: some View {
+        Image(systemName: "doc.fill")
+            .font(.system(size: 19, weight: .semibold))
+            .foregroundStyle(isMine ? Color.black.opacity(0.55) : .white)
+            .frame(width: 46, height: 46)
+            .background(accent, in: Circle())
+    }
+
+    private func uploadDetails(_ localId: Int) -> String? {
+        guard let progress = app.outgoingUploadProgress[localId] else { return "Подготовка…" }
+        return app.pausedOutgoingMessageIds.contains(localId) ? "Пауза · \(progress.label)" : progress.label
+    }
+
+    /// Telegram's file upload: the round icon turns into a ring; a tap pauses or resumes.
+    private func uploadRing(_ localId: Int) -> some View {
+        let fraction = app.outgoingUploadProgress[localId]?.fraction ?? 0.02
+        let paused = app.pausedOutgoingMessageIds.contains(localId)
+        return Button {
+            if paused { app.resumeOutgoingUpload(localId: localId) } else { app.pauseOutgoingUpload(localId: localId) }
+        } label: {
+            ZStack {
+                Circle().fill(accent)
+                Circle().stroke((isMine ? Color.black : Color.white).opacity(0.18), lineWidth: 2.5).padding(5)
+                Circle()
+                    .trim(from: 0, to: max(0.02, fraction))
+                    .stroke(isMine ? Color.black.opacity(0.6) : Color.white, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .padding(5)
+                    .animation(.easeOut(duration: 0.25), value: fraction)
+                Image(systemName: paused ? "arrow.up" : "pause.fill")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(isMine ? Color.black.opacity(0.6) : .white)
+                    .contentTransition(.symbolEffect(.replace))
+            }
+            .frame(width: 46, height: 46)
+        }
+        .buttonStyle(AloControlPressStyle())
+        .accessibilityLabel(paused ? "Продолжить загрузку" : "Приостановить загрузку")
+        .accessibilityValue(app.outgoingUploadProgress[localId].map { "\(Int($0.fraction * 100)) процентов" } ?? "")
+        .accessibilityIdentifier("alo.upload.\(localId)")
     }
 }

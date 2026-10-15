@@ -30,6 +30,7 @@ struct AlertsView: View {
     @EnvironmentObject private var app: AloAppModel
     @State private var filter: AloNotificationFilter = .all
     @State private var settingsPresented = false
+    @State private var appealReportId: Int?
     // Acknowledge remotely while retaining the session's unread affordance.
     @State private var initiallyUnread = Set<Int>()
     private var accessibility = AloVisualAccessibility()
@@ -70,6 +71,11 @@ struct AlertsView: View {
         .onChange(of: app.bootstrap?.notifications.map(\.id) ?? []) { _, _ in acknowledge() }
         .navigationDestination(isPresented: $settingsPresented) {
             AloSocialSettingsSheet(initialPage: .notifications).environmentObject(app)
+        }
+        .sheet(item: Binding(get: { appealReportId.map(AloAppealTarget.init) }, set: { appealReportId = $0?.id })) { target in
+            AloAppealSheet(title: "Обжалование") { text in
+                try await app.appealModerationDecision(reportId: target.id, text: text)
+            }
         }
     }
     private var filters: some View {
@@ -116,6 +122,14 @@ struct AlertsView: View {
                 }
                 .buttonStyle(AloFeedPressStyle()).accessibilityIdentifier("alo.alerts.item.\(item.id)")
                 .accessibilityValue(initiallyUnread.contains(item.id) ? "Непрочитанное" : "Прочитанное")
+                // A moderation decision about you can be appealed from its notice.
+                if item.entityType == "moderation", item.entityId > 0 {
+                    Button { appealReportId = item.entityId } label: {
+                        Text("Обжаловать").fixedSize(horizontal: true, vertical: false)
+                    }
+                    .buttonStyle(AloSocialRequestButtonStyle())
+                    .accessibilityIdentifier("alo.alerts.appeal.\(item.id)")
+                }
                 if item.actionableFriendRequestId > 0 {
                     ViewThatFits(in: .horizontal) {
                         HStack(spacing: 8) { friendActions(item) }
@@ -157,4 +171,8 @@ struct AlertsView: View {
         initiallyUnread.formUnion((app.bootstrap?.notifications ?? []).filter { !$0.isRead }.map(\.id))
         app.markAllNotificationsRead()
     }
+}
+
+struct AloAppealTarget: Identifiable {
+    let id: Int
 }

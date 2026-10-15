@@ -1074,6 +1074,94 @@ final class AloSocialConsistencyUITests: XCTestCase {
         XCTAssertEqual(composer.value as? String, "> Важная мысль")
     }
 
+    /// A large file shows its upload progress and can be paused and resumed.
+    func testUploadProgressPauseAndResume() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "upload"]
+        app.launch()
+        let badge = app.buttons["alo.upload.990250"]
+        XCTAssertTrue(badge.waitForExistence(timeout: 15))
+        XCTAssertEqual(badge.label, "Приостановить загрузку")
+        XCTAssertEqual(badge.value as? String, "34 процентов")
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("up-1-uploading")
+        badge.tap()
+        XCTAssertEqual(badge.label, "Продолжить загрузку")
+        Thread.sleep(forTimeInterval: 0.5)
+        capture("up-2-paused")
+        badge.tap()
+        XCTAssertEqual(badge.label, "Приостановить загрузку")
+    }
+
+    /// A channel's admin sees Telegram-style statistics.
+    func testChannelStatistics() {
+        let app = launch(["-ALO_UI_CHANNEL_PROFILE", "1"])
+        let stats = app.buttons["alo.channel.stats-button"]
+        XCTAssertTrue(stats.waitForExistence(timeout: 8))
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("ch-1-channel-admin")
+        stats.tap()
+        XCTAssertTrue(app.staticTexts["Подписчики"].waitForExistence(timeout: 6))
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("ch-2-stats")
+        app.descendants(matching: .any)["alo.channel.stats"].swipeUp()
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("ch-3-stats-posts")
+    }
+
+    /// Alo's own ad in the feed, and the moderation panel: reports, appeals, journal and ads.
+    func testFeedAdAndModerationPanel() {
+        let app = launch(["-ALO_UI_FEED_ADS", "1", "-ALO_UI_ADMIN", "1"])
+        let any = app.descendants(matching: .any)
+        let ad = any["alo.ad.1"]
+        let scroll = any["alo.feed.scroll"]
+        for _ in 0..<6 where !ad.isHittable { scroll.swipeUp(velocity: .slow) }
+        XCTAssertTrue(ad.waitForExistence(timeout: 6))
+        XCTAssertTrue(any["alo.ad.label"].exists)
+        Thread.sleep(forTimeInterval: 0.5)
+        capture("ad-1-feed")
+        app.buttons["alo.ad.menu.1"].tap()
+        app.buttons["Почему я это вижу"].tap()
+        XCTAssertTrue(app.alerts.firstMatch.waitForExistence(timeout: 3))
+        capture("ad-2-why")
+        app.alerts.buttons["Скрыть рекламу"].tap()
+        XCTAssertFalse(ad.waitForExistence(timeout: 2), "a hidden ad leaves the feed")
+
+        scroll.swipeDown(velocity: .fast)
+        scroll.swipeDown(velocity: .fast)
+        app.buttons["alo.feed.settings"].tap()
+        let moderation = app.buttons["alo.settings.moderation"]
+        XCTAssertTrue(moderation.waitForExistence(timeout: 4))
+        moderation.tap()
+        let report = app.buttons["alo.moderation.report.14"]
+        XCTAssertTrue(report.waitForExistence(timeout: 6))
+        Thread.sleep(forTimeInterval: 0.5)
+        capture("mod-1-reports")
+        report.tap()
+        XCTAssertTrue(app.buttons["alo.moderation.approve"].waitForExistence(timeout: 4))
+        app.buttons["Удалить публикацию"].tap()
+        Thread.sleep(forTimeInterval: 0.4)
+        capture("mod-2-decision")
+        app.buttons["alo.moderation.approve"].tap()
+        XCTAssertFalse(report.waitForExistence(timeout: 2), "a decided report leaves the queue")
+
+        app.buttons["Апелляции"].tap()
+        XCTAssertTrue(app.buttons["alo.moderation.appeal.overturn"].waitForExistence(timeout: 4))
+        capture("mod-3-appeals")
+        app.buttons["Журнал"].tap()
+        XCTAssertTrue(app.staticTexts["Жалоба отклонена"].waitForExistence(timeout: 4))
+        capture("mod-4-journal")
+        app.buttons["Реклама"].tap()
+        XCTAssertTrue(app.staticTexts["Запуск историй"].waitForExistence(timeout: 4))
+        capture("mod-5-ads")
+        app.buttons["alo.ads.new"].tap()
+        XCTAssertTrue(any["alo.ads.name"].waitForExistence(timeout: 4))
+        any["alo.ads.name"].tap()
+        any["alo.ads.name"].typeText("Осенняя кампания")
+        Thread.sleep(forTimeInterval: 0.5)
+        capture("mod-6-ad-editor")
+    }
+
     /// Telegram's video chat: the participant list, admin tools, recording and a raised hand.
     func testGroupCallControls() {
         let admin = launch(["-ALO_UI_GROUP_CALL_PREVIEW", "1", "-ALO_UI_GROUP_CALL_MEMBER", "0"])

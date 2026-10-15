@@ -697,3 +697,166 @@ private struct AloCompactLabelStyle: LabelStyle {
         HStack(spacing: 3) { configuration.icon; configuration.title }
     }
 }
+
+// MARK: - Channel statistics
+
+/// Telegram's channel statistics: overview, follower growth, views of publications and the
+/// latest posts with their reach.
+struct AloChannelStatsScreen: View {
+    @EnvironmentObject private var app: AloAppModel
+    @Environment(\.dismiss) private var dismiss
+    let channel: AloChannelProfile
+    @State private var days = 30
+    @State private var stats: AloChannelStats?
+    @State private var error = ""
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Picker("Период", selection: $days) {
+                        Text("7 дней").tag(7)
+                        Text("30 дней").tag(30)
+                        Text("90 дней").tag(90)
+                    }
+                    .pickerStyle(.segmented)
+                    if let stats {
+                        overview(stats)
+                        growthChart(stats)
+                        viewsChart(stats)
+                        recent(stats)
+                    } else if !error.isEmpty {
+                        ContentUnavailableView("Статистика недоступна", systemImage: "chart.xyaxis.line", description: Text(error))
+                            .foregroundStyle(AloTheme.muted)
+                    } else {
+                        ProgressView().frame(maxWidth: .infinity).padding(.vertical, 60)
+                    }
+                }
+                .padding(16)
+            }
+            .background(AloTheme.background.ignoresSafeArea())
+            .navigationTitle("Статистика")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) { Button("Готово") { dismiss() }.fontWeight(.semibold) }
+            }
+            .task(id: days) {
+                do {
+                    let value = try await app.channelStats(channelId: channel.id, days: days)
+                    withAnimation(.easeOut(duration: 0.25)) { stats = value }
+                    error = ""
+                } catch {
+                    self.error = (error as? AloAPIError)?.message ?? "Проверьте подключение и попробуйте ещё раз."
+                }
+            }
+        }
+        .accessibilityIdentifier("alo.channel.stats")
+    }
+
+    private func overview(_ stats: AloChannelStats) -> some View {
+        AloStatsSection(title: "Обзор") {
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 16) {
+                AloStatsTile(value: AloCompactCount.string(stats.subscribers), title: "Подписчики",
+                             change: stats.joinedInPeriod > 0 ? "+\(AloCompactCount.string(stats.joinedInPeriod))" : nil)
+                AloStatsTile(value: AloCompactCount.string(stats.viewsPerPost), title: "Просмотров на пост")
+                AloStatsTile(value: AloCompactCount.string(stats.posts), title: "Публикаций")
+                AloStatsTile(value: AloCompactCount.string(stats.views), title: "Просмотры")
+                AloStatsTile(value: AloCompactCount.string(stats.likes), title: "Отметки «Нравится»")
+                AloStatsTile(value: AloCompactCount.string(stats.reposts), title: "Репосты")
+            }
+        }
+    }
+
+    private func growthChart(_ stats: AloChannelStats) -> some View {
+        AloStatsSection(title: "Новые подписчики") {
+            Chart(stats.growthByDay()) { day in
+                BarMark(x: .value("День", day.day, unit: .day), y: .value("Подписались", day.likes))
+                    .foregroundStyle(AloTheme.success)
+                    .cornerRadius(2)
+            }
+            .chartXAxis { AxisMarks(values: .automatic(desiredCount: 4)) { _ in AxisValueLabel(format: .dateTime.day().month(.abbreviated)) } }
+            .chartYAxis { AxisMarks(position: .trailing) { _ in AxisGridLine().foregroundStyle(AloTheme.border); AxisValueLabel() } }
+            .frame(height: 150)
+            .environment(\.locale, Locale(identifier: "ru_RU"))
+        }
+    }
+
+    private func viewsChart(_ stats: AloChannelStats) -> some View {
+        AloStatsSection(title: "Просмотры публикаций по дню выхода") {
+            // Posts come out on separate days, so bars, not a curve between them.
+            Chart(stats.growthByDay()) { day in
+                BarMark(x: .value("День", day.day, unit: .day), y: .value("Просмотры", day.views))
+                    .foregroundStyle(AloTheme.accent)
+                    .cornerRadius(2)
+            }
+            .chartXAxis { AxisMarks(values: .automatic(desiredCount: 4)) { _ in AxisValueLabel(format: .dateTime.day().month(.abbreviated)) } }
+            .chartYAxis { AxisMarks(position: .trailing) { _ in AxisGridLine().foregroundStyle(AloTheme.border); AxisValueLabel() } }
+            .frame(height: 150)
+            .environment(\.locale, Locale(identifier: "ru_RU"))
+        }
+    }
+
+    @ViewBuilder
+    private func recent(_ stats: AloChannelStats) -> some View {
+        if !stats.publications.isEmpty {
+            AloStatsSection(title: "Последние публикации") {
+                VStack(spacing: 0) {
+                    ForEach(stats.publications.prefix(10)) { publication in
+                        let post = channel.posts.first { $0.id == publication.postId }
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(post.map { $0.body.isEmpty ? "Фото или видео" : $0.body } ?? "Публикация")
+                                    .font(.system(size: 15)).foregroundStyle(AloTheme.text).lineLimit(2)
+                                Text(AloPostTimestamp.string(publication.publishedAt))
+                                    .font(.system(size: 12)).foregroundStyle(AloTheme.muted)
+                            }
+                            Spacer(minLength: 8)
+                            VStack(alignment: .trailing, spacing: 3) {
+                                Label(AloCompactCount.string(publication.views), systemImage: "eye")
+                                Label(AloCompactCount.string(publication.reposts), systemImage: "arrow.2.squarepath")
+                            }
+                            .font(.system(size: 12, weight: .medium).monospacedDigit())
+                            .foregroundStyle(AloTheme.muted)
+                        }
+                        .padding(.vertical, 9)
+                        if publication.id != stats.publications.prefix(10).last?.id { Divider().overlay(AloTheme.border) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct AloStatsSection<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(AloTheme.muted).textCase(.uppercase)
+            content()
+        }
+        .padding(16)
+        .background(AloTheme.surfaceRaised.opacity(0.55), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+}
+
+struct AloStatsTile: View {
+    let value: String
+    let title: String
+    var change: String? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(value).font(.system(size: 22, weight: .bold).monospacedDigit()).foregroundStyle(AloTheme.text)
+                if let change {
+                    Text(change).font(.system(size: 13, weight: .semibold).monospacedDigit()).foregroundStyle(AloTheme.success)
+                }
+            }
+            Text(title).font(.system(size: 13)).foregroundStyle(AloTheme.muted).lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+}
