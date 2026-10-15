@@ -803,6 +803,57 @@ final class AloSocialConsistencyUITests: XCTestCase {
         capture("b-1-brush-sizes")
     }
 
+    /// Telegram's story menus: who has seen your story (search, newest first) and a copyable link;
+    /// a link to a story that has gone says so.
+    func testStoryViewersAndLink() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "feed-timeline"]
+        app.launch()
+        let own = app.buttons["История: Тест интерфейса"]
+        XCTAssertTrue(own.waitForExistence(timeout: 15))
+        own.tap()
+        let views = app.buttons["alo.story.viewer.views"]
+        XCTAssertTrue(views.waitForExistence(timeout: 5))
+        views.tap()
+        let rows = app.buttons.matching(identifier: "alo.story.viewers.row")
+        XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertEqual(rows.count, 4)
+        XCTAssertTrue(app.staticTexts["4 просмотра"].exists, "the title counts the viewers")
+        XCTAssertTrue(app.staticTexts["2 мин назад"].exists)
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("sv-1-viewers")
+        let search = app.searchFields.firstMatch
+        search.tap()
+        search.typeText("Да")
+        XCTAssertEqual(rows.count, 1, "search narrows the list")
+        capture("sv-2-viewers-search")
+        app.terminate()
+
+        // "⋯" → "Копировать ссылку": a confirmation shows.
+        app.launch()
+        XCTAssertTrue(own.waitForExistence(timeout: 15))
+        own.tap()
+        let more = app.buttons["alo.story.viewer.more"]
+        XCTAssertTrue(more.waitForExistence(timeout: 5))
+        more.tap()
+        let copy = app.buttons["Копировать ссылку"]
+        XCTAssertTrue(copy.waitForExistence(timeout: 3))
+        capture("sv-3-menu")
+        copy.tap()
+        let toast = app.descendants(matching: .any).matching(identifier: "alo.story.viewer.toast").firstMatch
+        XCTAssertTrue(toast.waitForExistence(timeout: 3))
+        capture("sv-4-link-copied")
+        app.terminate()
+
+        let expiredApp = XCUIApplication()
+        expiredApp.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "feed-timeline",
+                                       "-ALO_UI_STORY_EXPIRED", "1"]
+        expiredApp.launch()
+        XCTAssertTrue(expiredApp.staticTexts["История истекла"].waitForExistence(timeout: 15))
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("sv-5-expired")
+    }
+
     /// Needs a video in the simulator's Photos (`xcrun simctl addmedia <udid> clip.mp4`).
     func testCaptureVideoStoryOverlay() throws {
         let app = XCUIApplication()
@@ -1017,6 +1068,62 @@ final class AloSocialConsistencyUITests: XCTestCase {
             .press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)), withVelocity: .slow, thenHoldForDuration: 0.5)
         Thread.sleep(forTimeInterval: 1.0)
         capture("b-bubbles-top")
+    }
+
+    /// "Оформление профиля": one of ten colours, or your own photo cropped to the banner's shape;
+    /// the profile shows it after "Готово", and the photo can be taken off again.
+    func testProfileBannerEditor() {
+        let app = launch()
+        app.buttons["Профиль"].firstMatch.tap()
+        let open = app.buttons["Оформление профиля"]
+        XCTAssertTrue(open.waitForExistence(timeout: 6))
+        open.tap()
+        let editor = app.descendants(matching: .any).matching(identifier: "alo.banner.editor").firstMatch
+        XCTAssertTrue(editor.waitForExistence(timeout: 4))
+        app.buttons["Закат"].tap()
+        XCTAssertTrue(app.buttons["Закат"].isSelected)
+        Thread.sleep(forTimeInterval: 0.5)
+        capture("bn-1-colors")
+
+        app.buttons["Фото"].tap()
+        app.buttons["alo.banner.pick"].tap()
+        Thread.sleep(forTimeInterval: 2.5)
+        let photo = app.images.matching(NSPredicate(format: "label BEGINSWITH 'Фото' OR label BEGINSWITH 'Photo'")).firstMatch
+        XCTAssertTrue(photo.waitForExistence(timeout: 6))
+        photo.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let choose = app.buttons["alo.banner.crop.choose"]
+        XCTAssertTrue(choose.waitForExistence(timeout: 8), "the banner cropper opens after picking a photo")
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("bn-2-crop")
+        app.descendants(matching: .any)["alo.banner.crop.canvas"].pinch(withScale: 1.6, velocity: 1.2)
+        Thread.sleep(forTimeInterval: 0.6)
+        choose.tap()
+        XCTAssertTrue(choose.waitForNonExistence(timeout: 4))
+        XCTAssertTrue(app.buttons["alo.banner.remove-photo"].waitForExistence(timeout: 3), "the photo is now the banner")
+        XCTAssertEqual(app.descendants(matching: .any)["alo.banner.preview"].label, "Предпросмотр: обложка с фото")
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("bn-3-preview")
+
+        app.buttons["alo.banner.save"].tap()
+        XCTAssertTrue(editor.waitForNonExistence(timeout: 4))
+        Thread.sleep(forTimeInterval: 1.5)
+        capture("bn-4-profile")
+        // The profile shows the photo, not the colour: sample its middle (pink flowers, not orange).
+        let shot = XCUIScreen.main.screenshot().image
+        let probe = shot.cgImage!.cropping(to: CGRect(x: shot.size.width * shot.scale * 0.5, y: 160 * shot.scale, width: 1, height: 1))!
+        var pixel = [UInt8](repeating: 0, count: 4)
+        let context = CGContext(data: &pixel, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.draw(probe, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        XCTAssertFalse(pixel[1] > 80 && pixel[2] < 60 && pixel[0] > 180, "the banner is the photo, not the orange gradient: \(pixel)")
+
+        // Back to a colour: the photo goes.
+        open.tap()
+        XCTAssertTrue(app.buttons["alo.banner.remove-photo"].waitForExistence(timeout: 4))
+        app.buttons["alo.banner.remove-photo"].tap()
+        XCTAssertEqual(app.descendants(matching: .any)["alo.banner.preview"].label, "Предпросмотр: обложка «Закат»")
+        app.buttons["alo.banner.save"].tap()
+        XCTAssertTrue(editor.waitForNonExistence(timeout: 4))
     }
 
     func testAvatarCropCapture() {

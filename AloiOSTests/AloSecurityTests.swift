@@ -31,6 +31,19 @@ final class AloSecurityTests: XCTestCase {
         )
     }
 
+    func testStoryLinksParseOnlyWellFormedCodes() throws {
+        let host = "links.alo.test"
+        XCTAssertEqual(AloDeepLinkTarget(url: try XCTUnwrap(URL(string: "https://\(host)/s/AbCdEf123_-x")), configuredWebHost: host),
+                       .story("AbCdEf123_-x"))
+        XCTAssertEqual(AloDeepLinkTarget(url: try XCTUnwrap(URL(string: "alo://s/AbCdEf123456")), configuredWebHost: host),
+                       .story("AbCdEf123456"))
+        XCTAssertNil(AloDeepLinkTarget(url: try XCTUnwrap(URL(string: "alo://s/short")), configuredWebHost: host))
+        XCTAssertNil(AloDeepLinkTarget(url: try XCTUnwrap(URL(string: "alo://s/bad%2Fcode12")), configuredWebHost: host))
+        XCTAssertNil(AloDeepLinkTarget(url: try XCTUnwrap(URL(string: "http://\(host)/s/AbCdEf123456")), configuredWebHost: host))
+        XCTAssertNotNil(AloDeepLinkTarget.storyURL(code: "AbCdEf123456"))
+        XCTAssertNil(AloDeepLinkTarget.storyURL(code: "../../x"))
+    }
+
     func testDeepLinksRejectForeignInsecureAndAmbiguousURLs() throws {
         let host = "links.alo.test"
         XCTAssertNil(AloDeepLinkTarget(

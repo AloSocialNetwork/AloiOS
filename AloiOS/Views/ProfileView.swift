@@ -66,12 +66,12 @@ struct ProfileView: View {
         .accessibilityIdentifier("alo.profile.scroll")
         .background(AloTheme.background)
         .refreshable { await app.loadBootstrap() }
-        .sheet(isPresented: $isPalettePresented) {
-            ProfilePaletteSheet(
-                name: app.bootstrap?.me.name ?? "Alo",
-                selectedStyle: app.bootstrap?.me.coverStyle ?? "violet"
-            ) { style in
-                app.updateProfileCover(style: style)
+        .fullScreenCover(isPresented: $isPalettePresented) {
+            if let me = app.bootstrap?.me {
+                AloProfileBannerEditor(user: me) { style, photo in
+                    app.updateProfileBanner(style: style, photo: photo)
+                }
+                .environment(\.aloAPIClient, app.api)
             }
         }
         .navigationDestination(isPresented: $isEditPresented) {
@@ -645,13 +645,10 @@ private struct ProfileHeroCard: View {
         let hasActions = primaryTitle != nil || secondarySystemImage != nil
 
         VStack(alignment: .leading, spacing: 0) {
-                RoundedRectangle(cornerRadius: bannerRadius, style: .continuous)
-                    .fill(aloProfileGradient(coverStyleOverride ?? user.coverStyle))
+                AloProfileBannerSurface(style: coverStyleOverride ?? user.coverStyle,
+                                        imageURL: user.coverImageUrl,
+                                        cornerRadius: bannerRadius)
                     .frame(height: bannerHeight)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: bannerRadius, style: .continuous)
-                            .stroke(Color.white.opacity(0.06), lineWidth: 1)
-                    }
 
                 .overlay(alignment: .topTrailing) {
                     if showsOwnerControls {
@@ -796,106 +793,21 @@ private struct ProfileHeroCard: View {
 
 }
 
-private struct ProfilePaletteSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    let name: String
-    @State var selectedStyle: String
-    let onApply: (String) -> Void
-
-    private let styles = ["violet", "azure", "emerald", "sunset", "rose", "ocean"]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Capsule()
-                .fill(AloTheme.muted.opacity(0.55))
-                .frame(width: 54, height: 5)
-                .frame(maxWidth: .infinity)
-
-            Text("Баннер профиля")
-                .font(.system(size: 24, weight: .heavy, design: .rounded))
-
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .fill(aloProfileGradient(selectedStyle))
-                .frame(height: 158)
-                .overlay(alignment: .bottomLeading) {
-                    Text(name)
-                        .font(.system(size: 28, weight: .heavy, design: .rounded))
-                        .foregroundStyle(Color.white)
-                        .padding(22)
-                }
-
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 14) {
-                ForEach(styles, id: \.self) { style in
-                    Button {
-                        selectedStyle = style
-                    } label: {
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .fill(aloProfileGradient(style))
-                            .frame(height: 86)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                                    .stroke(selectedStyle == style ? Color.white : Color.white.opacity(0.08), lineWidth: selectedStyle == style ? 3 : 1)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-
-            Spacer(minLength: 0)
-
-            AloPrimaryButton(title: "Применить") {
-                onApply(selectedStyle)
-                dismiss()
-            }
-        }
-        .padding(20)
-        .foregroundStyle(AloTheme.text)
-        .background(AloTheme.background.ignoresSafeArea())
-        .presentationDetents([.large])
-        .presentationDragIndicator(.hidden)
-    }
-
-}
-
-private func aloProfileGradient(_ style: String) -> LinearGradient {
+/// The ten banner colours the server accepts (PROFILE_COVER_STYLES), as gradients.
+func aloProfileGradient(_ style: String) -> LinearGradient {
+    func rgb(_ r: Double, _ g: Double, _ b: Double) -> Color { Color(red: r, green: g, blue: b) }
     let colors: [Color]
     switch style {
-    case "sunset":
-        colors = [
-            Color(red: 0.60, green: 0.20, blue: 0.07),
-            Color(red: 0.92, green: 0.35, blue: 0.03),
-            Color(red: 0.98, green: 0.72, blue: 0.18)
-        ]
-    case "violet":
-        colors = [
-            Color(red: 0.36, green: 0.13, blue: 0.71),
-            Color(red: 0.49, green: 0.23, blue: 0.92),
-            Color(red: 0.73, green: 0.67, blue: 0.98)
-        ]
-    case "azure", "ocean":
-        colors = [
-            Color(red: 0.02, green: 0.34, blue: 0.52),
-            Color(red: 0.02, green: 0.52, blue: 0.78),
-            Color(red: 0.49, green: 0.83, blue: 0.98)
-        ]
-    case "rose":
-        colors = [
-            Color(red: 0.62, green: 0.09, blue: 0.30),
-            Color(red: 0.86, green: 0.15, blue: 0.47),
-            Color(red: 0.98, green: 0.66, blue: 0.82)
-        ]
-    case "emerald":
-        colors = [
-            Color(red: 0.06, green: 0.46, blue: 0.43),
-            Color(red: 0.09, green: 0.64, blue: 0.29),
-            Color(red: 0.37, green: 0.92, blue: 0.68)
-        ]
-    default:
-        colors = [
-            Color(red: 0.36, green: 0.13, blue: 0.71),
-            Color(red: 0.49, green: 0.23, blue: 0.92),
-            Color(red: 0.73, green: 0.67, blue: 0.98)
-        ]
+    case "sunset": colors = [rgb(0.60, 0.20, 0.07), rgb(0.92, 0.35, 0.03), rgb(0.98, 0.72, 0.18)]
+    case "violet": colors = [rgb(0.36, 0.13, 0.71), rgb(0.49, 0.23, 0.92), rgb(0.73, 0.67, 0.98)]
+    case "azure": colors = [rgb(0.02, 0.34, 0.52), rgb(0.02, 0.52, 0.78), rgb(0.49, 0.83, 0.98)]
+    case "ocean": colors = [rgb(0.03, 0.16, 0.40), rgb(0.05, 0.36, 0.62), rgb(0.16, 0.72, 0.78)]
+    case "rose": colors = [rgb(0.62, 0.09, 0.30), rgb(0.86, 0.15, 0.47), rgb(0.98, 0.66, 0.82)]
+    case "emerald": colors = [rgb(0.06, 0.46, 0.43), rgb(0.09, 0.64, 0.29), rgb(0.37, 0.92, 0.68)]
+    case "amber": colors = [rgb(0.55, 0.32, 0.02), rgb(0.88, 0.58, 0.05), rgb(1.00, 0.84, 0.36)]
+    case "forest": colors = [rgb(0.07, 0.22, 0.12), rgb(0.16, 0.40, 0.20), rgb(0.53, 0.70, 0.35)]
+    case "graphite": colors = [rgb(0.10, 0.11, 0.13), rgb(0.24, 0.26, 0.30), rgb(0.50, 0.53, 0.58)]
+    default: colors = [rgb(0.00, 0.33, 0.86), rgb(0.04, 0.52, 1.00), rgb(0.42, 0.27, 0.93)]
     }
     return LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
 }

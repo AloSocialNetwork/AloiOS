@@ -3,8 +3,9 @@ import SwiftUI
 
 /// Telegram's story viewer: full screen, a progress segment per frame, tap right/left to move,
 /// hold to pause, swipe sideways to the next person, swipe down to close. Photos stay 5 s, videos
-/// play to the end. Your own stories show their view count and can be deleted; someone else's
-/// offer "Ответить", which opens the chat with them.
+/// play to the end. Any story's link can be copied from "⋯". Your own show who has seen them
+/// (Telegram's viewers list) and can be deleted; someone else's offer "Ответить", which opens the
+/// chat with them.
 struct AloStoryViewer: View {
     @EnvironmentObject private var app: AloAppModel
     @Environment(\.dismiss) private var dismiss
@@ -17,6 +18,9 @@ struct AloStoryViewer: View {
     @State private var isDeleteConfirmationPresented = false
     @State private var dragOffset: CGSize = .zero
     @State private var videoDuration: Double = 0
+    @State private var isViewersPresented = false
+    @State private var isActionsPresented = false
+    @State private var toast: String?
 
     private static let photoDuration: Double = 5
 
@@ -41,7 +45,9 @@ struct AloStoryViewer: View {
 
     private var frame: Frame? { frames.indices.contains(frameIndex) ? frames[frameIndex] : nil }
     private var isOwn: Bool { group?.user.id == app.bootstrap?.me.id }
-    private var isPaused: Bool { isHolding || isDeleteConfirmationPresented || dragOffset != .zero }
+    private var isPaused: Bool {
+        isHolding || isDeleteConfirmationPresented || isViewersPresented || isActionsPresented || dragOffset != .zero
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -57,6 +63,30 @@ struct AloStoryViewer: View {
         .confirmationDialog("Удалить историю?", isPresented: $isDeleteConfirmationPresented, titleVisibility: .visible) {
             Button("Удалить", role: .destructive) { deleteCurrent() }
             Button("Отмена", role: .cancel) {}
+        }
+        .sheet(isPresented: $isViewersPresented) {
+            if let frame {
+                AloStoryViewersSheet(story: frame.story) { user in
+                    isViewersPresented = false
+                    dismiss()
+                    app.activeTab = .profile
+                    app.openProfile(userId: user.id)
+                }
+                .environmentObject(app)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+            }
+        }
+        .overlay(alignment: .top) {
+            if let toast {
+                Label(toast, systemImage: "link")
+                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
+                    .padding(.horizontal, 16).frame(height: 44)
+                    .modifier(AloChatGlass(interactive: false, role: .chrome))
+                    .padding(.top, 70)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .accessibilityIdentifier("alo.story.viewer.toast")
+            }
         }
         .accessibilityAction(named: "Следующая") { next() }
         .accessibilityAction(named: "Предыдущая") { previous() }
@@ -184,18 +214,20 @@ struct AloStoryViewer: View {
                     }
                 }
                 Spacer(minLength: 0)
-                if isOwn {
-                    Menu {
-                        Button("Удалить историю", systemImage: "trash", role: .destructive) {
-                            isDeleteConfirmationPresented = true
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis").font(.system(size: 18, weight: .semibold)).foregroundStyle(.white)
-                            .frame(width: 40, height: 40).contentShape(Rectangle())
-                    }
-                    .accessibilityLabel("Ещё")
-                    .accessibilityIdentifier("alo.story.viewer.more")
+                // The story holds still while its actions are open, as in Telegram.
+                Button { isActionsPresented = true } label: {
+                    Image(systemName: "ellipsis").font(.system(size: 18, weight: .semibold)).foregroundStyle(.white)
+                        .frame(width: 40, height: 40).contentShape(Rectangle())
                 }
+                .confirmationDialog("История", isPresented: $isActionsPresented, titleVisibility: .hidden) {
+                    Button("Копировать ссылку") { copyLink() }
+                    if isOwn {
+                        Button("Удалить историю", role: .destructive) { isDeleteConfirmationPresented = true }
+                    }
+                    Button("Отмена", role: .cancel) {}
+                }
+                .accessibilityLabel("Ещё")
+                .accessibilityIdentifier("alo.story.viewer.more")
                 Button { dismiss() } label: {
                     Image(systemName: "xmark").font(.system(size: 18, weight: .semibold)).foregroundStyle(.white)
                         .frame(width: 40, height: 40).contentShape(Rectangle())
@@ -215,9 +247,20 @@ struct AloStoryViewer: View {
         HStack(spacing: 10) {
             if isOwn {
                 if let frame {
-                    Label("\(frame.story.viewCount) \(Self.viewsWord(frame.story.viewCount))", systemImage: "eye")
-                        .font(.system(size: 15, weight: .medium)).foregroundStyle(.white.opacity(0.85))
-                        .accessibilityIdentifier("alo.story.viewer.views")
+                    // Telegram's viewers button: the count opens who has seen the story.
+                    Button { isViewersPresented = true } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "eye")
+                            Text("\(frame.story.viewCount) \(Self.viewsWord(frame.story.viewCount))")
+                        }
+                        .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
+                        .padding(.horizontal, 14).frame(height: 40)
+                        .modifier(AloChatGlass(interactive: false, role: .chrome))
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(AloControlPressStyle())
+                    .accessibilityLabel("\(frame.story.viewCount) \(Self.viewsWord(frame.story.viewCount)). Показать, кто посмотрел")
+                    .accessibilityIdentifier("alo.story.viewer.views")
                 }
                 Spacer()
             } else if let group {
@@ -321,6 +364,17 @@ struct AloStoryViewer: View {
         app.markStoryViewed(frame.story)
     }
 
+    private func copyLink() {
+        guard let frame else { return }
+        Task {
+            guard await app.copyStoryLink(frame.story) else { return }
+            AloHaptics.notification(.success)
+            withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.86)) { toast = "Ссылка скопирована" }
+            try? await Task.sleep(for: .seconds(1.6))
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { toast = nil }
+        }
+    }
+
     private func deleteCurrent() {
         guard let frame else { return }
         Task {
@@ -396,5 +450,175 @@ private struct AloStoryVideo: View {
                 if let observer { player.removeTimeObserver(observer) }
                 if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
             }
+    }
+}
+
+/// Telegram's story viewers list: who opened the story and when, newest first, with search and a
+/// sort menu. A row opens that person's profile.
+struct AloStoryViewersSheet: View {
+    @EnvironmentObject private var app: AloAppModel
+    @Environment(\.dismiss) private var dismiss
+    let story: AloStory
+    let onOpenProfile: (AloEntitySummary) -> Void
+    @State private var viewers: [AloStoryViewerEntry] = []
+    @State private var isLoading = true
+    @State private var failed = false
+    @State private var query = ""
+    @State private var byName = false
+
+    private var shown: [AloStoryViewerEntry] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let found = needle.isEmpty ? viewers : viewers.filter {
+            $0.user.name.lowercased().contains(needle) || $0.user.username.lowercased().contains(needle)
+        }
+        return byName ? found.sorted { $0.user.name.localizedCompare($1.user.name) == .orderedAscending } : found
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if isLoading {
+                    ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if failed {
+                    ContentUnavailableView("Не удалось загрузить", systemImage: "wifi.exclamationmark",
+                                           description: Text("Проверьте соединение и откройте список ещё раз."))
+                } else if viewers.isEmpty {
+                    ContentUnavailableView("Пока никто не посмотрел", systemImage: "eye",
+                                           description: Text("Здесь появятся те, кто откроет историю."))
+                } else {
+                    List(shown) { entry in
+                        Button { onOpenProfile(entry.user) } label: { row(entry) }
+                            .listRowBackground(Color.clear)
+                            .accessibilityIdentifier("alo.story.viewers.row")
+                    }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                    .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Поиск")
+                    .overlay {
+                        if shown.isEmpty { ContentUnavailableView.search(text: query) }
+                    }
+                }
+            }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Закрыть") { dismiss() }
+                        .accessibilityIdentifier("alo.story.viewers.close")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Picker("Порядок", selection: $byName) {
+                            Label("Сначала новые", systemImage: "clock").tag(false)
+                            Label("По имени", systemImage: "textformat").tag(true)
+                        }
+                    } label: {
+                        Image(systemName: "arrow.up.arrow.down")
+                    }
+                    .accessibilityLabel("Порядок")
+                    .accessibilityIdentifier("alo.story.viewers.sort")
+                }
+            }
+            .background(AloTheme.background)
+        }
+        .task { await load() }
+        .accessibilityIdentifier("alo.story.viewers")
+    }
+
+    private var title: String {
+        let count = isLoading ? story.viewCount : viewers.count
+        return "\(count) \(AloStoryViewer.viewsWord(count))"
+    }
+
+    private func row(_ entry: AloStoryViewerEntry) -> some View {
+        HStack(spacing: 12) {
+            AloAvatar(name: entry.user.name, url: entry.user.avatarUrl, size: 44, colorSeed: String(entry.user.id))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.user.name)
+                    .font(.system(size: 16, weight: .semibold)).foregroundStyle(AloTheme.text).lineLimit(1)
+                Text(Self.viewedText(entry.viewedAt))
+                    .font(.system(size: 14)).foregroundStyle(AloTheme.muted).lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+    }
+
+    private func load() async {
+        do {
+            viewers = try await app.storyViewers(storyId: story.id)
+            failed = false
+        } catch {
+            failed = true
+        }
+        isLoading = false
+    }
+
+    /// "только что", "5 мин назад", then the time, Telegram-style.
+    static func viewedText(_ iso: String) -> String {
+        let parser = ISO8601DateFormatter()
+        parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let date = parser.date(from: iso) ?? ISO8601DateFormatter().date(from: iso) else { return "" }
+        let minutes = Int(Date().timeIntervalSince(date) / 60)
+        if minutes < 1 { return "только что" }
+        if minutes < 60 { return "\(minutes) мин назад" }
+        let time = date.formatted(.dateTime.hour().minute().locale(Locale(identifier: "ru_RU")))
+        return Calendar.current.isDateInToday(date) ? "сегодня в \(time)" : "вчера в \(time)"
+    }
+}
+
+/// A story link opened after the story has gone: who posted it and that it expired.
+struct AloStoryExpiredSheet: View {
+    @EnvironmentObject private var app: AloAppModel
+    @Environment(\.dismiss) private var dismiss
+    let notice: AloExpiredStoryNotice
+
+    var body: some View {
+        VStack(spacing: 14) {
+            ZStack(alignment: .bottomTrailing) {
+                if let author = notice.author {
+                    AloAvatar(name: author.name, url: author.avatarUrl, size: 76, colorSeed: String(author.id))
+                        .overlay(Circle().stroke(AloTheme.border, style: StrokeStyle(lineWidth: 2, dash: [4, 4])).padding(-5))
+                } else {
+                    Circle().fill(AloTheme.surfaceRaised).frame(width: 76, height: 76)
+                }
+                Image(systemName: "clock.fill")
+                    .font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+                    .background(AloTheme.muted, in: Circle())
+                    .overlay(Circle().stroke(AloTheme.background, lineWidth: 2))
+                    .offset(x: 4, y: 4)
+            }
+            .padding(.top, 8)
+            Text("История истекла")
+                .font(.system(size: 22, weight: .bold)).foregroundStyle(AloTheme.text)
+            Text(notice.author.map { "\($0.name) публиковал(а) эту историю, но она уже исчезла. Истории живут до 48 часов." }
+                 ?? "Эта история уже исчезла. Истории живут до 48 часов.")
+                .font(.system(size: 15)).foregroundStyle(AloTheme.muted)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+            VStack(spacing: 10) {
+                if let author = notice.author {
+                    AloPrimaryButton(title: "Открыть профиль") {
+                        dismiss()
+                        app.activeTab = .profile
+                        app.openProfile(userId: author.id)
+                    }
+                }
+                Button("Закрыть") { dismiss() }
+                    .font(.system(size: 16, weight: .semibold))
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .accessibilityIdentifier("alo.story.expired.close")
+            }
+            .padding(.horizontal, 20)
+            Spacer(minLength: 0)
+        }
+        .padding(.top, 18)
+        .frame(maxWidth: .infinity)
+        .background(AloTheme.background.ignoresSafeArea())
+        .presentationDetents([.medium])
+        .presentationDragIndicator(.visible)
+        .accessibilityIdentifier("alo.story.expired")
     }
 }
