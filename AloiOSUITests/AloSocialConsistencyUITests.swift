@@ -765,6 +765,44 @@ final class AloSocialConsistencyUITests: XCTestCase {
         capture("r-3-emoji-turned")
     }
 
+    /// The brush has its own thickness slider on the left, as in Instagram.
+    func testStoryBrushSize() {
+        let app = XCUIApplication()
+        app.launchArguments += ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "feed-surface"]
+        app.launch()
+        let story = app.buttons["alo.feed.create-story"]
+        XCTAssertTrue(story.waitForExistence(timeout: 15))
+        story.tap()
+        let done = app.buttons["alo.story.tool-done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 4))
+        done.tap()
+        app.buttons["alo.story.draw"].tap()
+        let slider = app.descendants(matching: .any).matching(identifier: "alo.story.brush-size").firstMatch
+        XCTAssertTrue(slider.waitForExistence(timeout: 3))
+        Thread.sleep(forTimeInterval: 0.8)
+
+        func setBrush(to dy: CGFloat) {
+            let knob = slider.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            knob.press(forDuration: 0.05, thenDragTo: slider.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: dy)),
+                       withVelocity: .slow, thenHoldForDuration: 0.1)
+        }
+        func stroke(atY y: CGFloat) {
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: y))
+            start.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: y)),
+                        withVelocity: .slow, thenHoldForDuration: 0)
+        }
+        setBrush(to: 0)
+        XCTAssertEqual(slider.value as? String, "100 %", "dragged to the top: the thickest brush")
+        stroke(atY: 0.35)
+        setBrush(to: 1)
+        XCTAssertEqual(slider.value as? String, "0 %", "dragged to the bottom: the thinnest brush")
+        stroke(atY: 0.5)
+        setBrush(to: 0.55)
+        stroke(atY: 0.62)
+        Thread.sleep(forTimeInterval: 0.5)
+        capture("b-1-brush-sizes")
+    }
+
     /// Needs a video in the simulator's Photos (`xcrun simctl addmedia <udid> clip.mp4`).
     func testCaptureVideoStoryOverlay() throws {
         let app = XCUIApplication()
