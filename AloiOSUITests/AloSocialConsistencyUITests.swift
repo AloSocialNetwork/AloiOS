@@ -931,6 +931,127 @@ final class AloSocialConsistencyUITests: XCTestCase {
         capture("au-8-new-highlight")
     }
 
+    /// The reader's tools on a post, comment threads with replies and "@", drafts and the creator panel.
+    func testFeedCurationThreadsDraftsAndStats() {
+        let app = launch()
+        let any = app.descendants(matching: .any)
+
+        // "Почему я это вижу" on a friend's post, then "Не интересно" and "Вернуть".
+        let menu = app.buttons["alo.post.menu.990401"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 8))
+        menu.tap()
+        let why = app.buttons["Почему я это вижу"]
+        XCTAssertTrue(why.waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["Пожаловаться"].exists)
+        capture("fc-1-post-menu")
+        why.tap()
+        XCTAssertTrue(any.matching(NSPredicate(format: "label BEGINSWITH 'Вы подписаны на @alex'")).firstMatch
+            .waitForExistence(timeout: 4))
+        Thread.sleep(forTimeInterval: 0.5)
+        capture("fc-2-why-shown")
+        app.buttons["alo.post.why.not-interested"].tap()
+        let hidden = any["alo.post.hidden"]
+        XCTAssertTrue(hidden.waitForExistence(timeout: 4))
+        XCTAssertFalse(app.buttons["alo.post.menu.990401"].exists, "the post leaves the feed")
+        Thread.sleep(forTimeInterval: 0.4)
+        capture("fc-3-hidden")
+        app.buttons["alo.post.hidden.undo"].tap()
+        XCTAssertTrue(app.buttons["alo.post.menu.990401"].waitForExistence(timeout: 4), "Вернуть brings it back")
+
+        // A report on a recommended post.
+        app.buttons["alo.post.menu.990402"].tap()
+        XCTAssertTrue(app.buttons["Пожаловаться"].waitForExistence(timeout: 3))
+        app.buttons["Пожаловаться"].tap()
+        let spam = app.buttons["alo.report.reason.spam"]
+        XCTAssertTrue(spam.waitForExistence(timeout: 4))
+        Thread.sleep(forTimeInterval: 0.4)
+        capture("fc-4-report-reasons")
+        spam.tap()
+        app.buttons["alo.report.send"].tap()
+        XCTAssertTrue(app.staticTexts["Спасибо! Жалоба отправлена"].waitForExistence(timeout: 4))
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("fc-5-report-sent")
+        app.buttons["alo.report.done"].tap()
+        XCTAssertTrue(hidden.waitForExistence(timeout: 4), "a reported post is hidden too")
+
+        // Comments: a thread with replies, a reply with "@" suggestions.
+        app.buttons["alo.post.comments.990401"].tap()
+        let thread = app.buttons["alo.comments.thread.990700"]
+        XCTAssertTrue(thread.waitForExistence(timeout: 6))
+        XCTAssertEqual(thread.label, "Посмотреть ответы (2)")
+        Thread.sleep(forTimeInterval: 0.4)
+        capture("fc-6-thread-collapsed")
+        thread.tap()
+        XCTAssertTrue(any["alo.comments.body.990703"].waitForExistence(timeout: 3))
+        capture("fc-7-thread-open")
+        app.buttons["alo.comments.reply.990703"].tap()
+        XCTAssertTrue(any["alo.comments.reply-bar"].waitForExistence(timeout: 3))
+        XCTAssertEqual(app.textFields["alo.comments.input"].value as? String, "@maria ")
+        app.typeText("и @al")
+        let alex = app.buttons["alo.mention.alex"]
+        XCTAssertTrue(alex.waitForExistence(timeout: 4))
+        capture("fc-8-mention-suggestions")
+        alex.tap()
+        XCTAssertEqual(app.textFields["alo.comments.input"].value as? String, "@maria и @alex ")
+        app.typeText("смотрите!")
+        app.buttons["alo.comments.send"].tap()
+        XCTAssertFalse(any["alo.comments.reply-bar"].waitForExistence(timeout: 2), "sending ends the reply")
+        XCTAssertEqual(thread.label, "Скрыть ответы")
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("fc-9-reply-sent")
+        app.navigationBars.buttons.firstMatch.tap()
+
+        // A draft: close a started post, save it, find it again.
+        let create = app.buttons["alo.feed.create-post"]
+        XCTAssertTrue(create.waitForExistence(timeout: 6))
+        create.tap()
+        XCTAssertTrue(app.buttons["alo.post.publish"].waitForExistence(timeout: 4))
+        Thread.sleep(forTimeInterval: 0.6)
+        app.typeText("Список мест на выходные")
+        app.buttons["Закрыть редактор поста"].tap()
+        let save = app.buttons["Сохранить черновик"]
+        XCTAssertTrue(save.waitForExistence(timeout: 3))
+        capture("fc-10-save-draft")
+        save.tap()
+        XCTAssertTrue(create.waitForExistence(timeout: 4))
+        create.tap()
+        let drafts = app.buttons["alo.post.drafts-button"]
+        XCTAssertTrue(drafts.waitForExistence(timeout: 4))
+        XCTAssertEqual(drafts.label, "Черновики: 3")
+        drafts.tap()
+        let first = app.buttons["alo.post.draft.990901"]
+        XCTAssertTrue(first.waitForExistence(timeout: 4))
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("fc-11-drafts")
+        first.tap()
+        XCTAssertTrue(app.staticTexts["Черновик"].waitForExistence(timeout: 4))
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("fc-12-draft-opened")
+        app.buttons["Закрыть редактор поста"].tap()
+        // An opened draft is kept as it was unless you save the changes.
+        let keep = app.buttons["Не сохранять"]
+        XCTAssertTrue(keep.waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["Удалить черновик"].exists)
+        capture("fc-12b-close-draft")
+        keep.tap()
+        XCTAssertTrue(create.waitForExistence(timeout: 4))
+
+        // The creator panel from your profile.
+        app.buttons["Профиль"].firstMatch.tap()
+        let panel = app.buttons["alo.profile.creator-stats"]
+        if !panel.waitForExistence(timeout: 6) { capture("fc-debug-profile"); print("PROFILEDBG", app.debugDescription) }
+        XCTAssertTrue(panel.exists)
+        Thread.sleep(forTimeInterval: 0.4)
+        capture("fc-13-profile-panel")
+        panel.tap()
+        XCTAssertTrue(any["alo.stats.overview"].waitForExistence(timeout: 6))
+        Thread.sleep(forTimeInterval: 0.8)
+        capture("fc-14-stats")
+        any["alo.stats.screen"].swipeUp()
+        Thread.sleep(forTimeInterval: 0.6)
+        capture("fc-15-stats-more")
+    }
+
     /// Needs a video in the simulator's Photos (`xcrun simctl addmedia <udid> clip.mp4`).
     func testCaptureVideoStoryOverlay() throws {
         let app = XCUIApplication()
@@ -1029,6 +1150,10 @@ final class AloSocialConsistencyUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 0.6)
         capture("p-post-editor-typed")
         app.buttons["Закрыть редактор поста"].tap()
+        // Typed text: closing asks about a draft.
+        let discard = app.buttons["Удалить"]
+        XCTAssertTrue(discard.waitForExistence(timeout: 3))
+        discard.tap()
         let story = app.buttons["alo.feed.create-story"]
         XCTAssertTrue(story.waitForExistence(timeout: 4))
         story.tap()

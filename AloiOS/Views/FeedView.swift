@@ -27,6 +27,8 @@ struct FeedView: View {
     @State private var visibleNotice = ""
     @State private var noticeTask: Task<Void, Never>?
     @State private var settingsPresented = false
+    @State private var whyShownPost: AloPost?
+    @State private var reportTarget: AloReportTarget?
     private var visualAccessibility = AloVisualAccessibility()
 
     init() {}
@@ -53,21 +55,28 @@ struct FeedView: View {
                         storiesTray
 
                         ForEach(posts) { post in
-                            AloTimelinePost(post: post,
-                                            isMine: isMine(post),
-                                            isLikePending: app.pendingLikePostIds.contains(post.id),
-                                            isRepostPending: app.isRepostPending(post.id),
-                                            onDelete: { app.deletePost(post) },
-                                            onNotice: { app.notice = $0 }) {
-                                app.toggleLike(post)
-                            } onComment: {
-                                app.openComments(for: post)
-                            } onRepost: {
-                                app.toggleRepost(post)
-                            } onAuthor: {
-                                app.openProfile(post.author)
+                            if let reason = app.hiddenFeedPosts[post.id] {
+                                AloHiddenPostRow(reason: reason) { app.undoHideFeedPost(post) }
+                                    .transition(.opacity)
+                            } else {
+                                AloTimelinePost(post: post,
+                                                isMine: isMine(post),
+                                                isLikePending: app.pendingLikePostIds.contains(post.id),
+                                                isRepostPending: app.isRepostPending(post.id),
+                                                onDelete: { app.deletePost(post) },
+                                                onNotice: { app.notice = $0 },
+                                                onReaderAction: { readerAction($0, on: post) }) {
+                                    app.toggleLike(post)
+                                } onComment: {
+                                    app.openComments(for: post)
+                                } onRepost: {
+                                    app.toggleRepost(post)
+                                } onAuthor: {
+                                    app.openProfile(post.author)
+                                }
+                                .equatable()
+                                .transition(.opacity)
                             }
-                            .equatable()
                         }
                         if posts.isEmpty {
                             ContentUnavailableView(app.feedMode == .subscriptions ? "Пока нет публикаций" : "Лента пока пуста",
@@ -139,6 +148,23 @@ struct FeedView: View {
         }
         .navigationDestination(isPresented: $settingsPresented) {
             AloSocialSettingsSheet().environmentObject(app)
+        }
+        .sheet(item: $whyShownPost) { post in
+            AloWhyShownSheet(post: post) { app.hideFeedPost(post, reason: $0) }
+        }
+        .sheet(item: $reportTarget) { target in
+            AloReportSheet(target: target) { reason, details in
+                try await app.report(target, reason: reason, details: details)
+            }
+        }
+    }
+
+    private func readerAction(_ action: AloPostReaderAction, on post: AloPost) {
+        switch action {
+        case .whyShown: whyShownPost = post
+        case .notInterested: app.hideFeedPost(post, reason: .notInterested)
+        case .hide: app.hideFeedPost(post, reason: .hide)
+        case .report: reportTarget = .post(post.id)
         }
     }
 
@@ -335,15 +361,25 @@ private struct PostComposerSheet: View {
     @State private var isImporting = false
     @State private var importError = ""
     @State private var importTask: Task<Void, Never>?
+    /// A saved draft opened here: its id and its already uploaded media.
+    @State private var draftId: Int?
+    @State private var draftMedia = [AloMediaItem]()
+    @State private var isDraftsPresented = false
+    @State private var confirmsClose = false
+    @State private var isSavingDraft = false
     private var accessibility = AloVisualAccessibility()
 
     /// The server accepts up to 1200 characters.
     private static let maximumLength = 1_200
     private var remaining: Int { Self.maximumLength - app.composeText.count }
+    private var mediaCount: Int { attachments.count + draftMedia.count }
+
+    private var hasContent: Bool {
+        !app.composeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || mediaCount > 0
+    }
 
     private var isPublishDisabled: Bool {
-        isImporting || remaining < 0
-            || (app.composeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty)
+        isImporting || isSavingDraft || remaining < 0 || !hasContent
     }
 
     var body: some View {
@@ -391,9 +427,15 @@ private struct PostComposerSheet: View {
                         }
                     }
 
-                    if isImporting || !attachments.isEmpty {
+                    if isImporting || mediaCount > 0 {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 8) {
+                                ForEach(Array(draftMedia.enumerated()), id: \.offset) { index, media in
+                                    AloDraftMediaThumbnail(media: media, side: 180) {
+                                        draftMedia.remove(at: index)
+                                    }
+                                    .disabled(app.isCreatingPost)
+                                }
                                 ForEach(attachments) { attachment in
                                     FeedDraftThumbnail(attachment: attachment, side: 180, isPublishing: app.isCreatingPost) {
                                         AloDraftAttachmentStore.discard(attachment)
@@ -404,7 +446,7 @@ private struct PostComposerSheet: View {
                                     ProgressView().tint(AloTheme.accent)
                                         .frame(width: 120, height: 180)
                                         .background(AloTheme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                                } else if attachments.count < 10 {
+                                } else if mediaCount < 10 {
                                     mediaPicker {
                                         Image(systemName: "plus")
                                             .font(.system(size: 24, weight: .medium)).foregroundStyle(AloTheme.accent)
@@ -426,10 +468,45 @@ private struct PostComposerSheet: View {
             }
             .scrollDismissesKeyboard(.interactively)
 
+            if let query = AloMentionQuery.current(in: app.composeText) {
+                AloMentionSuggestions(query: query) { person in
+                    app.composeText = AloMentionQuery.insert(person.username, into: app.composeText)
+                }
+                .padding(.horizontal, 12)
+            }
             toolbar
         }
         .background(AloTheme.background.ignoresSafeArea())
-        .interactiveDismissDisabled(app.isCreatingPost)
+        .interactiveDismissDisabled(app.isCreatingPost || hasContent)
+        .confirmationDialog(draftId == nil ? "Сохранить черновик?" : "Сохранить изменения?", isPresented: $confirmsClose,
+                            titleVisibility: .visible) {
+            if let draftId {
+                Button("Сохранить изменения") { saveDraftAndClose() }
+                Button("Не сохранять") {
+                    app.composeText = ""
+                    dismiss()
+                }
+                Button("Удалить черновик", role: .destructive) {
+                    if let draft = app.postDrafts.first(where: { $0.id == draftId }) { app.deletePostDraft(draft) }
+                    app.composeText = ""
+                    dismiss()
+                }
+            } else {
+                Button("Сохранить черновик") { saveDraftAndClose() }
+                Button("Удалить", role: .destructive) {
+                    app.composeText = ""
+                    dismiss()
+                }
+            }
+            Button("Продолжить редактирование", role: .cancel) {}
+        } message: {
+            Text(draftId == nil ? "Черновик можно будет открыть с любого устройства." : "Черновик останется таким, каким был до открытия.")
+        }
+        .sheet(isPresented: $isDraftsPresented) {
+            AloPostDraftsSheet { open($0) }
+                .environmentObject(app)
+        }
+        .task { await app.loadPostDrafts() }
         .animation(accessibility.reduceMotion ? nil : .easeOut(duration: 0.2), value: isImporting)
         .animation(accessibility.reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.88), value: attachments.map(\.id))
         .onAppear {
@@ -465,22 +542,42 @@ private struct PostComposerSheet: View {
         HStack(spacing: 12) {
                 AloChatCircleButton(systemImage: "xmark", label: "Закрыть редактор поста") {
                     isComposerFocused = false
-                    dismiss()
+                    if hasContent { confirmsClose = true } else { dismiss() }
                 }
-                .disabled(app.isCreatingPost)
-                Text("Новый пост").font(.system(size: 17, weight: .semibold)).foregroundStyle(AloTheme.text)
+                .disabled(app.isCreatingPost || isSavingDraft)
+                Text(draftId == nil ? "Новый пост" : "Черновик").font(.system(size: 17, weight: .semibold)).foregroundStyle(AloTheme.text)
                     .lineLimit(1)
                     .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: 8)
+                if !app.postDrafts.isEmpty {
+                    Button { isDraftsPresented = true } label: {
+                        Image(systemName: "doc.text")
+                            .font(.system(size: 17, weight: .medium)).foregroundStyle(AloTheme.text)
+                            .frame(width: 40, height: 40)
+                            .modifier(AloChatGlass(interactive: true, role: .control))
+                            .overlay(alignment: .topTrailing) {
+                                Text("\(app.postDrafts.count)")
+                                    .font(.system(size: 11, weight: .bold).monospacedDigit()).foregroundStyle(.white)
+                                    .padding(.horizontal, 5).frame(minWidth: 18, minHeight: 18)
+                                    .background(AloTheme.accent, in: Capsule())
+                                    .offset(x: 4, y: -4)
+                            }
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(AloControlPressStyle())
+                    .disabled(app.isCreatingPost)
+                    .accessibilityLabel("Черновики: \(app.postDrafts.count)")
+                    .accessibilityIdentifier("alo.post.drafts-button")
+                }
                 Button {
                     publishRequested = true
                     publishingError = ""
                     isComposerFocused = false
-                    app.createPost(localAttachments: attachments)
+                    app.createPost(localAttachments: attachments, draftMedia: draftMedia, draftId: draftId)
                     AloHaptics.impact(.light)
                 } label: {
                     Group {
-                        if app.isCreatingPost {
+                        if app.isCreatingPost || isSavingDraft {
                             ProgressView().tint(.white)
                         } else {
                             Text("Опубликовать").font(.system(size: 15, weight: .semibold)).lineLimit(1)
@@ -510,7 +607,7 @@ private struct PostComposerSheet: View {
             Button("Повторить") {
                 publishRequested = true
                 publishingError = ""
-                app.createPost(localAttachments: attachments)
+                app.createPost(localAttachments: attachments, draftMedia: draftMedia, draftId: draftId)
             }
             .font(.system(size: 14, weight: .bold)).foregroundStyle(AloTheme.accent)
             .disabled(app.isCreatingPost)
@@ -546,10 +643,39 @@ private struct PostComposerSheet: View {
     }
 
     private func mediaPicker<Label: View>(@ViewBuilder label: () -> Label) -> some View {
-        PhotosPicker(selection: $pickedItems, maxSelectionCount: 10, matching: .any(of: [.images, .videos]),
+        PhotosPicker(selection: $pickedItems, maxSelectionCount: max(1, 10 - draftMedia.count), matching: .any(of: [.images, .videos]),
                      preferredItemEncoding: .compatible, label: label)
             .buttonStyle(AloControlPressStyle())
             .disabled(app.isCreatingPost)
+    }
+
+    /// Uploads new media, saves the draft (a new one, or the one being edited) and closes.
+    private func saveDraftAndClose() {
+        isSavingDraft = true
+        importError = ""
+        Task {
+            defer { isSavingDraft = false }
+            do {
+                try await app.savePostDraft(id: draftId, body: app.composeText, localAttachments: attachments,
+                                            draftMedia: draftMedia)
+                app.composeText = ""
+                app.notice = "Черновик сохранён"
+                AloHaptics.notification(.success)
+                dismiss()
+            } catch {
+                importError = (error as? AloAPIError)?.message ?? "Не удалось сохранить черновик. Проверьте подключение."
+            }
+        }
+    }
+
+    /// Opens a saved draft in place of what is being written.
+    private func open(_ draft: AloPostDraft) {
+        attachments.forEach(AloDraftAttachmentStore.discard)
+        attachments = []
+        draftMedia = draft.media
+        draftId = draft.id
+        app.composeText = draft.body
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { isComposerFocused = true }
     }
 
     private func loadPickedItems(_ items: [PhotosPickerItem]) async {
@@ -638,7 +764,21 @@ struct AloPostDetailScreen: View {
     @EnvironmentObject private var app: AloAppModel
     @Environment(\.dismiss) private var dismiss
     @State private var deleteCandidate: AloPostComment?
+    @State private var reportTarget: AloReportTarget?
+    /// Root comments whose replies are open.
+    @State private var expandedThreads = Set<Int>()
+    @FocusState private var isCommentFocused: Bool
     private var accessibility = AloVisualAccessibility()
+
+    /// Root comments in order; replies whose root is missing are shown as roots.
+    private var roots: [AloPostComment] {
+        let ids = Set(app.comments.map(\.id))
+        return app.comments.filter { $0.parentId == nil || !ids.contains($0.parentId!) }
+    }
+
+    private func replies(to root: AloPostComment) -> [AloPostComment] {
+        app.comments.filter { $0.parentId == root.id }
+    }
 
     init() {}
 
@@ -653,7 +793,16 @@ struct AloPostDetailScreen: View {
                                         isLikePending: app.pendingLikePostIds.contains(post.id),
                                         isRepostPending: app.isRepostPending(post.id),
                                         onDelete: { app.deletePost(post) },
-                                        onNotice: { app.notice = $0 }) {
+                                        onNotice: { app.notice = $0 },
+                                        onReaderAction: { action in
+                                            switch action {
+                                            case .report: reportTarget = .post(post.id)
+                                            case .hide, .notInterested:
+                                                app.hideFeedPost(post, reason: action == .hide ? .hide : .notInterested)
+                                                dismiss()
+                                            case .whyShown: break
+                                            }
+                                        }) {
                             app.toggleLike(post)
                         } onComment: {
                             withAnimation(accessibility.reduceMotion ? nil : AloPressFeedback.release) {
@@ -690,19 +839,18 @@ struct AloPostDetailScreen: View {
                             .padding(.vertical, 28)
                         } else {
                             LazyVStack(spacing: 0) {
-                                ForEach(app.comments) { comment in
-                                    CommentRow(
-                                        comment: comment,
-                                        isMine: comment.author.id == app.bootstrap?.me.id,
-                                        onLike: { app.toggleCommentLike(comment) },
-                                        onAuthor: {
-                                            dismiss()
-                                            app.openProfile(comment.author)
-                                        },
-                                        onDelete: { deleteCandidate = comment }
-                                    )
-                                    .id(comment.id)
-                                    Divider().background(AloTheme.border).padding(.leading, 72)
+                                ForEach(roots) { root in
+                                    commentRow(root)
+                                    let thread = replies(to: root)
+                                    if !thread.isEmpty {
+                                        if expandedThreads.contains(root.id) {
+                                            ForEach(thread) { reply in
+                                                commentRow(reply).padding(.leading, 52)
+                                            }
+                                        }
+                                        threadToggle(root: root, count: thread.count)
+                                    }
+                                    Divider().background(AloTheme.border).padding(.leading, 52)
                                 }
                             }
                             .padding(.horizontal, 16)
@@ -714,6 +862,8 @@ struct AloPostDetailScreen: View {
                 .accessibilityIdentifier("alo.comments.scroll")
                 .onChange(of: app.lastCreatedCommentId) { _, id in
                     guard id > 0 else { return }
+                    // A new reply opens its thread, so it is visible.
+                    if let parent = app.comments.first(where: { $0.id == id })?.parentId { expandedThreads.insert(parent) }
                     withAnimation(accessibility.reduceMotion ? nil : AloPressFeedback.release) {
                         proxy.scrollTo(id, anchor: .bottom)
                     }
@@ -751,15 +901,109 @@ struct AloPostDetailScreen: View {
             Button("Отмена", role: .cancel) {
                 deleteCandidate = nil
             }
+        } message: {
+            if let deleteCandidate, deleteCandidate.parentId == nil, app.comments.contains(where: { $0.parentId == deleteCandidate.id }) {
+                Text("Ответы на него тоже удалятся.")
+            }
+        }
+        .sheet(item: $reportTarget) { target in
+            AloReportSheet(target: target) { reason, details in
+                try await app.report(target, reason: reason, details: details)
+            }
         }
     }
 
+    private func commentRow(_ comment: AloPostComment) -> some View {
+        CommentRow(
+            comment: comment,
+            isReply: comment.parentId != nil,
+            isMine: comment.author.id == app.bootstrap?.me.id,
+            onLike: { app.toggleCommentLike(comment) },
+            onReply: { reply(to: comment) },
+            onAuthor: {
+                dismiss()
+                app.openProfile(comment.author)
+            },
+            onDelete: { deleteCandidate = comment },
+            onReport: { reportTarget = .comment(comment.id) }
+        )
+        .id(comment.id)
+    }
+
+    /// Instagram's "Посмотреть ещё N ответов" / "Скрыть ответы" under a root comment.
+    private func threadToggle(root: AloPostComment, count: Int) -> some View {
+        let open = expandedThreads.contains(root.id)
+        return Button {
+            withAnimation(accessibility.reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.88)) {
+                if open { expandedThreads.remove(root.id) } else { expandedThreads.insert(root.id) }
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Rectangle().fill(AloTheme.muted.opacity(0.5)).frame(width: 24, height: 1)
+                Text(open ? "Скрыть ответы" : "Посмотреть ответы (\(count))")
+                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(AloTheme.muted)
+                Spacer(minLength: 0)
+            }
+            .padding(.leading, 52).frame(minHeight: 34)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("alo.comments.thread.\(root.id)")
+    }
+
+    /// Starts a reply: the composer names the person and begins with their handle.
+    private func reply(to comment: AloPostComment) {
+        app.commentReplyTarget = comment
+        let handle = comment.author.username.isEmpty ? "" : "@\(comment.author.username) "
+        if !handle.isEmpty, !app.commentText.hasPrefix(handle) {
+            app.commentText = handle + app.commentText.trimmingCharacters(in: .whitespaces)
+        }
+        if let root = comment.parentId { expandedThreads.insert(root) }
+        isCommentFocused = true
+    }
+
     private var commentComposer: some View {
+        VStack(spacing: 8) {
+            if let query = AloMentionQuery.current(in: app.commentText) {
+                AloMentionSuggestions(query: query) { person in
+                    app.commentText = AloMentionQuery.insert(person.username, into: app.commentText)
+                }
+            }
+            if let target = app.commentReplyTarget {
+                HStack(spacing: 8) {
+                    Text("Ответ для \(target.author.username.isEmpty ? target.author.name : target.author.username.withAtPrefix)")
+                        .font(.system(size: 13, weight: .medium)).foregroundStyle(AloTheme.muted).lineLimit(1)
+                    Spacer(minLength: 0)
+                    Button {
+                        let handle = "@\(target.author.username) "
+                        if app.commentText.hasPrefix(handle) { app.commentText.removeFirst(handle.count) }
+                        app.commentReplyTarget = nil
+                    } label: {
+                        Image(systemName: "xmark").font(.system(size: 12, weight: .bold)).foregroundStyle(AloTheme.muted)
+                            .frame(width: 32, height: 28).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Отменить ответ")
+                    .accessibilityIdentifier("alo.comments.reply-cancel")
+                }
+                .padding(.horizontal, 4)
+                .accessibilityIdentifier("alo.comments.reply-bar")
+            }
+            commentInputRow
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, AloInputMetrics.verticalPadding)
+        .background(AloTheme.background.opacity(0.98))
+        .animation(accessibility.reduceMotion ? nil : .easeOut(duration: 0.18), value: app.commentReplyTarget?.id)
+    }
+
+    private var commentInputRow: some View {
         HStack(spacing: 10) {
-            TextField("Ваш комментарий…", text: $app.commentText, axis: .vertical)
+            TextField(app.commentReplyTarget == nil ? "Ваш комментарий…" : "Ваш ответ…", text: $app.commentText, axis: .vertical)
                 .foregroundStyle(AloTheme.text)
                 .font(.body)
                 .lineLimit(1...5)
+                .focused($isCommentFocused)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 6)
                 .frame(minHeight: AloInputMetrics.height)
@@ -783,9 +1027,6 @@ struct AloPostDetailScreen: View {
             .buttonStyle(AloFeedPressStyle())
             .accessibilityLabel("Отправить комментарий").accessibilityIdentifier("alo.comments.send")
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, AloInputMetrics.verticalPadding)
-        .background(AloTheme.background.opacity(0.98))
     }
 
     private var deleteDialogBinding: Binding<Bool> {
@@ -800,10 +1041,13 @@ struct AloPostDetailScreen: View {
 
 private struct CommentRow: View {
     let comment: AloPostComment
+    var isReply = false
     let isMine: Bool
     let onLike: () -> Void
+    let onReply: () -> Void
     let onAuthor: () -> Void
     let onDelete: () -> Void
+    let onReport: () -> Void
     @EnvironmentObject private var app: AloAppModel
 
     var body: some View {
@@ -812,7 +1056,7 @@ private struct CommentRow: View {
                 AloAvatar(
                     name: comment.author.name,
                     url: comment.author.avatarUrl,
-                    size: 42,
+                    size: isReply ? 30 : 42,
                     colorSeed: String(comment.author.id)
                 )
             }
@@ -822,7 +1066,7 @@ private struct CommentRow: View {
                 Button(action: onAuthor) {
                     HStack(spacing: 5) {
                         Text(comment.author.name)
-                            .font(.system(size: 16, weight: .bold))
+                            .font(.system(size: isReply ? 15 : 16, weight: .bold))
                             .foregroundStyle(AloTheme.text)
                         if comment.author.verified {
                             Image(systemName: "checkmark.seal.fill")
@@ -834,24 +1078,19 @@ private struct CommentRow: View {
                 .buttonStyle(.plain)
 
                 if !comment.body.isEmpty {
-                    Text(comment.body)
-                        .font(.body)
-                        .foregroundStyle(AloTheme.text)
+                    let markup = AloMessageMarkup.parse(comment.body)
+                    AloRichMessageText(body: markup.body, entities: markup.entities, fontSize: isReply ? 15 : 16)
+                        .accessibilityIdentifier("alo.comments.body.\(comment.id)")
                 }
                 if !comment.media.isEmpty { AloPostMediaGrid(media: comment.media, timeline: true) }
 
-                HStack(spacing: 16) {
-                    Button(action: onLike) {
-                        Label("\(comment.likeCount)", systemImage: comment.viewerLiked ? "heart.fill" : "heart")
-                            .foregroundStyle(comment.viewerLiked ? Color(red: 1, green: 0.32, blue: 0.42) : AloTheme.muted)
-                            .frame(minWidth: 44, minHeight: 44)
-                    }
-                    .buttonStyle(AloFeedPressStyle())
-                    .disabled(app.pendingCommentLikeIds.contains(comment.id))
-                    .accessibilityLabel(comment.viewerLiked ? "Убрать лайк комментария" : "Лайк комментария")
-                    .accessibilityValue("\(comment.likeCount)")
+                HStack(spacing: 14) {
                     Text(comment.editedAt.isEmpty ? shortDate(comment.createdAt) : "\(shortDate(comment.createdAt)) · изменено")
                         .foregroundStyle(AloTheme.muted)
+                    Button("Ответить", action: onReply)
+                        .foregroundStyle(AloTheme.muted)
+                        .frame(minHeight: 44)
+                        .accessibilityIdentifier("alo.comments.reply.\(comment.id)")
                     if isMine {
                         Button("Удалить", role: .destructive, action: onDelete).frame(minHeight: 44)
                     }
@@ -860,10 +1099,38 @@ private struct CommentRow: View {
                 // The 44 pt touch targets stay, but they no longer stretch the gap between comments.
                 .padding(.vertical, -9)
             }
-            Spacer()
+            Spacer(minLength: 4)
+            Button(action: onLike) {
+                VStack(spacing: 2) {
+                    Image(systemName: comment.viewerLiked ? "heart.fill" : "heart")
+                        .font(.system(size: 14, weight: .semibold))
+                    if comment.likeCount > 0 {
+                        Text(AloCompactCount.string(comment.likeCount)).font(.system(size: 11, weight: .medium).monospacedDigit())
+                    }
+                }
+                .foregroundStyle(comment.viewerLiked ? Color(red: 1, green: 0.32, blue: 0.42) : AloTheme.muted)
+                .frame(minWidth: 36, minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(AloFeedPressStyle())
+            .disabled(app.pendingCommentLikeIds.contains(comment.id))
+            .accessibilityLabel(comment.viewerLiked ? "Убрать лайк комментария" : "Лайк комментария")
+            .accessibilityValue("\(comment.likeCount)")
+            .sensoryFeedback(.selection, trigger: comment.viewerLiked)
         }
-        .padding(.vertical, 10)
+        .padding(.vertical, isReply ? 6 : 10)
         .contentShape(Rectangle())
+        .contextMenu {
+            Button { onReply() } label: { Label("Ответить", systemImage: "arrowshape.turn.up.left") }
+            if !comment.body.isEmpty {
+                Button { UIPasteboard.general.string = comment.body } label: { Label("Скопировать", systemImage: "doc.on.doc") }
+            }
+            if isMine {
+                Button(role: .destructive, action: onDelete) { Label("Удалить", systemImage: "trash") }
+            } else {
+                Button(role: .destructive, action: onReport) { Label("Пожаловаться", systemImage: "exclamationmark.bubble") }
+            }
+        }
     }
 
     private func shortDate(_ raw: String) -> String {

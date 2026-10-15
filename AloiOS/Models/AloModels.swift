@@ -371,6 +371,10 @@ struct AloPostComment: Identifiable, Equatable {
     let likeCount: Int
     let viewerLiked: Bool
     let author: AloEntitySummary
+    /// The root comment of the thread this reply belongs to; nil for a root comment.
+    let parentId: Int?
+    /// Whom a reply answers (the root's author or another reply's).
+    let replyTo: AloEntitySummary?
 
     init(_ json: [String: Any]) {
         id = json.int("id")
@@ -381,6 +385,9 @@ struct AloPostComment: Identifiable, Equatable {
         likeCount = json.int("likeCount")
         viewerLiked = json.bool("viewerLiked")
         author = AloEntitySummary(json.object("author"))
+        let parent = json.int("parentId")
+        parentId = parent > 0 ? parent : nil
+        replyTo = json.optionalObject("replyTo").map(AloEntitySummary.init)
     }
 
     func withLike(count: Int, liked: Bool) -> AloPostComment {
@@ -389,6 +396,7 @@ struct AloPostComment: Identifiable, Equatable {
     private init(copying comment: AloPostComment, count: Int, liked: Bool) {
         id = comment.id; body = comment.body; media = comment.media
         createdAt = comment.createdAt; editedAt = comment.editedAt; author = comment.author
+        parentId = comment.parentId; replyTo = comment.replyTo
         likeCount = max(0, count); viewerLiked = liked
     }
 }
@@ -1533,9 +1541,12 @@ struct AloPost: Identifiable, Equatable {
     let viewerReposted: Bool
     let createdAt: String
     let author: AloEntitySummary
+    /// Why the feed shows it; only feed listings carry it.
+    let feedReason: AloFeedReason?
 
     init(_ json: [String: Any]) {
         id = json.int("id")
+        feedReason = AloFeedReason(rawValue: json.string("feedReason"))
         creatorId = json.int("creatorId").ifZero(json.int("creator_id"))
         body = json.string("body")
         media = json.array("media").map(AloMediaItem.init)
@@ -1577,7 +1588,7 @@ struct AloPost: Identifiable, Equatable {
         authorSignature = post.authorSignature; commentsEnabled = post.commentsEnabled
         discussionRoomId = post.discussionRoomId; discussionTopicId = post.discussionTopicId
         messengerRoomId = post.messengerRoomId; viewCount = post.viewCount
-        createdAt = post.createdAt; author = post.author
+        createdAt = post.createdAt; author = post.author; feedReason = post.feedReason
         self.likeCount = max(0, likeCount); self.viewerLiked = viewerLiked
         self.repostCount = max(0, repostCount); self.viewerReposted = viewerReposted
         self.commentCount = max(0, commentCount)

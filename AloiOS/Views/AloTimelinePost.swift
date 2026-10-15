@@ -26,6 +26,8 @@ struct AloTimelinePost: View, Equatable {
     var isRepostPending = false
     var onDelete: () -> Void = {}
     var onNotice: (String) -> Void = { _ in }
+    /// The reader's actions on someone else's post; nil hides them.
+    var onReaderAction: ((AloPostReaderAction) -> Void)?
     let onLike: () -> Void
     let onComment: () -> Void
     let onRepost: () -> Void
@@ -131,6 +133,23 @@ struct AloTimelinePost: View, Equatable {
                     Button(role: .destructive) { confirmsDeletion = true } label: {
                         Label("Удалить пост", systemImage: "trash")
                     }
+                } else if let onReaderAction {
+                    Section {
+                        if presentation == .timeline, post.feedReason != nil {
+                            Button { onReaderAction(.whyShown) } label: {
+                                Label("Почему я это вижу", systemImage: "info.circle")
+                            }
+                        }
+                        Button { onReaderAction(.notInterested) } label: {
+                            Label("Не интересно", systemImage: "hand.thumbsdown")
+                        }
+                        Button { onReaderAction(.hide) } label: {
+                            Label("Скрыть", systemImage: "eye.slash")
+                        }
+                    }
+                    Button(role: .destructive) { onReaderAction(.report) } label: {
+                        Label("Пожаловаться", systemImage: "exclamationmark.bubble")
+                    }
                 }
             } label: {
                 Image(systemName: "ellipsis")
@@ -200,6 +219,10 @@ struct AloTimelinePost: View, Equatable {
         .sensoryFeedback(.selection, trigger: post.viewerLiked)
         .sensoryFeedback(.selection, trigger: post.viewerReposted)
     }
+}
+
+enum AloPostReaderAction {
+    case whyShown, notInterested, hide, report
 }
 
 /// No per-row timers: timestamps update on a refresh, not 60 times a second.

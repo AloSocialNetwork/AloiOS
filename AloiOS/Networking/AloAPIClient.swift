@@ -1004,13 +1004,16 @@ final class AloAPIClient {
         return (AloBootstrapData(raw), raw)
     }
 
-    func createPost(body: String, media: [AloMessageAttachment] = [], captchaToken: String? = nil) async throws -> AloPost {
+    /// `draftMedia` is media a saved draft already uploaded; publishing with `draftId` uses the draft up.
+    func createPost(body: String, media: [AloMessageAttachment] = [], draftMedia: [AloMediaItem] = [],
+                    draftId: Int? = nil, captchaToken: String? = nil) async throws -> AloPost {
         let json = try await request(
             "POST",
             "/api/posts",
             body: compactBody([
                 "body": body,
-                "media": media.map { ["type": $0.type, "url": $0.url, "name": $0.name] },
+                "media": draftMedia.map(\.payload) + media.map { ["type": $0.type, "url": $0.url, "name": $0.name] },
+                "draftId": draftId,
                 "captchaToken": captchaToken
             ])
         )
@@ -2855,6 +2858,7 @@ final class AloAPIClient {
         postId: Int,
         body: String,
         attachments: [AloMessageAttachment] = [],
+        replyToCommentId: Int? = nil,
         captchaToken: String? = nil
     ) async throws -> (comment: AloPostComment, post: AloPost?) {
         let json = try await request(
@@ -2863,10 +2867,62 @@ final class AloAPIClient {
             body: compactBody([
                 "body": body,
                 "attachments": attachments.map { ["type": $0.type, "url": $0.url, "name": $0.name] },
+                "parentId": replyToCommentId,
                 "captchaToken": captchaToken
             ])
         )
         return (AloPostComment(json.object("comment")), json.optionalObject("post").map(AloPost.init))
+    }
+
+    // MARK: Feed curation, reports, drafts, creator statistics
+
+    func hideFeedPost(postId: Int, reason: AloFeedHideReason) async throws {
+        _ = try await request("POST", "/api/feed/posts/\(postId)/hide", body: ["reason": reason.rawValue])
+    }
+
+    func unhideFeedPost(postId: Int) async throws -> AloPost? {
+        let json = try await request("DELETE", "/api/feed/posts/\(postId)/hide")
+        return json.optionalObject("post").map(AloPost.init)
+    }
+
+    func report(_ target: AloReportTarget, reason: AloReportReason, details: String) async throws {
+        _ = try await request("POST", "/api/reports", body: [
+            "targetType": target.type,
+            "targetId": target.targetId,
+            "reason": reason.title,
+            "details": details
+        ])
+    }
+
+    func loadPostDrafts() async throws -> [AloPostDraft] {
+        let json = try await request("GET", "/api/post-drafts")
+        return json.array("drafts").map(AloPostDraft.init)
+    }
+
+    /// Creates a draft, or replaces the text and media of `draftId`.
+    func savePostDraft(draftId: Int?, body: String, media: [[String: Any]]) async throws -> AloPostDraft {
+        let payload: [String: Any] = ["body": body, "media": media]
+        let json = if let draftId {
+            try await request("PATCH", "/api/post-drafts/\(draftId)", body: payload)
+        } else {
+            try await request("POST", "/api/post-drafts", body: payload)
+        }
+        return AloPostDraft(json.object("draft"))
+    }
+
+    func deletePostDraft(draftId: Int) async throws {
+        _ = try await request("DELETE", "/api/post-drafts/\(draftId)")
+    }
+
+    func loadCreatorStats(days: Int) async throws -> AloCreatorStats {
+        let json = try await request("GET", "/api/creator/stats?days=\(days)")
+        return AloCreatorStats(json.object("stats"))
+    }
+
+    func mentionSuggestions(query: String) async throws -> [AloEntitySummary] {
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let json = try await request("GET", "/api/mentions/suggest?q=\(encoded)")
+        return json.array("people").map(AloEntitySummary.init)
     }
 
     func updateComment(postId: Int, commentId: Int, body: String) async throws -> (comment: AloPostComment, post: AloPost?) {
