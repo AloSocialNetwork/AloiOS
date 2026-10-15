@@ -2,32 +2,6 @@ import SwiftUI
 import UIKit
 import WebRTC
 
-private enum AloCallVisualPalette {
-    static func colors(for call: AloDirectCallState) -> [Color] {
-        switch call.phase {
-        case .reconnecting, .noAnswer, .interrupted, .busy, .declined:
-            return [
-                Color(red: 0.54, green: 0.19, blue: 0.72),
-                Color(red: 0.34, green: 0.10, blue: 0.56),
-                Color(red: 0.25, green: 0.10, blue: 0.39)
-            ]
-        case .outgoing, .incoming, .connecting, .active:
-            if call.isMuted {
-                return [
-                    Color(red: 0.00, green: 0.50, blue: 1.00),
-                    Color(red: 0.00, green: 0.69, blue: 0.94),
-                    Color(red: 0.08, green: 0.24, blue: 0.52)
-                ]
-            }
-            return [
-                Color(red: 0.13, green: 0.76, blue: 0.35),
-                Color(red: 0.02, green: 0.59, blue: 0.48),
-                Color(red: 0.08, green: 0.34, blue: 0.27)
-            ]
-        }
-    }
-}
-
 enum AloCallLayoutMetrics {
     // Telegram CallScreen/ButtonGroupView's active control diameter.
     static let activeButtonDiameter: CGFloat = 56
@@ -151,10 +125,14 @@ struct AloCallOverlay: View {
             prefersLocalPrimary: isLocalVideoPrimary
         )
 
+        // Telegram's layout: the avatar's top sits 39 + 136 pt above 49 % of the height, the name
+        // 39 pt under it, the status 4 pt under the name.
+        let avatarTop = max(safeAreaInsets.top + 8,
+                            floor(viewportHeight * 0.49) - 39 - AloCallLayoutMetrics.peerAvatarSize)
+
         return ZStack {
-            callStateBackground(call)
-            AloCallAmbientBlobs(colors: AloCallVisualPalette.colors(for: call),
-                                enabled: !videoLayout.showsPrimaryVideo && !reduceMotion)
+            AloCallLiveBackdrop(meter: coordinator.meter, phase: call.phase,
+                                animated: !reduceMotion && !videoLayout.showsPrimaryVideo)
 
             // Identity follows the track, not its primary/preview role. A swap
             // changes geometry without allocating/rebinding two Metal renderers.
@@ -195,34 +173,29 @@ struct AloCallOverlay: View {
                     .zIndex(6)
             }
 
-            VStack(spacing: 16) {
-                Spacer(minLength: 18)
-
+            VStack(spacing: 0) {
                 if videoLayout.showsIdentity {
-                    AloAvatar(
-                        name: call.peer.name,
-                        url: call.peer.avatarURL,
-                        size: AloCallLayoutMetrics.peerAvatarSize,
-                        colorSeed: String(call.peer.id)
+                    Color.clear.frame(height: max(0, avatarTop - safeAreaInsets.top - 8))
+                    AloCallLiveAvatar(
+                        meter: coordinator.meter,
+                        call: call,
+                        animated: !reduceMotion
                     )
-                    .background {
-                        AloCallPulseRings(size: AloCallLayoutMetrics.peerAvatarSize,
-                            enabled: !reduceMotion && [.outgoing, .incoming, .connecting].contains(call.phase))
-                    }
-                    .accessibilityIdentifier("alo.call-peer-avatar")
+                    .padding(.bottom, 39)
                 }
 
-                VStack(spacing: 8) {
+                VStack(spacing: 4) {
                     Text(call.peer.name)
                         .font(.system(size: 28, weight: .regular))
                         .foregroundStyle(Color.white)
                         .lineLimit(1)
 
-                    callStatus(call)
-                        .font(.system(size: 17, weight: .regular))
-                        .foregroundStyle(Color.white.opacity(0.72))
+                    AloCallLiveStatus(meter: coordinator.meter, content: statusContent(call),
+                                      animated: !reduceMotion)
+                        .font(.system(size: 16, weight: .regular))
+                        .foregroundStyle(Color.white)
                         .id(call.phase)
-                        .transition(.scale(scale: 0.3).combined(with: .opacity))
+                        .transition(.opacity)
                 }
                 .padding(
                     .horizontal,
@@ -231,7 +204,7 @@ struct AloCallOverlay: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("alo.call-peer-identity")
 
-                Spacer()
+                Spacer(minLength: 16)
 
                 if call.phase.isTerminal {
                     activeControls(call, isEnabled: false)
@@ -448,14 +421,6 @@ struct AloCallOverlay: View {
         }
     }
 
-    private func callStateBackground(_ call: AloDirectCallState) -> LinearGradient {
-        return LinearGradient(
-            colors: AloCallVisualPalette.colors(for: call),
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-    }
-
     private func callVideoSurface(
         _ call: AloDirectCallState,
         isLocal: Bool,
@@ -517,31 +482,17 @@ struct AloCallOverlay: View {
             .zIndex(isPrimary ? 0 : 4)
     }
 
-    private func callStatus(_ call: AloDirectCallState) -> some View {
-        Group {
-            switch call.phase {
-            case .incoming:
-                Text(call.isVideo ? "Входящий видеозвонок" : "Входящий звонок")
-            case .outgoing:
-                Text("Вызов...")
-            case .connecting:
-                Text("Соединение...")
-            case .reconnecting:
-                Text("Восстановление связи...")
-            case .active:
-                TimelineView(.periodic(from: call.startedAt ?? Date(), by: 1)) { context in
-                    Text(callDuration(from: call.startedAt, now: context.date))
-                        .monospacedDigit()
-                }
-            case .noAnswer:
-                Text("Нет ответа")
-            case .interrupted:
-                Text("Связь прервана")
-            case .busy:
-                Text("Занято")
-            case .declined:
-                Text("Вызов отклонён")
-            }
+    private func statusContent(_ call: AloDirectCallState) -> AloCallStatusLine.Content {
+        switch call.phase {
+        case .incoming: return .waiting(call.isVideo ? "Входящий видеозвонок" : "Входящий звонок")
+        case .outgoing: return .waiting("Вызов")
+        case .connecting: return .waiting("Соединение")
+        case .reconnecting: return .waiting("Восстановление связи")
+        case .active: return .talking(since: call.startedAt, quality: nil)
+        case .noAnswer: return .final("Нет ответа")
+        case .interrupted: return .final("Связь прервана")
+        case .busy: return .final("Занято")
+        case .declined: return .final("Вызов отклонён")
         }
     }
 
@@ -773,15 +724,11 @@ struct AloCallCompactBar: View {
     }
 
     private var backgroundColors: [Color] {
-        Array(AloCallVisualPalette.colors(for: call).prefix(2))
+        AloCallBackdropPalette.resolve(phase: call.phase, quality: nil).barColors
     }
 
     var body: some View {
-        Button {
-            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
-                coordinator.isMinimized = false
-            }
-        } label: {
+        Button(action: expand) {
             ZStack(alignment: .bottom) {
                 LinearGradient(
                     colors: backgroundColors,
@@ -836,6 +783,10 @@ struct AloCallCompactBar: View {
         .buttonStyle(AloPressBounceButtonStyle(pressedScale: 0.985))
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: call.isMuted)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: call.phase)
+        // The top of the bar is the status bar, whose taps iOS keeps for itself.
+        .background {
+            if coordinator.isMinimized { AloStatusBarTapCatcher(action: expand) }
+        }
         .accessibilityIdentifier("alo.compact-call-bar")
         .accessibilityLabel("Вернуться к звонку с \(call.peer.name)")
         .accessibilityValue(
@@ -843,6 +794,12 @@ struct AloCallCompactBar: View {
                 ? compactTerminalAccessibilityValue
                 : (call.isMuted ? "Микрофон выключен" : "Микрофон включён")
         )
+    }
+
+    private func expand() {
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
+            coordinator.isMinimized = false
+        }
     }
 
     @ViewBuilder
@@ -912,55 +869,49 @@ private struct AloCallEmojiKey: View {
     }
 }
 
-/// Soft rings that spread from the avatar while the call is ringing or connecting.
-private struct AloCallPulseRings: View {
-    let size: CGFloat
-    let enabled: Bool
+/// The call's live layers, each watching the meter on its own so its seven updates a second
+/// redraw only them.
+private struct AloCallLiveBackdrop: View {
+    @ObservedObject var meter: AloCallMeter
+    let phase: AloDirectCallPhase
+    let animated: Bool
 
     var body: some View {
-        if enabled {
-            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-                let t = context.date.timeIntervalSinceReferenceDate
-                ZStack {
-                    ForEach(0..<2, id: \.self) { index in
-                        let phase = (t / 2.4 + Double(index) * 0.5).truncatingRemainder(dividingBy: 1)
-                        Circle()
-                            .stroke(Color.white.opacity(0.28 * (1 - phase)), lineWidth: 2)
-                            .frame(width: size, height: size)
-                            .scaleEffect(1 + 0.5 * phase)
-                    }
-                }
-            }
-            .allowsHitTesting(false).accessibilityHidden(true)
-        }
+        AloCallBackdrop(palette: .resolve(phase: phase, quality: meter.quality), animated: animated)
     }
 }
 
-/// Slow colour drift behind the call, in the same palette as the state gradient.
-private struct AloCallAmbientBlobs: View {
-    let colors: [Color]
-    let enabled: Bool
+/// The avatar breathes with the other person's voice, the blobs behind it twice as much; they
+/// hide once the call is over.
+private struct AloCallLiveAvatar: View {
+    @ObservedObject var meter: AloCallMeter
+    let call: AloDirectCallState
+    let animated: Bool
 
     var body: some View {
-        if enabled, !colors.isEmpty {
-            TimelineView(.animation(minimumInterval: 1.0 / 24.0)) { context in
-                let t = context.date.timeIntervalSinceReferenceDate
-                GeometryReader { proxy in
-                    ZStack {
-                        ForEach(0..<3, id: \.self) { index in
-                            let seed = Double(index) * 2.1
-                            Circle()
-                                .fill(colors[index % colors.count].opacity(0.6))
-                                .frame(width: proxy.size.width * 0.95, height: proxy.size.width * 0.95)
-                                .blur(radius: 70)
-                                .offset(x: CGFloat(sin(t * 0.18 + seed)) * proxy.size.width * 0.3,
-                                        y: CGFloat(cos(t * 0.14 + seed * 1.3)) * proxy.size.height * 0.25)
-                        }
-                    }
-                    .frame(width: proxy.size.width, height: proxy.size.height)
+        let size = AloCallLayoutMetrics.peerAvatarSize
+        AloAvatar(name: call.peer.name, url: call.peer.avatarURL, size: size, colorSeed: String(call.peer.id))
+            .scaleEffect(1 + min(5, meter.level) * 0.05)
+            .animation(.easeOut(duration: 0.15), value: meter.level)
+            .background {
+                if !call.phase.isTerminal {
+                    AloCallSpeakingBlobs(avatarSize: size, level: meter.level, animated: animated)
                 }
             }
-            .allowsHitTesting(false).accessibilityHidden(true)
+            .accessibilityIdentifier("alo.call-peer-avatar")
+    }
+}
+
+private struct AloCallLiveStatus: View {
+    @ObservedObject var meter: AloCallMeter
+    let content: AloCallStatusLine.Content
+    let animated: Bool
+
+    var body: some View {
+        if case .talking(let since, _) = content {
+            AloCallStatusLine(content: .talking(since: since, quality: meter.quality), animated: animated)
+        } else {
+            AloCallStatusLine(content: content, animated: animated)
         }
     }
 }

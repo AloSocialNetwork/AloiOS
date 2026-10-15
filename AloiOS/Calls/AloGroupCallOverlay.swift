@@ -501,6 +501,16 @@ struct AloGroupCallCompactBar: View {
                 endPoint: .trailing
             )
         )
+        .background {
+            // Taps on the status bar part of the bar come through this proxy.
+            if coordinator.isMinimized {
+                AloStatusBarTapCatcher {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.88)) {
+                        coordinator.isMinimized = false
+                    }
+                }
+            }
+        }
         .accessibilityIdentifier("alo.group-call-compact")
     }
 }

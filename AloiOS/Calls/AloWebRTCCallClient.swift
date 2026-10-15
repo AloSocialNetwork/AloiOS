@@ -221,6 +221,28 @@ final class AloWebRTCCallClient: NSObject {
         }
     }
 
+    /// The other side's voice level and the counters the call screen turns into a link quality.
+    /// Delivered on the main queue.
+    func sampleLink(_ completion: @escaping (_ audioLevel: Double, _ packetsLost: Double,
+                                             _ packetsReceived: Double, _ roundTrip: Double?) -> Void) {
+        peerConnection.statistics { report in
+            var level = 0.0, lost = 0.0, received = 0.0
+            var roundTrip: Double?
+            for stats in report.statistics.values {
+                let values = stats.values
+                if stats.type == "inbound-rtp", values["kind"] as? String == "audio" {
+                    level = (values["audioLevel"] as? NSNumber)?.doubleValue ?? 0
+                    lost = (values["packetsLost"] as? NSNumber)?.doubleValue ?? 0
+                    received = (values["packetsReceived"] as? NSNumber)?.doubleValue ?? 0
+                } else if stats.type == "candidate-pair", values["state"] as? String == "succeeded",
+                          (values["nominated"] as? NSNumber)?.boolValue == true {
+                    roundTrip = (values["currentRoundTripTime"] as? NSNumber)?.doubleValue ?? roundTrip
+                }
+            }
+            DispatchQueue.main.async { completion(level, lost, received, roundTrip) }
+        }
+    }
+
     func setMuted(_ muted: Bool) {
         audioTrack?.isEnabled = !muted
     }
