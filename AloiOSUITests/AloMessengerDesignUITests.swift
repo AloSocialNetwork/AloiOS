@@ -438,6 +438,9 @@ final class AloMessengerDesignUITests: XCTestCase {
         XCTAssertTrue(app.buttons["alo.story.publish"].waitForExistence(timeout: 4))
         XCTAssertFalse(app.buttons["alo.post.publish"].exists)
         capture("feed-story-editor")
+        // A text story opens straight into typing; "Готово" brings back the close button.
+        let textDone = app.buttons["alo.story.tool-done"]
+        if textDone.exists { textDone.tap() }
         app.buttons["Закрыть редактор истории"].tap()
         XCTAssertTrue(post.waitForExistence(timeout: 4))
         capture("feed-creation-actions")

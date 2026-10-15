@@ -32,6 +32,12 @@ struct ProfileView: View {
                     .padding(.top, AloTheme.spacingSmall)
                     .padding(.bottom, AloTheme.spacingSmall)
 
+                    AloStoryHighlightsRow(
+                        user: AloEntitySummary(["id": data.me.id, "name": data.me.name, "username": data.me.username,
+                                                "avatarEmoji": data.me.avatarUrl]),
+                        isOwn: true
+                    )
+
                     Section {
                         let posts = selectedSection == .posts ? data.profilePosts : ownLikedPosts
                         if posts.isEmpty {
@@ -150,6 +156,14 @@ struct ProfileDetailView: View {
                                 .padding(.horizontal, AloTheme.pageInset)
                                 .padding(.top, AloTheme.spacingSmall)
                         }
+                    }
+
+                    if !isBlocked {
+                        AloStoryHighlightsRow(
+                            user: AloEntitySummary(["id": profile.user.id, "name": profile.user.name,
+                                                    "username": profile.user.username, "avatarEmoji": profile.user.avatarUrl]),
+                            isOwn: isOwnProfile
+                        )
                     }
 
                     if profile.permissions.isPrivate {

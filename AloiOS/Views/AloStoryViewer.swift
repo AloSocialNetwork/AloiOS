@@ -11,6 +11,8 @@ struct AloStoryViewer: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let groups: [AloStoryGroup]
+    /// Set when playing a highlight: the title shows, and its owner can take a story out.
+    let highlight: AloStoryHighlight?
     @State private var groupIndex: Int
     @State private var frameIndex = 0
     @State private var progress: Double = 0
@@ -20,12 +22,15 @@ struct AloStoryViewer: View {
     @State private var videoDuration: Double = 0
     @State private var isViewersPresented = false
     @State private var isActionsPresented = false
+    @State private var isAddToHighlightPresented = false
     @State private var toast: String?
+    @State private var toastSymbol = "link"
 
     private static let photoDuration: Double = 5
 
-    init(groups: [AloStoryGroup], startGroupID: Int) {
+    init(groups: [AloStoryGroup], startGroupID: Int, highlight: AloStoryHighlight? = nil) {
         self.groups = groups
+        self.highlight = highlight
         _groupIndex = State(initialValue: groups.firstIndex(where: { $0.id == startGroupID }) ?? 0)
     }
 
@@ -46,7 +51,8 @@ struct AloStoryViewer: View {
     private var frame: Frame? { frames.indices.contains(frameIndex) ? frames[frameIndex] : nil }
     private var isOwn: Bool { group?.user.id == app.bootstrap?.me.id }
     private var isPaused: Bool {
-        isHolding || isDeleteConfirmationPresented || isViewersPresented || isActionsPresented || dragOffset != .zero
+        isHolding || isDeleteConfirmationPresented || isViewersPresented || isActionsPresented || isAddToHighlightPresented
+            || dragOffset != .zero
     }
 
     var body: some View {
@@ -64,6 +70,16 @@ struct AloStoryViewer: View {
             Button("Удалить", role: .destructive) { deleteCurrent() }
             Button("Отмена", role: .cancel) {}
         }
+        .sheet(isPresented: $isAddToHighlightPresented) {
+            if let frame {
+                AloAddToHighlightSheet(stories: [frame.story]) {
+                    isAddToHighlightPresented = false
+                    showToast("Добавлено в актуальное", symbol: "star.fill")
+                }
+                .environmentObject(app)
+                .presentationDetents([.medium, .large])
+            }
+        }
         .sheet(isPresented: $isViewersPresented) {
             if let frame {
                 AloStoryViewersSheet(story: frame.story) { user in
@@ -79,7 +95,7 @@ struct AloStoryViewer: View {
         }
         .overlay(alignment: .top) {
             if let toast {
-                Label(toast, systemImage: "link")
+                Label(toast, systemImage: toastSymbol)
                     .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
                     .padding(.horizontal, 16).frame(height: 44)
                     .modifier(AloChatGlass(interactive: false, role: .chrome))
@@ -205,7 +221,7 @@ struct AloStoryViewer: View {
                 if let group {
                     AloAvatar(name: group.user.name, url: group.user.avatarUrl, size: 34, colorSeed: String(group.user.id))
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(isOwn ? "Ваша история" : group.user.name)
+                        Text(highlight?.title.ifBlank(isOwn ? "Ваша история" : group.user.name) ?? (isOwn ? "Ваша история" : group.user.name))
                             .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
                         if let frame {
                             Text(Self.age(of: frame.story.createdAt))
@@ -220,9 +236,18 @@ struct AloStoryViewer: View {
                         .frame(width: 40, height: 40).contentShape(Rectangle())
                 }
                 .confirmationDialog("История", isPresented: $isActionsPresented, titleVisibility: .hidden) {
-                    Button("Копировать ссылку") { copyLink() }
+                    if frame?.story.isExpired != true {
+                        Button("Копировать ссылку") { copyLink() }
+                    }
                     if isOwn {
-                        Button("Удалить историю", role: .destructive) { isDeleteConfirmationPresented = true }
+                        if let highlight {
+                            Button("Убрать из актуального", role: .destructive) { removeFromHighlight(highlight) }
+                        } else {
+                            Button("Добавить в актуальное") { isAddToHighlightPresented = true }
+                        }
+                        if highlight == nil {
+                            Button("Удалить историю", role: .destructive) { isDeleteConfirmationPresented = true }
+                        }
                     }
                     Button("Отмена", role: .cancel) {}
                 }
@@ -369,9 +394,24 @@ struct AloStoryViewer: View {
         Task {
             guard await app.copyStoryLink(frame.story) else { return }
             AloHaptics.notification(.success)
-            withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.86)) { toast = "Ссылка скопирована" }
+            showToast("Ссылка скопирована", symbol: "link")
+        }
+    }
+
+    private func showToast(_ text: String, symbol: String) {
+        toastSymbol = symbol
+        Task {
+            withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.86)) { toast = text }
             try? await Task.sleep(for: .seconds(1.6))
             withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { toast = nil }
+        }
+    }
+
+    private func removeFromHighlight(_ highlight: AloStoryHighlight) {
+        guard let frame else { return }
+        Task {
+            try? await app.removeFromHighlight(highlight, story: frame.story)
+            dismiss()
         }
     }
 

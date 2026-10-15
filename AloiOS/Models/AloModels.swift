@@ -148,6 +148,24 @@ struct AloStory: Identifiable, Equatable {
     let expiresAt: String
     let viewerHasSeen: Bool
     let viewCount: Int
+    /// Who may see it: everyone, friends, close_friends or selected.
+    let audience: AloStoryAudience
+
+    /// The story as the server sends it, to rebuild or regroup it locally.
+    var dictionary: [String: Any] {
+        [
+            "id": id, "userId": userId, "body": body, "createdAt": createdAt, "expiresAt": expiresAt,
+            "viewerHasSeen": viewerHasSeen, "viewCount": viewCount, "audience": audience.rawValue,
+            "media": media.map { ["type": $0.type, "url": $0.url, "posterUrl": $0.posterUrl, "caption": $0.caption] }
+        ]
+    }
+
+    var isExpired: Bool {
+        let parser = ISO8601DateFormatter()
+        parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let date = parser.date(from: expiresAt) ?? ISO8601DateFormatter().date(from: expiresAt) else { return false }
+        return date <= Date()
+    }
 
     init(_ json: [String: Any]) {
         id = json.int("id")
@@ -158,6 +176,68 @@ struct AloStory: Identifiable, Equatable {
         expiresAt = json.string("expiresAt")
         viewerHasSeen = json.bool("viewerHasSeen")
         viewCount = json.int("viewCount")
+        audience = AloStoryAudience(rawValue: json.string("audience")) ?? .everyone
+    }
+}
+
+/// Telegram's story audiences.
+enum AloStoryAudience: String, CaseIterable, Identifiable {
+    case everyone
+    case friends
+    case closeFriends = "close_friends"
+    case selected
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .everyone: return "Все"
+        case .friends: return "Друзья"
+        case .closeFriends: return "Близкие друзья"
+        case .selected: return "Выбранные"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .everyone: return "globe"
+        case .friends: return "person.2.fill"
+        case .closeFriends: return "star.fill"
+        case .selected: return "person.crop.circle.badge.checkmark"
+        }
+    }
+}
+
+/// "Актуальное": a named set of someone's stories kept on their profile after they expire.
+struct AloStoryHighlight: Identifiable, Equatable {
+    let id: Int
+    let title: String
+    let coverStoryId: Int
+    let stories: [AloStory]
+
+    var cover: AloStory? { stories.first(where: { $0.id == coverStoryId }) ?? stories.first }
+
+    init(_ json: [String: Any]) {
+        id = json.int("id")
+        title = json.string("title")
+        coverStoryId = json.int("coverStoryId")
+        stories = json.array("stories").map(AloStory.init)
+    }
+}
+
+/// Your close friends and the people your stories are hidden from.
+struct AloStorySettings: Equatable {
+    var closeFriends: [AloEntitySummary]
+    var hiddenFrom: [AloEntitySummary]
+
+    init(closeFriends: [AloEntitySummary] = [], hiddenFrom: [AloEntitySummary] = []) {
+        self.closeFriends = closeFriends
+        self.hiddenFrom = hiddenFrom
+    }
+
+    init(_ json: [String: Any]) {
+        closeFriends = json.array("closeFriends").map(AloEntitySummary.init)
+        hiddenFrom = json.array("hiddenFrom").map(AloEntitySummary.init)
     }
 }
 
