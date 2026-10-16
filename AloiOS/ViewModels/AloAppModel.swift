@@ -1548,11 +1548,61 @@ final class AloAppModel: ObservableObject {
         return try await api.loadModerationReports(status: "pending")
     }
 
-    func resolveModerationReport(_ report: AloModerationReport, approve: Bool, action: AloModerationAction, note: String) async throws {
+    func resolveModerationReport(_ report: AloModerationReport, approve: Bool, action: AloModerationAction, note: String,
+                                 blockHours: Int = 24) async throws {
 #if DEBUG
         if isFeedInteractionPreview { return }
 #endif
-        try await api.resolveModerationReport(id: report.id, approve: approve, action: action, note: note)
+        try await api.resolveModerationReport(id: report.id, approve: approve, action: action, note: note, blockHours: blockHours)
+    }
+
+    // MARK: Moderation team
+
+    func moderationTeam() async throws -> (staff: [AloStaffMember], assignable: [String]) {
+#if DEBUG
+        if isFeedInteractionPreview { return (Self.previewStaff, AloModeratorPermission.allCases.map(\.rawValue)) }
+#endif
+        return try await api.loadModerationTeam()
+    }
+
+    func searchStaffCandidates(_ query: String) async throws -> [AloStaffMember] {
+#if DEBUG
+        if isFeedInteractionPreview {
+            let lower = query.lowercased()
+            return (Self.previewStaff + Self.previewPeople).filter {
+                $0.user.name.lowercased().contains(lower) || $0.user.username.lowercased().contains(lower)
+            }
+        }
+#endif
+        return try await api.searchStaffCandidates(query)
+    }
+
+    /// Appoints, re-grants or (with no rights left) removes a moderator.
+    func setModeratorPermissions(_ member: AloStaffMember, permissions: [String]) async throws {
+#if DEBUG
+        if isFeedInteractionPreview { return }
+#endif
+        if permissions.isEmpty {
+            try await api.revokeModerator(userId: member.id)
+        } else if member.hierarchy == .user {
+            try await api.grantModerator(userId: member.id, permissions: permissions)
+        } else {
+            try await api.updateModerator(userId: member.id, permissions: permissions)
+        }
+    }
+
+    func setAccountStatus(_ member: AloStaffMember, status: String, hours: Int, reason: String) async throws -> AloStaffMember {
+#if DEBUG
+        if isFeedInteractionPreview { return member }
+#endif
+        return try await api.setAccountStatus(userId: member.id, status: status, hours: hours, reason: reason)
+    }
+
+    func setAdministrator(_ member: AloStaffMember, granted: Bool) async throws -> AloStaffMember {
+#if DEBUG
+        if isFeedInteractionPreview { return member }
+#endif
+        return try await api.setAdministrator(userId: member.id, granted: granted)
     }
 
     func moderationAppeals() async throws -> [AloModerationAppeal] {
@@ -1670,17 +1720,69 @@ final class AloAppModel: ObservableObject {
 #if DEBUG
     static let previewReports: [AloModerationReport] = {
         let iso = ISO8601DateFormatter()
+        let spammer: [String: Any] = ["id": 990013, "name": "Быстрые деньги", "username": "money_fast"]
         return [
             AloModerationReport(["id": 14, "targetType": "post", "targetId": 990402, "reason": "Спам",
-                "details": "Одна и та же ссылка во всех комментариях", "status": "pending",
-                "targetPost": ["id": 990402, "body": "Заработок без вложений! Пиши в личку 💸", "mediaCount": 0],
+                "details": "Одна и та же ссылка во всех комментариях", "status": "pending", "otherPendingCount": 2,
+                "targetPost": ["id": 990402, "body": "Заработок без вложений! Пиши в личку 💸", "mediaCount": 1],
+                "target": ["kind": "post", "id": 990402, "author": spammer,
+                           "body": "Заработок без вложений! Пиши в личку 💸 Осталось три места на марафон.",
+                           "media": [["type": "image", "url": previewModerationMediaURL, "width": 1080, "height": 1350]],
+                           "likeCount": 3, "commentCount": 41,
+                           "createdAt": iso.string(from: Date().addingTimeInterval(-5_400))],
                 "createdAt": iso.string(from: Date().addingTimeInterval(-1_800)),
                 "reporter": ["id": 990010, "name": "Маша", "username": "masha"]]),
             AloModerationReport(["id": 15, "targetType": "user", "targetId": 990013, "targetUserId": 990013, "reason": "Оскорбления",
                 "status": "pending", "createdAt": iso.string(from: Date().addingTimeInterval(-7_200)),
-                "reporter": ["id": 990012, "name": "Даша", "username": "dasha"]])
+                "target": ["kind": "user", "id": 990013, "user": spammer, "hierarchy": "user", "accountStatus": "active",
+                           "bio": "Научу зарабатывать от 100 000 в месяц"],
+                "reporter": ["id": 990012, "name": "Даша", "username": "dasha"]]),
+            AloModerationReport(["id": 16, "targetType": "comment", "targetId": 77, "targetUserId": 990013, "reason": "Спам",
+                "status": "pending", "createdAt": iso.string(from: Date().addingTimeInterval(-9_000)),
+                "target": ["kind": "comment", "id": 77, "postId": 990400, "author": spammer,
+                           "body": "Переходи по ссылке в профиле, там всё объясню 👇"],
+                "reporter": ["id": 990011, "name": "Александр", "username": "alex"]])
         ]
     }()
+
+    /// A photo for the reported post, as a data URI like the other fixture media.
+    static let previewModerationMediaURL: String = {
+        let size = CGSize(width: 540, height: 675)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { context in
+            let colors = [UIColor(red: 0.98, green: 0.62, blue: 0.10, alpha: 1).cgColor,
+                          UIColor(red: 0.90, green: 0.20, blue: 0.35, alpha: 1).cgColor] as CFArray
+            if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1]) {
+                context.cgContext.drawLinearGradient(gradient, start: .zero, end: CGPoint(x: size.width, y: size.height), options: [])
+            }
+            let text = "100 000 ₽\nза неделю" as NSString
+            text.draw(in: CGRect(x: 40, y: 240, width: 460, height: 220), withAttributes: [
+                .font: UIFont.systemFont(ofSize: 76, weight: .heavy), .foregroundColor: UIColor.white
+            ])
+        }
+        return "data:image/jpeg;base64," + (image.jpegData(compressionQuality: 0.8)?.base64EncodedString() ?? "")
+    }()
+
+    static let previewStaff: [AloStaffMember] = [
+        AloStaffMember(["id": 990001, "name": "Тест интерфейса", "username": "ui_fixture", "hierarchy": "owner", "isOwner": true,
+                        "role": "admin", "permissions": AloModeratorPermission.allCases.map(\.rawValue)]),
+        AloStaffMember(["id": 990011, "name": "Александр", "username": "alex", "hierarchy": "admin", "role": "admin",
+                        "permissions": AloModeratorPermission.allCases.map(\.rawValue)]),
+        AloStaffMember(["id": 990010, "name": "Маша", "username": "masha", "hierarchy": "lead_moderator", "role": "moderator",
+                        "permissions": ["reports.review", "moderation.manage"]]),
+        AloStaffMember(["id": 990012, "name": "Даша", "username": "dasha", "hierarchy": "moderator", "role": "moderator",
+                        "permissions": ["reports.review"]]),
+        AloStaffMember(["id": 990014, "name": "Слава", "username": "slava", "hierarchy": "moderator", "role": "moderator",
+                        "permissions": ["reports.review", "stats.view"]])
+    ]
+
+    static let previewPeople: [AloStaffMember] = [
+        AloStaffMember(["id": 990003, "name": "Мария", "username": "maria", "hierarchy": "user", "permissions": [String]()]),
+        AloStaffMember(["id": 990013, "name": "Быстрые деньги", "username": "money_fast", "hierarchy": "user",
+                        "accountStatus": "blocked", "blockedUntil": ISO8601DateFormatter().string(from: Date().addingTimeInterval(86_400 * 6)),
+                        "permissions": [String]()])
+    ]
 #endif
 
     func channelStats(channelId: Int, days: Int) async throws -> AloChannelStats {

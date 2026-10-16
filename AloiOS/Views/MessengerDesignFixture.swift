@@ -309,7 +309,7 @@ extension AloAppModel {
                    "bio": "Пишу про путешествия и мобильную разработку. Москва → Байкал → снова Москва.",
                    "registeredLabel": "март 2025 г.", "coverStyle": "violet",
                    "adminScope": (UserDefaults.standard.bool(forKey: "ALO_UI_ADMIN")
-                       ? ["can": ["reports": true, "moderation": true, "stats": true]] : [:]) as [String: Any]],
+                       ? ["can": ["reports": true, "moderation": true, "stats": true], "hierarchy": "owner"] : [:]) as [String: Any]],
             "feed": ["popular": feedPosts, "subs": Array(feedPosts.suffix(3))],
             "profile": ["posts": feedPosts,
                         "stats": ["friendsCount": 128, "followersCount": 2_431, "followingCount": 312]],

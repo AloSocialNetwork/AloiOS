@@ -2963,9 +2963,11 @@ final class AloAPIClient {
         try await request("GET", "/api/admin/reports?status=\(status)").array("reports").map(AloModerationReport.init)
     }
 
-    func resolveModerationReport(id: Int, approve: Bool, action: AloModerationAction, note: String) async throws {
+    func resolveModerationReport(id: Int, approve: Bool, action: AloModerationAction, note: String,
+                                 blockHours: Int = 24) async throws {
         _ = try await request("POST", "/api/admin/reports/\(id)/resolve", body: [
-            "status": approve ? "approved" : "rejected", "action": approve ? action.rawValue : "none", "note": note, "blockHours": 24
+            "status": approve ? "approved" : "rejected", "action": approve ? action.rawValue : "none", "note": note,
+            "blockHours": blockHours
         ])
     }
 
@@ -2982,6 +2984,48 @@ final class AloAPIClient {
         let json = try await request("GET", "/api/admin/audit-log?limit=50\(before.map { "&before=\($0)" } ?? "")")
         let next = json.int("nextBefore")
         return (json.array("entries").map(AloModerationAuditEntry.init), next > 0 ? next : nil)
+    }
+
+    // MARK: Moderation team
+
+    /// The team, owner first, and the rights this account may hand out.
+    func loadModerationTeam() async throws -> (staff: [AloStaffMember], assignable: [String]) {
+        let json = try await request("GET", "/api/admin/moderators")
+        return (json.array("moderators").map(AloStaffMember.init), (json["assignablePermissions"] as? [String]) ?? [])
+    }
+
+    /// Anyone by name, @username or id, blocked accounts too, to appoint or restrict.
+    func searchStaffCandidates(_ query: String) async throws -> [AloStaffMember] {
+        let allowed = CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&+=?#"))
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
+        return try await request("GET", "/api/admin/users?query=\(encoded)").array("users").map(AloStaffMember.init)
+    }
+
+    func grantModerator(userId: Int, permissions: [String]) async throws {
+        _ = try await request("POST", "/api/admin/moderators", body: ["userId": userId, "permissions": permissions])
+    }
+
+    func updateModerator(userId: Int, permissions: [String]) async throws {
+        _ = try await request("PATCH", "/api/admin/moderators/\(userId)", body: ["permissions": permissions])
+    }
+
+    func revokeModerator(userId: Int) async throws {
+        _ = try await request("DELETE", "/api/admin/moderators/\(userId)")
+    }
+
+    /// "active", "blocked" (for `hours`) or "banned"; administrators only.
+    func setAccountStatus(userId: Int, status: String, hours: Int, reason: String) async throws -> AloStaffMember {
+        let json = try await request("POST", "/api/admin/users/\(userId)/account",
+                                     body: ["status": status, "hours": hours, "reason": reason])
+        return AloStaffMember(json.object("user"))
+    }
+
+    /// The owner appoints or removes an administrator.
+    func setAdministrator(userId: Int, granted: Bool) async throws -> AloStaffMember {
+        let json = granted
+            ? try await request("POST", "/api/admin/admins", body: ["userId": userId])
+            : try await request("DELETE", "/api/admin/admins/\(userId)")
+        return AloStaffMember(json.object("user"))
     }
 
     func appealModerationDecision(reportId: Int, text: String) async throws {

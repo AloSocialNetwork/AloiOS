@@ -88,10 +88,14 @@ struct AloCurrentUser: Identifiable, Equatable {
     let coverImageUrl: String
     /// What this account may do in the moderation panel: "reports", "moderation", "stats"…
     let adminCan: Set<String>
+    /// Where the account stands on the moderation ladder (owner, admin, lead moderator…).
+    let staffHierarchy: AloStaffHierarchy
 
     init(_ json: [String: Any]) {
         id = json.int("id")
         adminCan = Set(json.object("adminScope").boolMap("can").filter(\.value).map(\.key))
+        staffHierarchy = AloStaffHierarchy(rawValue: json.object("adminScope").string("hierarchy"))
+            ?? (adminCan.isEmpty ? .user : .moderator)
         name = json.string("name").ifBlank("Alo")
         username = json.string("username")
         email = json.string("email")
@@ -110,7 +114,8 @@ struct AloCurrentUser: Identifiable, Equatable {
             "id": id, "name": name, "username": username, "email": email, "bio": bio, "avatarUrl": avatarUrl,
             "verified": verified, "online": online, "registeredLabel": registeredLabel,
             "coverStyle": style, "coverImageUrl": imageURL,
-            "adminScope": ["can": Dictionary(uniqueKeysWithValues: adminCan.map { ($0, true) })]
+            "adminScope": ["can": Dictionary(uniqueKeysWithValues: adminCan.map { ($0, true) }),
+                           "hierarchy": staffHierarchy.rawValue]
         ])
     }
 }
