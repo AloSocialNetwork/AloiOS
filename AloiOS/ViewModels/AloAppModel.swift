@@ -284,6 +284,11 @@ final class AloAppModel: ObservableObject {
             Task { await installMessengerDesignFixture() }
             return
         }
+        // The sign-in screen for design references: the stored session is neither read nor touched.
+        if startupCacheLoader == nil, UserDefaults.standard.bool(forKey: "ALO_UI_AUTH_PREVIEW") {
+            phase = .auth
+            return
+        }
         if startupCacheLoader == nil, UserDefaults.standard.bool(forKey: "ALO_UI_CALL_PREVIEW") {
             phase = .app
             calls.installDebugPreviewCall()

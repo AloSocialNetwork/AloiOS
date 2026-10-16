@@ -340,7 +340,8 @@ struct AuthView: View {
         case .email:
             return app.email.trimmingCharacters(in: .whitespacesAndNewlines).contains("@")
         case .password:
-            return app.password.count >= 6
+            // The server refuses shorter passwords, so the button waits for eight.
+            return app.password.count >= 8
         case .code:
             return !app.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
@@ -549,7 +550,7 @@ private enum AuthStep: Hashable {
         case .email:
             return mode == .register ? "На нее придет код подтверждения." : "Мы найдем аккаунт и отправим код входа."
         case .password:
-            return mode == .register ? "Минимум 6 символов." : "После пароля подтвердим вход кодом из письма."
+            return mode == .register ? "Минимум 8 символов." : "После пароля подтвердим вход кодом из письма."
         case .code:
             return "Код отправлен на почту."
         }
