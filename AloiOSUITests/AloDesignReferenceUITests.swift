@@ -91,4 +91,26 @@ final class AloDesignReferenceUITests: XCTestCase {
         sleep(1)
         capture("ref-auth-register")
     }
+    func testSearchAndProfileReference() {
+        let app = launch("social-overview")
+        let searchTab = app.buttons["Поиск"].firstMatch
+        XCTAssertTrue(searchTab.waitForExistence(timeout: 15))
+        searchTab.tap()
+        XCTAssertTrue(app.textFields["alo.search.input"].waitForExistence(timeout: 6))
+        sleep(1)
+        capture("ref-search")
+        let input = app.textFields["alo.search.input"]
+        input.tap(); input.typeText("Алекс")
+        sleep(2)
+        capture("ref-search-results")
+        let result = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Александр")).firstMatch
+        if result.waitForExistence(timeout: 4) {
+            result.tap()
+            sleep(2)
+            capture("ref-user-profile")
+            app.swipeUp()
+            sleep(1)
+            capture("ref-user-profile-2")
+        }
+    }
 }
