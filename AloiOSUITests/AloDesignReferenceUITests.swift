@@ -113,4 +113,24 @@ final class AloDesignReferenceUITests: XCTestCase {
             capture("ref-user-profile-2")
         }
     }
+    func testGroupManagementReference() {
+        let app = launch("group-owner")
+        let info = app.buttons["alo.chat.info"]
+        XCTAssertTrue(info.waitForExistence(timeout: 15))
+        info.tap()
+        let more = app.buttons.matching(NSPredicate(format: "label == %@", "Ещё")).firstMatch
+        XCTAssertTrue(more.waitForExistence(timeout: 6))
+        more.tap()
+        let manage = app.buttons["Управление"].firstMatch
+        XCTAssertTrue(manage.waitForExistence(timeout: 4))
+        manage.tap()
+        sleep(2)
+        capture("ref-group-manage")
+        app.swipeUp()
+        sleep(1)
+        capture("ref-group-manage-2")
+        app.swipeUp()
+        sleep(1)
+        capture("ref-group-manage-3")
+    }
 }
