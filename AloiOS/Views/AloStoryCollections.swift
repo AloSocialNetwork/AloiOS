@@ -270,42 +270,113 @@ struct AloStoryThumbnail: View {
     }
 }
 
-// MARK: - Highlights on the profile
+// MARK: - Stories behind the profile avatar
 
-/// The row of highlight circles under a profile header. Your own starts with "Новое" and
-/// "Архив"; a circle plays its stories; a long press renames or deletes.
-struct AloStoryHighlightsRow: View {
+/// A profile avatar that holds the person's stories: a green ring when there is something to
+/// watch (bright for a live story, softer when only highlights are left), and a tap opens them.
+/// Your own avatar always opens them, so the archive stays one tap away.
+struct AloProfileStoryAvatar<Avatar: View>: View {
     @EnvironmentObject private var app: AloAppModel
     let user: AloEntitySummary
     let isOwn: Bool
+    @ViewBuilder let avatar: () -> Avatar
     @State private var highlights: [AloStoryHighlight] = []
+    @State private var isSheetPresented = false
+
+    static var ringWidth: CGFloat { 3 }
+    /// The ring sits this far outside the avatar, so the avatar keeps its size.
+    static var ringOutset: CGFloat { 5 }
+
+    private var active: AloStoryGroup? {
+        app.stories.first { $0.user.id == user.id && !$0.stories.isEmpty }
+    }
+
+    var body: some View {
+        let active = active
+        let ring: AloProfileStoryRing? = active.map { $0.hasUnseen || isOwn ? .live : .seen }
+            ?? (highlights.isEmpty ? nil : .seen)
+        Button {
+            isSheetPresented = true
+        } label: {
+            avatar()
+                .background {
+                    if ring != nil { Circle().fill(AloTheme.background).padding(-Self.ringOutset) }
+                }
+                .overlay {
+                    if let ring {
+                        Circle().strokeBorder(ring.style, lineWidth: Self.ringWidth).padding(-Self.ringOutset)
+                    }
+                }
+        }
+        .buttonStyle(AloFeedPressStyle())
+        .disabled(!isOwn && ring == nil)
+        .accessibilityLabel(ring == nil ? user.name : "Истории: \(user.name)")
+        .accessibilityIdentifier("alo.profile.stories")
+        .task(id: "\(user.id)-\(app.highlightsRevision)") {
+            highlights = (try? await app.highlights(userId: user.id)) ?? highlights
+        }
+        .sheet(isPresented: $isSheetPresented) {
+            AloProfileStoriesSheet(user: user, isOwn: isOwn, active: active, highlights: highlights)
+                .environmentObject(app)
+                .environment(\.aloAPIClient, app.api)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+                .presentationBackground(AloTheme.background)
+        }
+    }
+}
+
+enum AloProfileStoryRing {
+    case live, seen
+
+    var style: AnyShapeStyle {
+        let green = Color(red: 0.20, green: 0.78, blue: 0.35)
+        let mint = Color(red: 0.16, green: 0.82, blue: 0.64)
+        switch self {
+        case .live: return AnyShapeStyle(LinearGradient(colors: [green, mint], startPoint: .bottomLeading, endPoint: .topTrailing))
+        case .seen: return AnyShapeStyle(green.opacity(0.5))
+        }
+    }
+}
+
+/// What the avatar opens: the live story, the highlights ("Актуальное") as story cards, and on
+/// your own profile the archive, where new highlights are made.
+struct AloProfileStoriesSheet: View {
+    @EnvironmentObject private var app: AloAppModel
+    @Environment(\.dismiss) private var dismiss
+    let user: AloEntitySummary
+    let isOwn: Bool
+    let active: AloStoryGroup?
+    @State var highlights: [AloStoryHighlight]
+    @State private var watchingActive: AloStoryGroup?
     @State private var playing: AloHighlightPlayback?
     @State private var archiveMode: AloStoryArchiveScreen.Mode?
     @State private var renaming: AloStoryHighlight?
     @State private var newTitle = ""
 
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: 3)
+
     var body: some View {
-        Group {
-            if isOwn || !highlights.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(alignment: .top, spacing: 16) {
-                        if isOwn {
-                            tile(title: "Новое", symbol: "plus") { archiveMode = .newHighlight }
-                                .accessibilityIdentifier("alo.highlights.new")
-                            tile(title: "Архив", symbol: "archivebox") { archiveMode = .browse }
-                                .accessibilityIdentifier("alo.highlights.archive")
-                        }
-                        ForEach(highlights) { highlight in
-                            highlightCircle(highlight)
-                        }
-                    }
-                    .padding(.horizontal, AloSocialMetrics.inset)
-                    .padding(.vertical, 6)
+        VStack(spacing: 0) {
+            header
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    if let active { activeSection(active) }
+                    highlightsSection
+                    if isOwn { ownActions }
                 }
+                .padding(.horizontal, AloSocialMetrics.inset)
+                .padding(.top, 6)
+                .padding(.bottom, 24)
             }
         }
-        .task(id: "\(user.id)-\(app.highlightsRevision)") {
+        .task(id: app.highlightsRevision) {
             highlights = (try? await app.highlights(userId: user.id)) ?? highlights
+        }
+        .fullScreenCover(item: $watchingActive) { group in
+            AloStoryViewer(groups: [group], startGroupID: group.id)
+                .environmentObject(app)
+                .environment(\.aloAPIClient, app.api)
         }
         .fullScreenCover(item: $playing) { playback in
             AloStoryViewer(groups: [playback.group], startGroupID: playback.group.id, highlight: playback.highlight)
@@ -328,44 +399,98 @@ struct AloStoryHighlightsRow: View {
                 Task { try? await app.renameHighlight(highlight, title: title) }
             }
         }
-        .accessibilityIdentifier("alo.highlights")
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("alo.profile.stories.sheet")
     }
 
-    private func tile(title: String, symbol: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 6) {
-                Image(systemName: symbol)
-                    .font(.system(size: 20, weight: .semibold)).foregroundStyle(AloTheme.text)
-                    .frame(width: 62, height: 62)
-                    .background(AloTheme.surfaceRaised, in: Circle())
-                    .overlay(Circle().stroke(AloTheme.border, lineWidth: 1))
-                Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(AloTheme.text).lineLimit(1)
-            }
-            .frame(width: 70)
+    private var header: some View {
+        HStack(spacing: 12) {
+            AloChatCircleButton(systemImage: "xmark", label: "Закрыть") { dismiss() }
+            Text(isOwn ? "Мои истории" : "Истории")
+                .font(.system(size: 17, weight: .semibold)).foregroundStyle(AloTheme.text)
+                .frame(maxWidth: .infinity)
+            Color.clear.frame(width: 44, height: 44)
         }
-        .buttonStyle(AloFeedPressStyle())
-        .accessibilityLabel(title)
+        .padding(.horizontal, 12).padding(.top, 14).padding(.bottom, 4)
     }
 
-    private func highlightCircle(_ highlight: AloStoryHighlight) -> some View {
+    private func sectionTitle(_ text: String) -> some View {
+        Text(text).font(.system(size: 13, weight: .semibold)).foregroundStyle(AloTheme.muted)
+            .textCase(.uppercase)
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    private func activeSection(_ group: AloStoryGroup) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionTitle("Сейчас")
+            Button { watchingActive = group } label: {
+                HStack(spacing: 14) {
+                    if let first = group.stories.first {
+                        AloStoryThumbnail(story: first, cornerRadius: 12)
+                            .frame(width: 54, height: 72)
+                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(AloProfileStoryRing.live.style, lineWidth: 2))
+                    }
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(group.stories.count == 1 ? "История" : "\(group.stories.count) \(aloStoryCountNoun(group.stories.count))")
+                            .font(.system(size: 16, weight: .semibold)).foregroundStyle(AloTheme.text)
+                        Text("Исчезнет через сутки после публикации")
+                            .font(.system(size: 14)).foregroundStyle(AloTheme.muted)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "play.fill").font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(AloTheme.accent)
+                }
+                .padding(12)
+                .background(AloTheme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .buttonStyle(AloPressBounceButtonStyle(pressedScale: 0.98))
+            .accessibilityIdentifier("alo.profile.stories.live")
+        }
+    }
+
+    @ViewBuilder
+    private var highlightsSection: some View {
+        if !highlights.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                sectionTitle("Актуальное")
+                LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
+                    ForEach(highlights) { highlight in
+                        highlightCard(highlight)
+                    }
+                }
+            }
+        } else if isOwn {
+            VStack(alignment: .leading, spacing: 10) {
+                sectionTitle("Актуальное")
+                Text("Соберите истории из архива в подборки: они останутся в профиле и после того, как истории исчезнут из ленты.")
+                    .font(.system(size: 15)).foregroundStyle(AloTheme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func highlightCard(_ highlight: AloStoryHighlight) -> some View {
         Button {
             playing = AloHighlightPlayback(highlight: highlight, user: user)
         } label: {
-            VStack(spacing: 6) {
-                Group {
-                    if let cover = highlight.cover {
-                        AloStoryThumbnail(story: cover, cornerRadius: 31)
-                    } else {
-                        Circle().fill(AloTheme.surfaceRaised)
+            VStack(alignment: .leading, spacing: 6) {
+                Color.clear
+                    .aspectRatio(3 / 4, contentMode: .fit)
+                    .overlay {
+                        if let cover = highlight.cover {
+                            AloStoryThumbnail(story: cover, cornerRadius: 14)
+                        } else {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AloTheme.surfaceRaised)
+                        }
                     }
-                }
-                .frame(width: 58, height: 58)
-                .clipShape(Circle())
-                .padding(2)
-                .overlay(Circle().stroke(AloTheme.border, lineWidth: 1.5))
-                Text(highlight.title).font(.system(size: 12, weight: .medium)).foregroundStyle(AloTheme.text).lineLimit(1)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(AloTheme.border, lineWidth: 1))
+                Text(highlight.title).font(.system(size: 14, weight: .medium)).foregroundStyle(AloTheme.text)
+                    .lineLimit(1)
             }
-            .frame(width: 70)
+            .contentShape(Rectangle())
         }
         .buttonStyle(AloFeedPressStyle())
         .contextMenu {
@@ -382,6 +507,47 @@ struct AloStoryHighlightsRow: View {
         .accessibilityLabel("Актуальное: \(highlight.title)")
         .accessibilityIdentifier("alo.highlight.\(highlight.title)")
     }
+
+    private var ownActions: some View {
+        VStack(spacing: 0) {
+            actionRow("Архив историй", symbol: "archivebox", identifier: "alo.highlights.archive") {
+                archiveMode = .browse
+            }
+            Divider().overlay(AloTheme.border).padding(.leading, 56)
+            actionRow("Новое актуальное", symbol: "plus.circle", identifier: "alo.highlights.new") {
+                archiveMode = .newHighlight
+            }
+        }
+        .background(AloTheme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func actionRow(_ title: String, symbol: String, identifier: String,
+                           action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 14) {
+                Image(systemName: symbol).font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(AloTheme.accent).frame(width: 26)
+                Text(title).font(.system(size: 16)).foregroundStyle(AloTheme.text)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(AloTheme.muted.opacity(0.7))
+            }
+            .padding(.horizontal, 14)
+            .frame(minHeight: 50)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(AloFeedPressStyle())
+        .accessibilityIdentifier(identifier)
+    }
+}
+
+/// 2 истории, 5 историй.
+func aloStoryCountNoun(_ count: Int) -> String {
+    let tens = count % 100, units = count % 10
+    if (11...14).contains(tens) { return "историй" }
+    if units == 1 { return "история" }
+    if (2...4).contains(units) { return "истории" }
+    return "историй"
 }
 
 /// A highlight opened in the story viewer, its stories as one person's group.
@@ -404,7 +570,7 @@ struct AloHighlightPlayback: Identifiable {
 // MARK: - Archive
 
 /// Your stories, expired ones too, newest first. Tap one to watch it; "Выбрать" picks several to
-/// put into a highlight. Opened from "Новое", it starts in that picking mode.
+/// put into a highlight. Opened from "Новое актуальное", it starts in that picking mode.
 struct AloStoryArchiveScreen: View {
     enum Mode: String, Identifiable {
         case browse, newHighlight

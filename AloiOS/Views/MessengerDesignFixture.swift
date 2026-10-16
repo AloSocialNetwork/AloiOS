@@ -236,7 +236,7 @@ extension AloAppModel {
              "createdAt": "2026-09-10T10:00:00Z", "viewerLiked": true,
              "author": ["id": 990001, "name": "Тест интерфейса", "username": "ui_fixture"]]
         }
-        if ["feed-timeline", "feed-video", "notifications", "social-overview"].contains(content) {
+        if ["feed-timeline", "feed-video", "feed-albums", "notifications", "social-overview"].contains(content) {
             let sample = await AloMessengerSampleMedia.make()
             let authors: [[String: Any]] = [
                 ["id": 990001, "name": "makkarov", "username": "makkarov", "verified": true],
@@ -259,6 +259,16 @@ extension AloAppModel {
                 }
                 if content == "feed-video", index == 0 {
                     post["media"] = [["type": "video", "url": sample.video?.absoluteString ?? "", "posterUrl": sample.imageURI]]
+                }
+                if content == "feed-albums" {
+                    // Photos of every shape, sized by the server as real uploads are, for the album mosaic.
+                    let shapes: [[(Double, Double)]] = [
+                        [(1080, 1440)], [(1920, 1080)], [(1080, 1440), (1920, 1080)],
+                        [(1080, 1920), (1080, 1080), (1440, 1080)], [(1920, 1080), (1080, 1350), (1080, 1350), (1080, 1350)],
+                        [(1080, 1080), (1080, 1440), (1920, 1080), (1080, 1080), (1440, 1080)], [(3000, 1000)], [(1080, 1920)]]
+                    post["media"] = shapes[index % shapes.count].map { size in
+                        ["type": "image", "url": sample.imageURI, "posterUrl": sample.imageURI, "width": size.0, "height": size.1]
+                    }
                 }
                 return post
             }
@@ -296,15 +306,18 @@ extension AloAppModel {
         }
         let data = AloBootstrapData(["data": [
             "me": ["id": 990001, "name": "Тест интерфейса", "username": "ui_fixture",
+                   "bio": "Пишу про путешествия и мобильную разработку. Москва → Байкал → снова Москва.",
+                   "registeredLabel": "март 2025 г.", "coverStyle": "violet",
                    "adminScope": (UserDefaults.standard.bool(forKey: "ALO_UI_ADMIN")
                        ? ["can": ["reports": true, "moderation": true, "stats": true]] : [:]) as [String: Any]],
             "feed": ["popular": feedPosts, "subs": Array(feedPosts.suffix(3))],
-            "profile": ["posts": feedPosts],
+            "profile": ["posts": feedPosts,
+                        "stats": ["friendsCount": 128, "followersCount": 2_431, "followingCount": 312]],
             "messages": ["conversations": fixtureConversations, "items": items, "activePeerId": 990002],
             "search": ["users": [peer]], "notifications": notifications
         ]])
         bootstrap = data
-        if ["feed-timeline", "feed-video", "social-overview"].contains(content) {
+        if ["feed-timeline", "feed-video", "feed-albums", "social-overview", "own-profile"].contains(content) {
             let sample = await AloMessengerSampleMedia.make()
             let iso = ISO8601DateFormatter()
             // The signed-in fixture user's own story first, seen by four people.
@@ -338,7 +351,9 @@ extension AloAppModel {
                           "createdAt": iso.string(from: Date().addingTimeInterval(-Double(index + 1) * 86_400 * 2)),
                           "expiresAt": iso.string(from: Date().addingTimeInterval(-Double(index + 1) * 86_400 * 2 + 86_400))])
             }
-            previewHighlights = [Self.previewHighlight(id: 1, title: "Лето", stories: Array(previewArchive.prefix(2)))]
+            previewHighlights = [Self.previewHighlight(id: 1, title: "Лето", stories: Array(previewArchive.prefix(2))),
+                                 Self.previewHighlight(id: 2, title: "Байкал", stories: [previewArchive[3]]),
+                                 Self.previewHighlight(id: 3, title: "Вечер", stories: [previewArchive[2]])]
             previewDrafts = [
                 AloPostDraft(id: 990901, body: "Черновик про поездку на Байкал: лёд, ветер и самый прозрачный…",
                              media: [AloMediaItem(type: "image", url: sample.imageURI)],
@@ -380,7 +395,7 @@ extension AloAppModel {
         if UserDefaults.standard.bool(forKey: "ALO_UI_GROUP_CALL_PREVIEW") {
             calls.groupCall.installDebugPreview(meId: 990001)
         }
-        activeTab = content == "notifications" ? .alerts : (["feed-surface", "feed-timeline", "feed-video", "social-overview"].contains(content) ? .feed : (content == "own-profile" ? .profile : .messages))
+        activeTab = content == "notifications" ? .alerts : (["feed-surface", "feed-timeline", "feed-video", "feed-albums", "social-overview"].contains(content) ? .feed : (content == "own-profile" ? .profile : .messages))
         activeConversation = activeTab == .messages && content != "chat-list"
             ? data.conversations.first.map { AloConversationDetail(summary: $0, items: data.activeMessages) }
             : nil

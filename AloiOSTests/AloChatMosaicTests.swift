@@ -97,4 +97,54 @@ final class AloChatMosaicTests: XCTestCase {
         let raw = try String(contentsOf: file, encoding: .utf8)
         XCTAssertFalse(raw.contains("secret-name"), "only hashes of the keys are stored")
     }
+
+    // MARK: Post media across the column
+
+    func testPostPhotoKeepsPhonePortraitAndWideProportions() {
+        XCTAssertEqual(AloPostMediaSizing.ratio(for: dims(1080, 1440)), 0.75, accuracy: 0.001, "a 3:4 phone photo is not cropped")
+        XCTAssertEqual(AloPostMediaSizing.ratio(for: dims(1920, 1080)), 1920.0 / 1080.0, accuracy: 0.001, "16:9 stays 16:9")
+        XCTAssertEqual(AloPostMediaSizing.ratio(for: dims(1080, 1920)), 0.75, accuracy: 0.001, "9:16 stops at 4/3 of the width")
+        XCTAssertEqual(AloPostMediaSizing.ratio(for: dims(3000, 1000)), 2, accuracy: 0.001)
+        XCTAssertEqual(AloPostMediaSizing.ratio(for: nil), 0.8, accuracy: 0.001)
+    }
+
+    func testPostAlbumsSpanTheColumnWithoutOverlaps() {
+        let width: CGFloat = 361
+        let albums: [[AloMediaDimensions?]] = [
+            [dims(1080, 1440), dims(1920, 1080)],
+            [dims(1920, 1080), dims(1920, 1080)],
+            [dims(1080, 1920), dims(1080, 1080), dims(1440, 1080)],
+            [dims(1440, 1080), dims(1080, 1080), dims(1080, 1440)],
+            [dims(1920, 1080), dims(1080, 1350), dims(1080, 1350), dims(1080, 1350)],
+            [dims(1080, 1440), dims(1080, 1080), dims(1080, 1080), dims(1080, 1080)],
+            [dims(1080, 1080), dims(1080, 1440), dims(1920, 1080), dims(1080, 1080), dims(1440, 1080)],
+            [dims(3000, 1000), dims(1080, 1080)],
+            Array(repeating: dims(1080, 1080), count: 10),
+            [nil, nil, nil]
+        ]
+        for album in albums {
+            let result = AloPostMediaSizing.album(album, width: width)
+            XCTAssertEqual(result.size.width, width, "\(album.count) items fill the column")
+            XCTAssertEqual(result.frames.count, album.count)
+            XCTAssertEqual(result.frames.map(\.maxX).max() ?? 0, width, accuracy: 1, "the album reaches the right edge")
+            for frame in result.frames {
+                XCTAssertGreaterThanOrEqual(frame.minX, 0)
+                XCTAssertLessThanOrEqual(frame.maxX, width + 0.5)
+                XCTAssertGreaterThan(frame.width, 40)
+                XCTAssertGreaterThan(frame.height, 40)
+            }
+            for first in result.frames.indices {
+                for second in result.frames.indices where second > first {
+                    XCTAssertFalse(result.frames[first].insetBy(dx: 0.5, dy: 0.5)
+                        .intersects(result.frames[second].insetBy(dx: 0.5, dy: 0.5)), "tiles never overlap")
+                }
+            }
+        }
+    }
+
+    func testChatAlbumsKeepTheirCompactBox() {
+        // The chat bubble still uses Telegram's 300 × 380 box with 1 pt gaps.
+        let result = AloChatMosaic.layout(dimensions: [dims(1080, 1440), dims(1080, 1440)], availableWidth: 351)
+        XCTAssertEqual(result.size, CGSize(width: 300, height: 199))
+    }
 }

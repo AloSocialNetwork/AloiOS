@@ -113,6 +113,34 @@ final class AloDesignReferenceUITests: XCTestCase {
             capture("ref-user-profile-2")
         }
     }
+    /// Your profile with the story ring on the avatar, the stories it opens, and the pinned switcher.
+    func testOwnProfileStoriesReference() {
+        let app = launch("own-profile")
+        let avatar = app.buttons["alo.profile.stories"]
+        XCTAssertTrue(avatar.waitForExistence(timeout: 15))
+        sleep(2)
+        capture("ref-profile")
+        avatar.tap()
+        XCTAssertTrue(app.buttons["alo.highlights.archive"].waitForExistence(timeout: 6))
+        sleep(1)
+        capture("ref-profile-stories")
+        app.buttons["Закрыть"].firstMatch.tap()
+        XCTAssertTrue(avatar.waitForExistence(timeout: 4))
+        app.scrollViews["alo.profile.scroll"].swipeUp()
+        sleep(1)
+        capture("ref-profile-scrolled")
+    }
+    /// Post photos of every shape: single portrait and wide photos, albums of 2–5 and a panorama.
+    func testFeedAlbumsReference() {
+        let app = launch("feed-albums")
+        XCTAssertTrue(app.buttons["alo.post.like.990400"].waitForExistence(timeout: 15))
+        sleep(2)
+        for page in 1...6 {
+            capture("albums-\(page)")
+            app.scrollViews["alo.feed.scroll"].swipeUp(velocity: .slow)
+            sleep(1)
+        }
+    }
     func testGroupManagementReference() {
         let app = launch("group-owner")
         let info = app.buttons["alo.chat.info"]

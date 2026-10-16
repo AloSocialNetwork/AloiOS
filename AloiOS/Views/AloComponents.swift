@@ -563,8 +563,12 @@ struct AloPostMediaGrid: View {
     // Only the API client: a grid is in every post, it must not follow every app change.
     @Environment(\.aloAPIClient) private var api
     @State private var selectedMedia: AloMediaItem?
+    /// Bumped when a photo without a server size finishes loading, so the layout takes its real
+    /// proportions instead of the 4:5 guess.
+    @State private var sizeRevision = 0
 
     var body: some View {
+        let _ = sizeRevision
         Group {
             switch media.count {
             case 0:
@@ -573,33 +577,12 @@ struct AloPostMediaGrid: View {
                 mediaCell(media[0])
                     .frame(maxWidth: .infinity)
                     .aspectRatio(AloPostMediaSizing.ratio(for: knownDimensions(media[0])), contentMode: .fit)
-            case 2:
-                HStack(spacing: 2) {
-                    mediaCell(media[0])
-                        .frame(maxWidth: .infinity)
-                    mediaCell(media[1])
-                        .frame(maxWidth: .infinity)
-                }
-                .aspectRatio(1.6, contentMode: .fit)
-            case 3:
-                HStack(spacing: 2) {
-                    mediaCell(media[0])
-                        .frame(maxWidth: .infinity)
-                    VStack(spacing: 2) {
-                        mediaCell(media[1])
-                            .frame(maxWidth: .infinity)
-                        mediaCell(media[2])
-                            .frame(maxWidth: .infinity)
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-                .aspectRatio(1, contentMode: .fit)
             default:
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 2), GridItem(.flexible(), spacing: 2)], spacing: 2) {
-                    ForEach(media.prefix(4)) { item in
+                // Telegram's album mosaic: every photo keeps close to its own proportions.
+                let shown = Array(media.prefix(AloChatMosaic.maximumItems))
+                AloPostAlbumLayout(dimensions: shown.map(knownDimensions)) {
+                    ForEach(shown) { item in
                         mediaCell(item)
-                            .frame(maxWidth: .infinity)
-                            .aspectRatio(1, contentMode: .fit)
                     }
                 }
             }
@@ -637,6 +620,9 @@ struct AloPostMediaGrid: View {
                                 .clipped()
                                 .accessibilityLabel("Изображение в посте")
                                 .accessibilityIdentifier("alo.post.media.loaded")
+                                .onAppear {
+                                    if item.dimensions == nil { sizeRevision &+= 1 }
+                                }
                         case .failure:
                             Image(systemName: "photo").foregroundStyle(AloTheme.muted)
                                 .accessibilityLabel("Не удалось загрузить изображение")
@@ -662,6 +648,28 @@ struct AloPostMediaGrid: View {
             }
         }
         .clipped()
+    }
+}
+
+/// Places an album's cells on Telegram's mosaic for the offered width.
+struct AloPostAlbumLayout: Layout {
+    let dimensions: [AloMediaDimensions?]
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        AloPostMediaSizing.album(dimensions, width: proposal.replacingUnspecifiedDimensions().width).size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let frames = AloPostMediaSizing.album(dimensions, width: bounds.width).frames
+        for (index, subview) in subviews.enumerated() {
+            guard index < frames.count else {
+                subview.place(at: bounds.origin, proposal: .zero)
+                continue
+            }
+            let frame = frames[index]
+            subview.place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
+                          proposal: ProposedViewSize(frame.size))
+        }
     }
 }
 
