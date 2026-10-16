@@ -33,12 +33,6 @@ struct ProfileView: View {
                     .padding(.top, AloTheme.spacingSmall)
                     .padding(.bottom, AloTheme.spacingSmall)
 
-                    AloStoryHighlightsRow(
-                        user: AloEntitySummary(["id": data.me.id, "name": data.me.name, "username": data.me.username,
-                                                "avatarEmoji": data.me.avatarUrl]),
-                        isOwn: true
-                    )
-
                     creatorDashboardEntry
                         .padding(.horizontal, AloSocialMetrics.inset)
                         .padding(.bottom, AloTheme.spacingSmall)
@@ -75,6 +69,17 @@ struct ProfileView: View {
             .padding(.bottom, AloSocialMetrics.bottomClearance)
         }
         .accessibilityIdentifier("alo.profile.scroll")
+        // The pinned "Посты / Нравится" switcher would otherwise leave posts sliding under the clock.
+        .overlay(alignment: .top) {
+            // Laid out below the status bar, the shade reaches up under it by the safe area.
+            GeometryReader { proxy in
+                AloSocialTitleShade()
+                    .frame(height: proxy.safeAreaInsets.top + AloTheme.spacingSmall)
+                    .offset(y: -proxy.safeAreaInsets.top)
+            }
+            .frame(height: AloTheme.spacingSmall)
+            .allowsHitTesting(false)
+        }
         .background(AloTheme.background)
         .refreshable { await app.loadBootstrap() }
         .fullScreenCover(isPresented: $isPalettePresented) {
@@ -192,14 +197,6 @@ struct ProfileDetailView: View {
                                 .padding(.horizontal, AloTheme.pageInset)
                                 .padding(.top, AloTheme.spacingSmall)
                         }
-                    }
-
-                    if !isBlocked {
-                        AloStoryHighlightsRow(
-                            user: AloEntitySummary(["id": profile.user.id, "name": profile.user.name,
-                                                    "username": profile.user.username, "avatarEmoji": profile.user.avatarUrl]),
-                            isOwn: isOwnProfile
-                        )
                     }
 
                     if profile.permissions.isPrivate {
@@ -806,27 +803,37 @@ private struct ProfileHeroCard: View {
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    @ViewBuilder
+    /// The avatar holds the stories (green ring, tap to open); on your own profile the camera
+    /// badge changes the photo.
     private func avatarView(size: CGFloat) -> some View {
-        if showsOwnerControls, avatarSelection != nil {
-            Button {
-                isAvatarOptionsPresented = true
-            } label: {
-                AloAvatar(name: user.name, url: user.avatarUrl, size: size, colorSeed: String(user.id))
-                    .overlay(alignment: .bottomTrailing) {
-                        Image(systemName: "camera.fill")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 30, height: 30)
-                            .background(AloTheme.accent)
-                            .clipShape(Circle())
-                            .overlay(Circle().stroke(AloTheme.surface, lineWidth: 3))
-                            .offset(x: 2, y: 2)
-                    }
-            }
-            .buttonStyle(.plain)
-        } else {
+        AloProfileStoryAvatar(
+            user: AloEntitySummary(["id": user.id, "name": user.name, "username": user.username,
+                                    "avatarEmoji": user.avatarUrl, "verified": user.verified]),
+            isOwn: showsOwnerControls
+        ) {
             AloAvatar(name: user.name, url: user.avatarUrl, size: size, colorSeed: String(user.id))
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if showsOwnerControls, avatarSelection != nil {
+                Button {
+                    isAvatarOptionsPresented = true
+                } label: {
+                    Image(systemName: "camera.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 30, height: 30)
+                        .background(AloTheme.accent)
+                        .clipShape(Circle())
+                        .overlay(Circle().stroke(AloTheme.background, lineWidth: 3))
+                        // A full touch target around the small badge.
+                        .frame(width: 44, height: 44)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .offset(x: 9, y: 9)
+                .accessibilityLabel("Изменить фото профиля")
+                .accessibilityIdentifier("alo.profile.avatar.photo")
+            }
         }
     }
 

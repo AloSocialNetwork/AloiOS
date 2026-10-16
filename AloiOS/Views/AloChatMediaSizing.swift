@@ -73,13 +73,18 @@ enum AloChatMosaic {
     private static let minHeight: CGFloat = 81
 
     static func layout(dimensions: [AloMediaDimensions?], availableWidth: CGFloat) -> (frames: [CGRect], size: CGSize) {
+        // `maxDimensions.fittedToWidthOrSmaller`: a narrow screen shrinks both sides.
+        let W = min(AloChatMediaSizing.maximumWidth, max(1, availableWidth))
+        return layout(dimensions: dimensions, width: W, height: 380 * W / AloChatMediaSizing.maximumWidth, spacing: spacing)
+    }
+
+    /// The same mosaic in any box: a post album uses the full column width.
+    static func layout(dimensions: [AloMediaDimensions?], width W: CGFloat, height H: CGFloat,
+                       spacing s: CGFloat) -> (frames: [CGRect], size: CGSize) {
         let ratios = dimensions.prefix(maximumItems).map { value -> CGFloat in
             guard let value else { return 1 }
             return min(10, max(0.1, CGFloat(value.width / value.height)))
         }
-        // `maxDimensions.fittedToWidthOrSmaller`: a narrow screen shrinks both sides.
-        let W = min(AloChatMediaSizing.maximumWidth, max(1, availableWidth))
-        let H = 380 * W / AloChatMediaSizing.maximumWidth
         guard ratios.count >= 2 else {
             let height = W / (ratios.first ?? 1)
             return ([CGRect(x: 0, y: 0, width: W, height: height)], CGSize(width: W, height: height))
@@ -88,16 +93,15 @@ enum AloChatMosaic {
         let average = (1 + ratios.reduce(0, +)) / CGFloat(ratios.count)
         let frames: [CGRect]
         if ratios.count <= 4, !ratios.contains(where: { $0 > 2 }) {
-            frames = special(ratios, average: average, W: W, H: H)
+            frames = special(ratios, average: average, W: W, H: H, s: s)
         } else {
-            frames = general(ratios, average: average, W: W)
+            frames = general(ratios, average: average, W: W, s: s)
         }
         let size = CGSize(width: (frames.map(\.maxX).max() ?? W).rounded(), height: (frames.map(\.maxY).max() ?? H).rounded())
         return (frames, size)
     }
 
-    private static func special(_ ratios: [CGFloat], average: CGFloat, W: CGFloat, H: CGFloat) -> [CGRect] {
-        let s = spacing
+    private static func special(_ ratios: [CGFloat], average: CGFloat, W: CGFloat, H: CGFloat, s: CGFloat) -> [CGRect] {
         let proportions = ratios.map { $0 > 1.2 ? "w" : $0 < 0.8 ? "n" : "q" }.joined()
         switch ratios.count {
         case 2:
@@ -160,8 +164,7 @@ enum AloChatMosaic {
 
     /// Telegram's search over 2-, 3- and 4-row splits: rows fill the width, the total height
     /// should be near 4/3 of the width, and rows that shrink downwards or are too low lose.
-    private static func general(_ ratios: [CGFloat], average: CGFloat, W: CGFloat) -> [CGRect] {
-        let s = spacing
+    private static func general(_ ratios: [CGFloat], average: CGFloat, W: CGFloat, s: CGFloat) -> [CGRect] {
         let cropped = ratios.map { ratio -> CGFloat in
             let value = average > 1.1 ? max(1, ratio) : min(1, ratio)
             return max(0.66667, min(1.7, value))
@@ -259,16 +262,35 @@ enum AloChatMediaSession {
     static func reset() { resolved.removeAll() }
 }
 
-/// Post media in the feed, with Telegram's limits: portrait media is at most 380 pt tall
-/// for 300 pt of width (ratio 0.79), landscape is allowed up to 1.6. Unknown size
-/// uses a tall 4:5 frame, so photos are never shown as a 16:9 strip.
+/// Post media across the full column, with Telegram's limits: a photo is at most 4/3 of the
+/// width tall (`maxHeight = width / 3 * 4`), so a 3:4 phone photo shows whole, and a landscape
+/// one keeps its proportions up to 2:1. Unknown size uses a tall 4:5 frame, so photos are never
+/// shown as a 16:9 strip.
 enum AloPostMediaSizing {
     static let defaultRatio: CGFloat = 4.0 / 5.0
-    static let minimumRatio: CGFloat = 0.79
-    static let maximumRatio: CGFloat = 1.6
+    static let minimumRatio: CGFloat = 3.0 / 4.0
+    static let maximumRatio: CGFloat = 2.0
+    /// Albums: Telegram's chat box proportions (300 × 380), stretched to the column.
+    static let albumHeightRatio: CGFloat = 380.0 / 300.0
+    static let albumSpacing: CGFloat = 2
 
     static func ratio(for dimensions: AloMediaDimensions?) -> CGFloat {
-        guard let dimensions else { return defaultRatio }
+        guard let dimensions, dimensions.width > 0, dimensions.height > 0 else { return defaultRatio }
         return min(maximumRatio, max(minimumRatio, CGFloat(dimensions.width / dimensions.height)))
+    }
+
+    /// Telegram's album mosaic across `width`; a scheme narrower or wider than the column is
+    /// scaled to it, so every album lines up with the text above it.
+    static func album(_ dimensions: [AloMediaDimensions?], width: CGFloat) -> (frames: [CGRect], size: CGSize) {
+        let width = max(1, width)
+        let layout = AloChatMosaic.layout(dimensions: dimensions, width: width,
+                                          height: (width * albumHeightRatio).rounded(), spacing: albumSpacing)
+        guard layout.size.width > 0, abs(layout.size.width - width) > 0.5 else { return layout }
+        let scale = width / layout.size.width
+        let frames = layout.frames.map { frame in
+            CGRect(x: (frame.minX * scale).rounded(), y: frame.minY,
+                   width: (frame.maxX * scale).rounded() - (frame.minX * scale).rounded(), height: frame.height)
+        }
+        return (frames, CGSize(width: width, height: layout.size.height))
     }
 }

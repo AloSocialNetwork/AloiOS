@@ -891,8 +891,11 @@ final class AloSocialConsistencyUITests: XCTestCase {
             .waitForExistence(timeout: 10), "published offline: the editor reports the upload")
         app.buttons["Закрыть редактор истории"].tap()
 
-        // Highlights on your profile.
+        // Highlights live behind your avatar: its ring opens your stories.
         app.buttons["Профиль"].firstMatch.tap()
+        let avatar = app.buttons["alo.profile.stories"]
+        XCTAssertTrue(avatar.waitForExistence(timeout: 6))
+        avatar.tap()
         let summer = app.buttons["alo.highlight.Лето"]
         XCTAssertTrue(summer.waitForExistence(timeout: 6))
         XCTAssertTrue(app.buttons["alo.highlights.new"].exists)
@@ -907,7 +910,7 @@ final class AloSocialConsistencyUITests: XCTestCase {
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.5)).tap()
         let close = app.buttons["alo.story.viewer.close"]
         if close.waitForExistence(timeout: 2) { close.tap() }
-        XCTAssertTrue(app.buttons["alo.highlights.archive"].waitForExistence(timeout: 8), "back on the profile")
+        XCTAssertTrue(app.buttons["alo.highlights.archive"].waitForExistence(timeout: 8), "back on your stories")
 
         // The archive: choose two stories for a new highlight.
         app.buttons["alo.highlights.archive"].tap()
@@ -926,7 +929,7 @@ final class AloSocialConsistencyUITests: XCTestCase {
         title.tap()
         title.typeText("Море")
         app.buttons["alo.highlight.create"].tap()
-        XCTAssertTrue(app.buttons["alo.highlight.Море"].waitForExistence(timeout: 6), "the new highlight is on the profile")
+        XCTAssertTrue(app.buttons["alo.highlight.Море"].waitForExistence(timeout: 6), "the new highlight is among your stories")
         Thread.sleep(forTimeInterval: 0.6)
         capture("au-8-new-highlight")
     }
