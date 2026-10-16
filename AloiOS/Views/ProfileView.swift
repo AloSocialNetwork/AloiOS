@@ -1865,6 +1865,11 @@ struct ProfileEditSheet: View {
         case "session_revoked": return "Сеанс завершён"
         case "sessions_revoked_others": return "Завершены другие сеансы"
         case "session_revoked_current": return "Выполнен выход с устройства"
+        case "login_failed": return "Неверный пароль при входе"
+        case "login_attack_alert": return "Попытка подобрать пароль"
+        case "password_reset": return "Пароль восстановлен по почте"
+        case "login_requires_verification": return "Запрошен код входа"
+        case "session_invalidated": return "Сеанс завершён: сменилось устройство"
         default: return "Событие безопасности"
         }
     }
@@ -1872,7 +1877,8 @@ struct ProfileEditSheet: View {
     private func securityEventIcon(_ event: AloSecurityEvent) -> String {
         switch event.eventType {
         case "login_verified": return "arrow.right.circle.fill"
-        case "password_changed": return "key.fill"
+        case "password_changed", "password_reset": return "key.fill"
+        case "login_failed", "login_attack_alert", "session_invalidated": return "exclamationmark.shield.fill"
         case "session_revoked", "sessions_revoked_others", "session_revoked_current": return "rectangle.portrait.and.arrow.right"
         default: return "checkmark.shield.fill"
         }
