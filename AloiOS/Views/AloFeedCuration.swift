@@ -529,7 +529,7 @@ struct AloCreatorStatsScreen: View {
             .opacity(isLoading && stats != nil ? 0.6 : 1)
         }
         .background(AloTheme.background.ignoresSafeArea())
-        .navigationTitle("Статистика")
+        .navigationTitle("Панель автора")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
         .task(id: days) { await load() }

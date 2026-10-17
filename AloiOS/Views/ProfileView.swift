@@ -7,7 +7,6 @@ struct ProfileView: View {
     @State private var selectedSection: ProfileSection = .posts
     @State private var isPalettePresented = false
     @State private var isEditPresented = false
-    @State private var isStatsPresented = false
     @State private var selectedAvatarItem: PhotosPickerItem?
     @State private var avatarCrop: AloAvatarCropRequest?
 
@@ -32,10 +31,6 @@ struct ProfileView: View {
                     .padding(.horizontal, AloSocialMetrics.inset)
                     .padding(.top, AloTheme.spacingSmall)
                     .padding(.bottom, AloTheme.spacingSmall)
-
-                    creatorDashboardEntry
-                        .padding(.horizontal, AloSocialMetrics.inset)
-                        .padding(.bottom, AloTheme.spacingSmall)
 
                     Section {
                         let posts = selectedSection == .posts ? data.profilePosts : ownLikedPosts
@@ -93,9 +88,6 @@ struct ProfileView: View {
         .navigationDestination(isPresented: $isEditPresented) {
             AloSocialSettingsSheet().environmentObject(app)
         }
-        .navigationDestination(isPresented: $isStatsPresented) {
-            AloCreatorStatsScreen().environmentObject(app)
-        }
         .onChange(of: selectedAvatarItem) { _, item in
             guard let item else { return }
             Task {
@@ -115,30 +107,6 @@ struct ProfileView: View {
                 app.updateProfileAvatar(data: jpeg)
             }
         }
-    }
-
-    /// Instagram's "Панель автора": your posts' reach, one tap from the profile.
-    private var creatorDashboardEntry: some View {
-        Button { isStatsPresented = true } label: {
-            HStack(spacing: 12) {
-                Image(systemName: "chart.bar.xaxis")
-                    .font(.system(size: 16, weight: .semibold)).foregroundStyle(.white)
-                    .frame(width: 34, height: 34)
-                    .background(LinearGradient(colors: [AloTheme.accent, Color(red: 0.42, green: 0.27, blue: 0.93)],
-                                               startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Панель автора").font(.system(size: 16, weight: .semibold)).foregroundStyle(AloTheme.text)
-                    Text("Просмотры, реакции и подписчики").font(.system(size: 13)).foregroundStyle(AloTheme.muted)
-                }
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(AloTheme.muted.opacity(0.7))
-            }
-            .padding(.horizontal, 12).padding(.vertical, 10)
-            .background(AloTheme.surfaceRaised.opacity(0.6), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(AloPressBounceButtonStyle(pressedScale: 0.98))
-        .accessibilityIdentifier("alo.profile.creator-stats")
     }
 
     private var ownLikedPosts: [AloPost] {
@@ -908,6 +876,7 @@ enum ProfileSettingsPage: String, CaseIterable, Identifiable {
     case security
     case passwordChange
     case moderation
+    case creatorStats
 
     var id: String { rawValue }
 
@@ -921,6 +890,7 @@ enum ProfileSettingsPage: String, CaseIterable, Identifiable {
         case .security: return "Безопасность"
         case .passwordChange: return "Смена пароля"
         case .moderation: return "Модерация"
+        case .creatorStats: return "Панель автора"
         }
     }
 
@@ -934,6 +904,7 @@ enum ProfileSettingsPage: String, CaseIterable, Identifiable {
         case .security: return "Пароль, устройства и защита аккаунта"
         case .passwordChange: return "Введите текущий и новый пароль"
         case .moderation: return "Жалобы, обжалования, журнал и реклама"
+        case .creatorStats: return "Просмотры, реакции и подписчики"
         }
     }
 }
@@ -1005,6 +976,8 @@ struct ProfileEditSheet: View {
             .navigationDestination(item: $openedPage) { page in
                 if page == .moderation {
                     AloModerationPanel()
+                } else if page == .creatorStats {
+                    AloCreatorStatsScreen().environmentObject(app)
                 } else {
                     settingsScreen(page)
                         .navigationDestination(isPresented: $isPasswordChangeOpen) { settingsScreen(.passwordChange) }
@@ -1141,7 +1114,7 @@ struct ProfileEditSheet: View {
             securityPage
         case .passwordChange:
             passwordChangePage
-        case .moderation:
+        case .moderation, .creatorStats:
             EmptyView()
         }
     }
@@ -1156,6 +1129,10 @@ struct ProfileEditSheet: View {
                 settingsNavRow(title: "Уведомления", subtitle: "", systemName: "bell", target: .notifications, showsIconTile: false, showsChevron: false)
                 settingDivider
                 settingsNavRow(title: "Бизнес-профиль", subtitle: "", systemName: "briefcase", target: .business, showsIconTile: false, showsChevron: false)
+                settingDivider
+                // «Панель автора» lives here rather than on the profile, as on Android.
+                settingsNavRow(title: "Панель автора", subtitle: "", systemName: "chart.bar.xaxis", target: .creatorStats, showsIconTile: false, showsChevron: false)
+                    .accessibilityIdentifier("alo.settings.creator-stats")
                 // Admins and moderators only.
                 if !(app.bootstrap?.me.adminCan.isEmpty ?? true) {
                     settingDivider
@@ -1554,6 +1531,7 @@ struct ProfileEditSheet: View {
         case .security: tint = Color(red: 1.0, green: 0.62, blue: 0.06)
         case .passwordChange: tint = AloTheme.accent
         case .moderation: tint = AloTheme.destructive
+        case .creatorStats: tint = AloTheme.accent
         case .root: tint = AloTheme.accent
         }
         return Button {
