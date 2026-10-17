@@ -1039,13 +1039,16 @@ final class AloSocialConsistencyUITests: XCTestCase {
         keep.tap()
         XCTAssertTrue(create.waitForExistence(timeout: 4))
 
-        // The creator panel from your profile.
+        // The creator panel lives in the settings, not on the profile.
         app.buttons["Профиль"].firstMatch.tap()
-        let panel = app.buttons["alo.profile.creator-stats"]
-        if !panel.waitForExistence(timeout: 6) { capture("fc-debug-profile"); print("PROFILEDBG", app.debugDescription) }
+        XCTAssertTrue(app.buttons["alo.profile.settings"].waitForExistence(timeout: 6))
+        XCTAssertFalse(app.buttons["alo.profile.creator-stats"].exists)
+        app.buttons["alo.profile.settings"].tap()
+        let panel = app.buttons["alo.settings.creator-stats"]
+        if !panel.waitForExistence(timeout: 6) { capture("fc-debug-settings"); print("SETTINGSDBG", app.debugDescription) }
         XCTAssertTrue(panel.exists)
         Thread.sleep(forTimeInterval: 0.4)
-        capture("fc-13-profile-panel")
+        capture("fc-13-settings-panel")
         panel.tap()
         XCTAssertTrue(any["alo.stats.overview"].waitForExistence(timeout: 6))
         Thread.sleep(forTimeInterval: 0.8)
