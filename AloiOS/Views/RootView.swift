@@ -75,6 +75,9 @@ struct RootView: View {
             AloStoryExpiredSheet(notice: notice)
                 .environmentObject(app)
         }
+        .sheet(item: $app.pushFriendRequest) { item in
+            AloPushFriendRequestSheet(item: item).environmentObject(app)
+        }
         .animation(.spring(response: 0.36, dampingFraction: 0.86), value: app.phaseKey)
         .animation(.spring(response: 0.32, dampingFraction: 0.88), value: app.humanChallenge?.id)
         // A connection notice must never reserve layout space. In particular it
@@ -95,10 +98,12 @@ struct RootView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background {
+                app.applicationDidEnterBackground()
                 app.suspendConnectionRefresh()
                 backgroundCallID = app.calls.activeCall?.id
                 backgroundGroupCallID = app.calls.groupCall.activeCall?.id
             } else if phase == .active {
+                app.applicationDidBecomeActive()
                 app.refreshConnectionIfNeeded()
                 // Returning via the system's ongoing-call indicator should
                 // show that same call, not leave it hidden in the inbox.

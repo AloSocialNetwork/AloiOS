@@ -29,8 +29,8 @@ final class AloNotificationsUITests: XCTestCase {
         wait(for: [removedLike], timeout: 3)
         app.buttons["alo.alerts.settings"].tap()
         XCTAssertTrue(app.staticTexts["Основные"].waitForExistence(timeout: 4))
-        app.buttons["Назад к настройкам"].tap()
-        app.buttons["Закрыть настройки"].tap()
+        app.buttons["alo.settings.back"].tap()
+        app.buttons["alo.settings.back"].tap()
         XCTAssertTrue(comment.waitForExistence(timeout: 4))
     }
 }

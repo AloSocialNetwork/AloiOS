@@ -7,7 +7,10 @@ final class AloSecureOutboxStore {
 
     private let keychainService = "alo.ios.secure-outbox"
     private let keychainAccount = "outbox-key.v1"
-    private let queueFileName = "queue-v1.bin"
+    enum Collection: String {
+        case messages = "queue-v1.bin", drafts = "drafts-v1.bin"
+        case publications = "publications-v1.bin", publicationStaging = "publication-staging-v1.bin"
+    }
     private let persistenceQueue = DispatchQueue(label: "alo.secure-outbox.persistence", qos: .utility)
     private let keyLock = NSLock()
 
@@ -19,7 +22,7 @@ final class AloSecureOutboxStore {
     /// Enqueue synchronously so snapshots cannot overtake one another. The
     /// receipt is awaited before network delivery, not before rendering the
     /// optimistic message. Encryption/copies/JSON and disk writes stay off UI.
-    func scheduleSave(records: [[String: Any]], attachments: [AttachmentWrite], ownerUserId: Int) -> Task<Void, Error> {
+    func scheduleSave(records: [[String: Any]], attachments: [AttachmentWrite], ownerUserId: Int, collection: Collection = .messages) -> Task<Void, Error> {
         let (stream, continuation) = AsyncThrowingStream<Void, Error>.makeStream()
         persistenceQueue.async { [self] in
             do {
@@ -36,7 +39,23 @@ final class AloSecureOutboxStore {
                         }
                     }
                 }
-                try save(records: records, ownerUserId: ownerUserId)
+                var snapshot = records
+                if collection == .publicationStaging, !records.isEmpty {
+                    // Enqueue may race startup recovery. Preserve an earlier
+                    // process's staging records until the main queue is saved.
+                    let incoming = Set(records.compactMap { $0["id"] as? String })
+                    snapshot = try loadChecked(ownerUserId: ownerUserId, collection: collection)
+                        .filter { !incoming.contains($0["id"] as? String ?? "") } + records
+                }
+                try save(records: snapshot, ownerUserId: ownerUserId, collection: collection)
+                if collection == .drafts {
+                    let retained = Set(records.flatMap { $0["attachments"] as? [[String: Any]] ?? [] }.compactMap { ($0["fileId"] as? String)?.lowercased() })
+                    try? pruneAttachments(prefix: "draft-", retaining: retained, ownerUserId: ownerUserId)
+                }
+                if collection == .publications {
+                    let retained = Set(records.flatMap { $0["attachments"] as? [[String: Any]] ?? [] }.compactMap { ($0["fileId"] as? String)?.lowercased() })
+                    try? pruneAttachments(prefix: "publication-", retaining: retained, ownerUserId: ownerUserId)
+                }
                 continuation.finish()
             } catch { continuation.finish(throwing: error) }
         }
@@ -67,21 +86,27 @@ final class AloSecureOutboxStore {
         let salt: String
     }
 
-    func save(records: [[String: Any]], ownerUserId: Int) throws {
+    func save(records: [[String: Any]], ownerUserId: Int, collection: Collection = .messages) throws {
         let data = try JSONSerialization.data(withJSONObject: records, options: [])
         try writeEncrypted(
             data,
-            to: try rootURL(ownerUserId: ownerUserId).appendingPathComponent(queueFileName),
+            to: try rootURL(ownerUserId: ownerUserId).appendingPathComponent(collection.rawValue),
             ownerUserId: ownerUserId
         )
     }
 
-    func load(ownerUserId: Int) -> [[String: Any]] {
-        guard let data = try? readEncrypted(
-            from: try rootURL(ownerUserId: ownerUserId).appendingPathComponent(queueFileName)
-        ),
-              let records = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-            return []
+    func load(ownerUserId: Int, collection: Collection = .messages) -> [[String: Any]] {
+        (try? loadChecked(ownerUserId: ownerUserId, collection: collection)) ?? []
+    }
+
+    /// Missing is empty; unreadable/corrupt is NOT empty. Callers that write a
+    /// replacement snapshot must not erase a queue after a failed restore.
+    func loadChecked(ownerUserId: Int, collection: Collection) throws -> [[String: Any]] {
+        let url = try rootURL(ownerUserId: ownerUserId).appendingPathComponent(collection.rawValue)
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        let data = try readEncrypted(from: url)
+        guard let records = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            throw CocoaError(.fileReadCorruptFile)
         }
         return records
     }
@@ -145,11 +170,15 @@ final class AloSecureOutboxStore {
         ownerUserId: Int
     ) throws {
         let source = sourceURL.standardizedFileURL.resolvingSymlinksInPath()
+        let destination = try chunkedAttachmentFileURL(id: id, ownerUserId: ownerUserId)
+        // Immutable IDs already copied to durable storage must survive expiry
+        // of their original picker/recorder file.
+        if FileManager.default.fileExists(atPath: destination.path),
+           !FileManager.default.fileExists(atPath: source.path) { return }
         let values = try source.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
         guard values.isRegularFile == true, (values.fileSize ?? 0) > 0 else {
             throw AloSecureOutboxError.invalidAttachment
         }
-        let destination = try chunkedAttachmentFileURL(id: id, ownerUserId: ownerUserId)
         try ensureRootDirectory(ownerUserId: ownerUserId)
         // A restored draft already points at its outbox file. Removing that
         // destination used to delete the source before trying to copy it.
@@ -226,6 +255,16 @@ final class AloSecureOutboxStore {
         deleteUploadCheckpoint(id: id, ownerUserId: ownerUserId)
     }
 
+    private func pruneAttachments(prefix: String, retaining ids: Set<String>, ownerUserId: Int) throws {
+        let root = try rootURL(ownerUserId: ownerUserId)
+        for url in try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) {
+            let name = url.deletingPathExtension().lastPathComponent
+            guard name.hasPrefix("attachment-" + prefix) else { continue }
+            let id = String(name.dropFirst("attachment-".count))
+            if !ids.contains(id) { try? FileManager.default.removeItem(at: url) }
+        }
+    }
+
     func deleteQuizReveal(pollId: String, ownerUserId: Int) {
         if let url = try? quizRevealURL(pollId: pollId, ownerUserId: ownerUserId) {
             try? FileManager.default.removeItem(at: url)
@@ -243,7 +282,7 @@ final class AloSecureOutboxStore {
                 at: root,
                 includingPropertiesForKeys: nil
               ) else { return }
-        for entry in entries where entry.lastPathComponent == queueFileName || entry.lastPathComponent.hasPrefix("attachment-") {
+        for entry in entries where entry.lastPathComponent == Collection.messages.rawValue || entry.lastPathComponent.hasPrefix("attachment-") {
             try? FileManager.default.removeItem(at: entry)
         }
     }

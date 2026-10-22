@@ -204,7 +204,7 @@ struct AloZoomableImagePage<Placeholder: View>: View {
     @ViewBuilder let placeholder: (Bool) -> Placeholder
 
     var body: some View {
-        AloAsyncUIImage(url: url) { phase in
+        AloAsyncUIImage(url: url, downloadIntent: isActive ? .userInitiated : .automatic) { phase in
             switch phase {
             case .success(let image):
                 AloZoomableImage(image: image, onZoomChanged: { if isActive { onZoomChanged($0) } }, onSingleTap: onSingleTap,

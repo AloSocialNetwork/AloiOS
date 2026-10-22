@@ -103,4 +103,26 @@ struct AloMediaPerformanceTests {
         #expect(!model.isBusy)
         model.suspendConnectionRefresh()
     }
+
+    @Test @MainActor func coldLaunchKeepsCachedMessagesButDoesNotReopenAnOldConversation() throws {
+        let raw: [String: Any] = ["data": [
+            "me": ["id": 1_999_998_763, "name": "Isolated startup test"],
+            "messages": [
+                "activePeerId": 2,
+                "conversations": [["peerId": 2, "peer": ["id": 2, "name": "Cached peer"]]],
+                "items": [["id": 42, "senderId": 2, "body": "Saved message"]]
+            ]
+        ]]
+        let data = try JSONSerialization.data(withJSONObject: raw)
+        let model = AloAppModel(
+            api: AloAPIClient(baseURLs: [URL(string: "http://127.0.0.1:9/")!]),
+            startupCacheLoader: { data }
+        )
+        model.start()
+        #expect(model.phase == .app)
+        #expect(model.activeConversation == nil)
+        #expect(model.bootstrap?.conversations.first?.peerId == 2)
+        #expect(model.bootstrap?.activeMessages.first?.body == "Saved message")
+        model.suspendConnectionRefresh()
+    }
 }

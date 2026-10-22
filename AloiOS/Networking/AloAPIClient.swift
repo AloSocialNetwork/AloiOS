@@ -1031,7 +1031,8 @@ final class AloAPIClient {
 
     /// `draftMedia` is media a saved draft already uploaded; publishing with `draftId` uses the draft up.
     func createPost(body: String, media: [AloMessageAttachment] = [], draftMedia: [AloMediaItem] = [],
-                    draftId: Int? = nil, captchaToken: String? = nil) async throws -> AloPost {
+                    draftId: Int? = nil, captchaToken: String? = nil, clientOperationId: String? = nil,
+                    expectedOwnerId: Int? = nil) async throws -> AloPost {
         let json = try await request(
             "POST",
             "/api/posts",
@@ -1039,6 +1040,8 @@ final class AloAPIClient {
                 "body": body,
                 "media": draftMedia.map(\.payload) + media.map { ["type": $0.type, "url": $0.url, "name": $0.name] },
                 "draftId": draftId,
+                "clientOperationId": clientOperationId,
+                "expectedOwnerId": expectedOwnerId,
                 "captchaToken": captchaToken
             ])
         )
@@ -1054,6 +1057,14 @@ final class AloAPIClient {
         return post
     }
 
+    func resolvePushOpen(token: String) async throws -> AloPushDestination {
+        let json = try await request("GET", "/api/notifications/open/\(token)")
+        guard let destination = AloPushDestination(json.object("destination")) else {
+            throw AloAPIError(status: 502, code: "PUSH_TARGET_INVALID", message: "Не удалось открыть уведомление.", payload: [:])
+        }
+        return destination
+    }
+
     func loadStories() async throws -> [AloStoryGroup] {
         let json = try await request("GET", "/api/stories")
         return json.array("stories").map(AloStoryGroup.init)
@@ -1064,12 +1075,16 @@ final class AloAPIClient {
         media: [AloMessageAttachment] = [],
         lifetimeHours: Int = 24,
         audience: AloStoryAudience = .everyone,
-        audienceUserIds: [Int] = []
+        audienceUserIds: [Int] = [],
+        clientOperationId: String? = nil,
+        expectedOwnerId: Int? = nil
     ) async throws -> AloStory {
         let json = try await request(
             "POST",
             "/api/stories",
-            body: [
+            body: compactBody([
+                "clientOperationId": clientOperationId,
+                "expectedOwnerId": expectedOwnerId,
                 "audience": audience.rawValue,
                 "audienceUserIds": audienceUserIds,
                 "body": body,
@@ -1082,7 +1097,7 @@ final class AloAPIClient {
                     ]
                 },
                 "lifetimeHours": max(1, min(48, lifetimeHours))
-            ]
+            ])
         )
         let story = AloStory(json.object("story"))
         guard story.id > 0 else {
@@ -1615,7 +1630,10 @@ final class AloAPIClient {
         )
     }
 
-    func uploadAttachment(_ attachment: AloLocalAttachment, purpose: String = "message") async throws -> AloMessageAttachment {
+    func uploadAttachment(_ attachment: AloLocalAttachment, purpose: String = "message",
+        resumeCheckpoint: AloResumableUploadCheckpoint? = nil,
+        onCheckpoint: ((AloResumableUploadCheckpoint) -> Void)? = nil,
+        expectedOwnerId: Int? = nil) async throws -> AloMessageAttachment {
         let json: [String: Any]
         if let encryptedSource = attachment.encryptedSourceURL {
             // Public posts/stories are not E2EE messages. Read the protected
@@ -1639,9 +1657,19 @@ final class AloAPIClient {
             }.value
             defer { try? FileManager.default.removeItem(at: source.0) }
             json = try await uploadResumable(fileURL: source.0, size: source.1,
-                checksum: source.2, purpose: purpose, mime: attachment.mime)
+                checksum: source.2, purpose: purpose, mime: attachment.mime,
+                resumeCheckpoint: resumeCheckpoint, onCheckpoint: onCheckpoint, expectedOwnerId: expectedOwnerId)
         } else {
-            json = try await uploadResumable(data: attachment.data, purpose: purpose, mime: attachment.mime)
+            // Use the same resumable, checkpointed path for legacy Data drafts.
+            let source = try await Task.detached(priority: .utility) {
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent("alo-public-upload-\(UUID().uuidString)")
+                try attachment.data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+                return (url, Int64(attachment.data.count), try Self.sha256(of: url))
+            }.value
+            defer { try? FileManager.default.removeItem(at: source.0) }
+            json = try await uploadResumable(fileURL: source.0, size: source.1,
+                checksum: source.2, purpose: purpose, mime: attachment.mime,
+                resumeCheckpoint: resumeCheckpoint, onCheckpoint: onCheckpoint, expectedOwnerId: expectedOwnerId)
         }
         let file = json.object("file")
         return AloMessageAttachment([
@@ -1697,6 +1725,7 @@ final class AloAPIClient {
                 onCheckpoint: onCheckpoint
             )
             let file = json.object("file")
+            await cacheUploadedMedia(remote: file.string("url"), encryption: metadata.dictionary, source: encryptedSourceURL)
             return AloMessageAttachment([
                 "type": attachment.type,
                 "url": file.string("url"),
@@ -1713,17 +1742,15 @@ final class AloAPIClient {
             mime: "application/octet-stream"
         )
         let file = json.object("file")
+        let encryption: [String: Any] = ["algorithm": AloE2EECrypto.mediaScheme, "key": sealed.key,
+            "iv": sealed.iv, "mime": attachment.mime, "size": String(attachment.data.count)]
+        await cacheUploadedMedia(remote: file.string("url"), encryption: encryption, data: sealed.data)
         return AloMessageAttachment([
             "type": attachment.type,
             "url": file.string("url"),
             "name": attachment.name,
             "waveform": attachment.waveform,
-            "mediaEncryption": [
-                "algorithm": AloE2EECrypto.mediaScheme,
-                "key": sealed.key,
-                "iv": sealed.iv,
-                "mime": attachment.mime
-            ],
+            "mediaEncryption": encryption,
             "metadata": attachment.durationMetadata
         ])
     }
@@ -1757,6 +1784,7 @@ final class AloAPIClient {
             mime: "application/octet-stream"
         )
         let file = json.object("file")
+        await cacheUploadedMedia(remote: file.string("url"), encryption: sealed.metadata.dictionary, source: sealed.encryptedURL)
         return AloMessageAttachment([
             "type": type,
             "url": file.string("url"),
@@ -1873,7 +1901,8 @@ final class AloAPIClient {
         purpose: String,
         mime: String,
         resumeCheckpoint: AloResumableUploadCheckpoint? = nil,
-        onCheckpoint: ((AloResumableUploadCheckpoint) -> Void)? = nil
+        onCheckpoint: ((AloResumableUploadCheckpoint) -> Void)? = nil,
+        expectedOwnerId: Int? = nil
     ) async throws -> [String: Any] {
         guard size > 0,
               size <= AloChunkedMediaCrypto.expectedCiphertextSize(
@@ -1934,12 +1963,13 @@ final class AloAPIClient {
             let created = try await request(
                 "POST",
                 "/api/uploads/resumable",
-                body: [
+                body: compactBody([
+                    "expectedOwnerId": expectedOwnerId,
                     "purpose": purpose,
                     "mime": mime.ifBlank("application/octet-stream"),
                     "size": size,
                     "sha256": checksum
-                ]
+                ])
             )
             let upload = created.object("upload")
             uploadId = upload.string("id")
@@ -2887,8 +2917,9 @@ final class AloAPIClient {
         )
     }
 
-    func loadPostComments(postId: Int) async throws -> [AloPostComment] {
-        let json = try await request("GET", "/api/posts/\(postId)/comments")
+    func loadPostComments(postId: Int, focusCommentId: Int = 0) async throws -> [AloPostComment] {
+        let query = focusCommentId > 0 ? "?focusCommentId=\(focusCommentId)" : ""
+        let json = try await request("GET", "/api/posts/\(postId)/comments\(query)")
         return json.array("comments").map(AloPostComment.init)
     }
 
@@ -3406,7 +3437,8 @@ final class AloAPIClient {
         let rawAttachments = sourceAttachments.map(messageAttachmentJSON)
         let resolved = await resolveDecryptedMediaAttachments(
             rawAttachments,
-            expiresAt: expiry.expiresAt
+            expiresAt: expiry.expiresAt,
+            scope: conversation.entityType == "channel" ? .channels : conversation.roomId > 0 ? .groups : .privateChats
         )
             .map(AloMessageAttachment.init)
         return (
@@ -3755,7 +3787,7 @@ final class AloAPIClient {
     private func messageAttachmentPayload(_ attachment: AloMessageAttachment) -> [String: Any] {
         var payload: [String: Any] = [
             "type": attachment.type,
-            "url": attachment.url,
+            "url": URL(string: attachment.url).flatMap { AloSecureMediaStore.shared.remoteURL(for: $0) } ?? attachment.url,
             "name": attachment.name
         ]
         if !attachment.waveform.isEmpty {
@@ -3773,7 +3805,7 @@ final class AloAPIClient {
     private func e2eeServerAttachmentPayload(_ attachment: AloMessageAttachment) -> [String: Any] {
         [
             "type": "e2ee",
-            "url": attachment.url,
+            "url": URL(string: attachment.url).flatMap { AloSecureMediaStore.shared.remoteURL(for: $0) } ?? attachment.url,
             "name": attachment.name.ifBlank("encrypted.bin")
         ]
     }
@@ -4894,10 +4926,14 @@ final class AloAPIClient {
 
     private func decryptE2EEMessages(inConversation raw: [String: Any]) async -> [String: Any] {
         var next = raw
+        let room = raw.object("room")
+        let scope: AloMediaCacheScope = room.bool("isChannel") || room.string("entityType") == "channel"
+            || room.object("policy").string("kind") == "channel" ? .channels
+            : room.int("id") > 0 ? .groups : .privateChats
         if let items = next["items"] as? [[String: Any]] {
             var decryptedItems = [[String: Any]]()
             for item in items {
-                decryptedItems.append(await decryptE2EEMessageJSON(item))
+                decryptedItems.append(await decryptE2EEMessageJSON(item, cacheScope: scope))
             }
             next["items"] = decryptedItems
         }
@@ -4929,8 +4965,11 @@ final class AloAPIClient {
         return next
     }
 
-    private func decryptE2EEMessageJSON(_ raw: [String: Any]) async -> [String: Any] {
-        guard let encrypted = raw.optionalObject("encryptedPayload") else { return raw }
+    private func decryptE2EEMessageJSON(_ raw: [String: Any], cacheScope: AloMediaCacheScope? = nil) async -> [String: Any] {
+        let scope = cacheScope ?? mediaCacheScope(raw)
+        guard let encrypted = raw.optionalObject("encryptedPayload") else {
+            return await registerLegacyMediaReferences(raw, scope: scope)
+        }
         let decrypted: Data
         let object: [String: Any]
         do {
@@ -4976,7 +5015,8 @@ final class AloAPIClient {
                 ? attachments
                 : await resolveDecryptedMediaAttachments(
                     attachments,
-                    expiresAt: raw.string("expiresAt")
+                    expiresAt: raw.string("expiresAt"),
+                    scope: scope
                 )
             next["attachments"] = resolvedAttachments
             if let first = resolvedAttachments.first {
@@ -4989,6 +5029,37 @@ final class AloAPIClient {
             next["forwardFrom"] = forwardFrom
         }
         return next
+    }
+
+    private func registerLegacyMediaReferences(_ raw: [String: Any], scope: AloMediaCacheScope) async -> [String: Any] {
+        // Do not pre-open self-destructing files. Their server handshake still
+        // owns the beginning of the expiry window.
+        guard raw.int("selfDestructSeconds") == 0 else { return raw }
+        var attachments = raw.array("attachments")
+        if attachments.isEmpty, !raw.string("attachmentUrl").isEmpty {
+            attachments = [["url": raw.string("attachmentUrl"), "type": raw.string("attachmentType"), "name": raw.string("attachmentName")]]
+        }
+        var converted = [[String: Any]]()
+        for var attachment in attachments {
+            let type = attachment.string("type").lowercased()
+            let remote = attachment.string("url")
+            if !["image", "contact", "location", "sticker"].contains(type),
+               attachment.object("mediaEncryption").isEmpty, attachment.object("e2ee").isEmpty,
+               remote.hasPrefix("/") || remote.hasPrefix("http://") || remote.hasPrefix("https://") {
+                let owner = currentUserId
+                let source = attachment
+                if let url = try? await Task.detached(priority: .utility, operation: {
+                    try AloSecureMediaStore.shared.registerRemotePlaintext(remote, type: type, name: source.string("name"),
+                        size: Int64(source.object("metadata").string("size")), ownerUserId: owner, scope: scope)
+                }).value { attachment["url"] = url.absoluteString }
+            }
+            converted.append(attachment)
+        }
+        guard !converted.isEmpty else { return raw }
+        var result = raw
+        result["attachments"] = converted
+        result["attachmentUrl"] = converted[0].string("url")
+        return result
     }
 
     private func messageAttachmentJSON(_ attachment: AloMessageAttachment) -> [String: Any] {
@@ -5012,14 +5083,16 @@ final class AloAPIClient {
 
     private func resolveDecryptedMediaAttachments(
         _ attachments: [[String: Any]],
-        expiresAt: String = ""
+        expiresAt: String = "",
+        scope: AloMediaCacheScope = .privateChats
     ) async -> [[String: Any]] {
         var resolved = [[String: Any]]()
         for attachment in attachments {
             resolved.append(
                 await resolveDecryptedMediaAttachment(
                     attachment,
-                    expiresAt: expiresAt
+                    expiresAt: expiresAt,
+                    scope: scope
                 )
             )
         }
@@ -5028,13 +5101,18 @@ final class AloAPIClient {
 
     private func resolveDecryptedMediaAttachment(
         _ attachment: [String: Any],
-        expiresAt: String = ""
+        expiresAt: String = "",
+        scope: AloMediaCacheScope = .privateChats
     ) async -> [String: Any] {
         let encryption = attachment.object("mediaEncryption").isEmpty ? attachment.object("e2ee") : attachment.object("mediaEncryption")
         let algorithm = encryption.string("algorithm")
         let chunkedMetadata = AloChunkedMediaCrypto.Metadata(encryption)
         guard algorithm == AloE2EECrypto.mediaScheme || chunkedMetadata != nil else { return attachment }
-        let remoteUrl = attachment.string("url")
+        let currentURL = attachment.string("url")
+        // Prepared disappearing media and cached messages can already hold a
+        // local resource identifier. Never treat it as a server download URL.
+        if let url = URL(string: currentURL), AloSecureMediaStore.shared.isSecureURL(url) { return attachment }
+        let remoteUrl = currentURL
         guard !remoteUrl.isEmpty else { return attachment }
 
         cleanupDecodedMediaCacheIfNeeded()
@@ -5043,31 +5121,18 @@ final class AloAPIClient {
             encryption: encryption
         )
         do {
-            if !FileManager.default.fileExists(atPath: encryptedCacheURL.path) {
-                let expectedSize = chunkedMetadata.map {
-                    AloChunkedMediaCrypto.expectedCiphertextSize(
-                        plaintextSize: $0.plaintextSize,
-                        chunkSize: $0.chunkSize
-                    )
-                }
-                let temporary = encryptedCacheURL.deletingLastPathComponent().appendingPathComponent(
-                    ".\(encryptedCacheURL.lastPathComponent).download-\(UUID().uuidString).part"
+            let secureURL = try await Task.detached(priority: .utility) {
+                try AloSecureMediaStore.shared.register(
+                    encryptedURL: encryptedCacheURL,
+                    encryption: encryption,
+                    type: attachment.string("type"),
+                    name: attachment.string("name"),
+                    expiresAt: expiresAt,
+                    remoteURL: remoteUrl,
+                    scope: scope,
+                    expectedPlaintextSize: chunkedMetadata?.plaintextSize ?? Int64(encryption.string("size"))
                 )
-                defer { try? FileManager.default.removeItem(at: temporary) }
-                try await downloadRawFile(
-                    remoteUrl,
-                    to: temporary,
-                    expectedSize: expectedSize
-                )
-                try moveProtectedCacheFile(from: temporary, to: encryptedCacheURL)
-            }
-            let secureURL = try AloSecureMediaStore.shared.register(
-                encryptedURL: encryptedCacheURL,
-                encryption: encryption,
-                type: attachment.string("type"),
-                name: attachment.string("name"),
-                expiresAt: expiresAt
-            )
+            }.value
             var next = attachment
             next["url"] = secureURL.absoluteString
             if attachment.string("type") == "image" {
@@ -5086,6 +5151,35 @@ final class AloAPIClient {
         e2eeMediaCacheRoot()
             .appendingPathComponent("encrypted", isDirectory: true)
             .appendingPathComponent("\(mediaCacheDigest(remoteUrl: remoteUrl, encryption: encryption)).bin")
+    }
+
+    private func mediaCacheScope(_ raw: [String: Any]) -> AloMediaCacheScope {
+        if raw.string("entityType") == "channel" || raw.bool("isChannel") { return .channels }
+        return raw.int("roomId") > 0 ? .groups : .privateChats
+    }
+
+    /// Sending already transferred these bytes. A cache failure must never
+    /// turn an acknowledged send into a failed send or delete the pending draft.
+    private func cacheUploadedMedia(remote: String, encryption: [String: Any], source: URL? = nil, data: Data? = nil) async {
+        guard !remote.isEmpty else { return }
+        let destination = encryptedMediaCacheURL(remoteUrl: remote, encryption: encryption)
+        await Task.detached(priority: .utility) {
+            let size = source.flatMap { try? $0.resourceValues(forKeys: [.fileSizeKey]).fileSize }.map(Int64.init)
+                ?? Int64(data?.count ?? 0)
+            guard size > 0, size <= AloMediaCacheSettings.current.maximumBytes else { return }
+            do {
+                let budget = try AloMediaTransferBudget.shared.reserve(bytes: size)
+                defer { budget.release() }
+                let lease = AloMediaDiskCache.shared.keep(destination)
+                defer { lease.release() }
+                if !FileManager.default.fileExists(atPath: destination.path) {
+                    try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    if let source { try FileManager.default.copyItem(at: source, to: destination) }
+                    else if let data { try data.write(to: destination, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) }
+                }
+                AloMediaDiskCache.shared.record(destination, scope: .privateChats)
+            } catch { /* Downloaded media is reproducible; the unsent source is untouched. */ }
+        }.value
     }
 
     private func mediaCacheDigest(remoteUrl: String, encryption: [String: Any]) -> String {
@@ -5151,11 +5245,12 @@ final class AloAPIClient {
     private func downloadRawFile(
         _ path: String,
         to destination: URL,
-        expectedSize: Int64?
+        expectedSize: Int64?,
+        maximumSize: Int64 = Int64.max
     ) async throws {
         if path.hasPrefix("file://"), let url = URL(string: path) {
             let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize.map(Int64.init) ?? -1
-            guard expectedSize == nil || size == expectedSize else {
+            guard size <= maximumSize, expectedSize == nil || size == expectedSize else {
                 throw AloAPIError(status: 0, code: "DOWNLOAD_SIZE_INVALID", message: "Размер вложения не совпадает с зашифрованными метаданными.", payload: [:])
             }
             try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -5170,17 +5265,26 @@ final class AloAPIClient {
         var lastError: Error?
         for candidate in candidates {
             do {
-                var request = URLRequest(url: candidate.url)
+                var request = URLRequest(url: candidate.url, cachePolicy: .reloadIgnoringLocalCacheData)
                 request.httpMethod = "GET"
                 request.timeoutInterval = 60
                 request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
-                let (temporaryURL, response) = try await session.download(for: request)
+                let limiter = AloBoundedDownloadDelegate(maximumBytes: maximumSize)
+                let download: (URL, URLResponse)
+                do { download = try await session.download(for: request, delegate: limiter) }
+                catch {
+                    if limiter.exceededLimit { throw AloSecureMediaError.payloadTooLarge }
+                    throw error
+                }
+                let (temporaryURL, response) = download
+                defer { try? FileManager.default.removeItem(at: temporaryURL) }
+                try Task.checkCancellation()
                 let status = (response as? HTTPURLResponse)?.statusCode ?? 0
                 guard (200..<300).contains(status) else {
                     throw AloAPIError(status: status, code: "DOWNLOAD_FAILED", message: "Не удалось загрузить вложение.", payload: [:])
                 }
                 let size = try temporaryURL.resourceValues(forKeys: [.fileSizeKey]).fileSize.map(Int64.init) ?? -1
-                guard expectedSize == nil || size == expectedSize else {
+                guard size <= maximumSize, expectedSize == nil || size == expectedSize else {
                     throw AloAPIError(status: status, code: "DOWNLOAD_SIZE_INVALID", message: "Размер вложения не совпадает с зашифрованными метаданными.", payload: [:])
                 }
                 try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -5195,10 +5299,18 @@ final class AloAPIClient {
                 }
                 return
             } catch {
+                try Task.checkCancellation()
+                if case AloSecureMediaError.payloadTooLarge = error { throw error }
                 lastError = error
             }
         }
         throw lastError ?? AloAPIError(status: 0, code: "DOWNLOAD_FAILED", message: "Не удалось загрузить вложение.", payload: [:])
+    }
+
+    /// Uses the same authenticated session and TLS policy as the API. Lazy
+    /// resource loaders must not fall back to URLSession.shared.
+    func downloadCachedMedia(_ path: String, to destination: URL, expectedSize: Int64?, maximumSize: Int64) async throws {
+        try await downloadRawFile(path, to: destination, expectedSize: expectedSize, maximumSize: maximumSize)
     }
 
     private func compactBody(_ body: [String: Any?]) -> [String: Any] {

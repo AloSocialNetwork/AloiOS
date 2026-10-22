@@ -1572,9 +1572,9 @@ final class AloSocialConsistencyUITests: XCTestCase {
         // The edge swipe walks up one level: privacy → settings → profile.
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.0, dy: 0.6))
             .press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.6)), withVelocity: .default, thenHoldForDuration: 0)
-        XCTAssertTrue(app.buttons["Закрыть настройки"].waitForExistence(timeout: 3), "edge swipe returns to the settings list")
+        XCTAssertTrue(app.buttons["alo.settings.back"].waitForExistence(timeout: 3), "edge swipe returns to the settings list")
         capture("s-settings-swipe-back")
-        app.buttons["Закрыть настройки"].tap()
+        app.buttons["alo.settings.back"].tap()
         XCTAssertTrue(app.buttons["alo.profile.settings"].waitForExistence(timeout: 3))
     }
 

@@ -135,7 +135,9 @@ final class AloAppModel: ObservableObject {
         }
     }
 
-    @Published var phase: Phase = .loading
+    @Published var phase: Phase = .loading {
+        didSet { if phase == .app { Task { await processPendingPushOpens() } } }
+    }
     @Published var authMode: AuthMode = .login
     @Published var email = ""
     @Published var password = ""
@@ -153,13 +155,74 @@ final class AloAppModel: ObservableObject {
     private var initialRetryTask: Task<Void, Never>?
     private var initialRefreshRevision = 0
     private var initialRetryDelay: Double = 3
-    @Published var bootstrap: AloBootstrapData?
+    private var accountGeneration = UUID()
+    @Published var bootstrap: AloBootstrapData? {
+        didSet {
+            if oldValue?.me.id != bootstrap?.me.id { accountGeneration = UUID() }
+            if let owner = bootstrap?.me.id, owner > 0 {
+                activateChatDrafts(owner: owner)
+                publications.activate(owner: owner)
+            }
+        }
+    }
     @Published var activeTab: AloAppTab = .feed
     @Published var feedMode: AloFeedMode = .popular
     @Published var composeText = ""
     @Published private(set) var isCreatingPost = false
     @Published private(set) var postPublishingError = ""
     @Published private(set) var lastPublishedPostId = 0
+    @Published private(set) var publicationJobs = [AloPublicationJob]()
+    private var requestedPostPublication: String?
+    private var requestedStoryPublication: String?
+    var currentPostPublication: AloPublicationJob? { publicationJobs.first { $0.id == requestedPostPublication } }
+    var currentStoryPublication: AloPublicationJob? { publicationJobs.first { $0.id == requestedStoryPublication } }
+    lazy var publications: AloPublicationQueue = {
+        let queue = AloPublicationQueue(api: api)
+        queue.onChange = { [weak self] jobs in
+            guard let self else { return }
+            publicationJobs = jobs
+            if jobs.contains(where: { $0.id == self.requestedPostPublication && $0.status != .failed }) {
+                postPublishingError = ""; isCreatingPost = true
+            }
+            if jobs.contains(where: { $0.id == self.requestedStoryPublication && $0.status != .failed }) {
+                storyPublishingError = ""; isCreatingStory = true
+            }
+            if let failed = jobs.first(where: { $0.id == self.requestedPostPublication && $0.status == .failed }) {
+                postPublishingError = failed.error
+                isCreatingPost = false
+            }
+            if let failed = jobs.first(where: { $0.id == self.requestedStoryPublication && $0.status == .failed }) {
+                storyPublishingError = failed.error
+                isCreatingStory = false
+            }
+        }
+        queue.onPublished = { [weak self] owner, job, post in
+            guard let self, self.bootstrap?.me.id == owner else { return }
+            if let post {
+                if let data = bootstrap { bootstrap = AloBootstrapDataPatch.prepend(post, to: data) }
+                if let draftID = job.draftId { postDrafts.removeAll { $0.id == draftID } }
+                if requestedPostPublication == job.id {
+                    lastPublishedPostId = post.id
+                    if composeText.trimmingCharacters(in: .whitespacesAndNewlines) == job.body { composeText = "" }
+                    postPublishingError = ""
+                    isCreatingPost = false
+                    requestedPostPublication = nil
+                }
+            } else {
+                if requestedStoryPublication == job.id {
+                    storyPublishingError = ""; isCreatingStory = false; requestedStoryPublication = nil
+                }
+                Task { await self.refreshStories(silently: true) }
+            }
+        }
+        queue.onFailure = { [weak self] job, error in
+            guard let self, job.kind == .post else { return }
+            _ = handleChallenge(error, retry: { [weak self] token in
+                self?.publications.retry(id: job.id, captchaToken: token)
+            })
+        }
+        return queue
+    }()
     @Published private(set) var stories = [AloStoryGroup]()
     /// A story opened from a link, shown over everything; or a note that it has expired.
     @Published var linkedStory: AloStoryGroup?
@@ -187,16 +250,38 @@ final class AloAppModel: ObservableObject {
     @Published private(set) var businessProfileData: AloBusinessProfileData?
     @Published private(set) var isBusinessProfileLoading = false
     @Published var searchQuery = ""
-    @Published var activeConversation: AloConversationDetail?
-    @Published var messageText = ""
-    @Published var pendingForwardDraft: AloForwardMeta?
-    @Published var pendingForwardTitle = ""
+    @Published var activeConversation: AloConversationDetail? {
+        didSet {
+            let sameChat = oldValue?.peerId == activeConversation?.peerId && oldValue?.kind == activeConversation?.kind
+            switchChatDraft(to: activeConversation, topicId: sameChat ? composerTopicId : 0)
+        }
+    }
+    @Published var messageText = "" { didSet { saveCurrentChatDraft() } }
+    @Published var pendingForwardDraft: AloForwardMeta? { didSet { saveCurrentChatDraft() } }
+    @Published var pendingForwardTitle = "" { didSet { saveCurrentChatDraft() } }
+    @Published var composerAttachments = [AloLocalAttachment]() { didSet { saveCurrentChatDraft() } }
+    @Published var composerReply: AloChatMessage? { didSet { saveCurrentChatDraft() } }
+    @Published var composerSelfDestructSeconds = 0 { didSet { saveCurrentChatDraft() } }
+    @Published private(set) var chatDraftError = ""
+    var chatDraftRecoveryActionTitle: String { chatDraftsLoaded ? "Понятно" : "Повторить" }
+    private var chatDrafts = [String: AloChatDraft]()
+    private var chatDraftOwner = 0
+    private var chatDraftKey: String?
+    private var composerTopicId = 0
+    private var restoringChatDraft = false
+    private var editingComposer = false
+    private var chatDraftsLoaded = false
+    private var changedDraftKeys = Set<String>()
+    private var chatDraftLoadTask: Task<Void, Never>?
     @Published var humanChallenge: HumanChallenge?
     @Published var selectedProfile: AloUserProfile?
     @Published var selectedChannelProfile: AloChannelProfile?
     @Published var channelAdminEvents = [AloChannelAdminEvent]()
     @Published var isProfileLoading = false
     @Published var commentsPost: AloPost?
+    @Published var focusedCommentId = 0
+    @Published var pushFriendRequest: AloNotificationItem?
+    private var processingPushOpen = false
     @Published var comments = [AloPostComment]()
     @Published var commentText = ""
     /// The comment a reply is being written to; the composer shows "Ответ для …".
@@ -275,10 +360,15 @@ final class AloAppModel: ObservableObject {
     private let bootstrapCacheKey = "alo.ios.bootstrap-cache.v1"
     private let bootstrapCacheFileName = "bootstrap-cache-v1.json"
     private let pendingDeepLinkKey = "alo.ios.pending-deep-link.v1"
+    /// A short app switch preserves the conversation; a long absence returns
+    /// to the inbox. Cached message data is not a navigation-restoration token.
+    static let conversationResumeTimeout: TimeInterval = 5 * 60
+    private var chatBackgroundedAt: Date?
 
     func start() {
         guard !didStart else { return }
         didStart = true
+        AloMediaDiskCache.shared.scheduleMaintenance()
 #if DEBUG
         if startupCacheLoader == nil, UserDefaults.standard.bool(forKey: "ALO_UI_MESSENGER_PREVIEW") {
             Task { await installMessengerDesignFixture() }
@@ -305,8 +395,32 @@ final class AloAppModel: ObservableObject {
 
     func handleDeepLink(_ url: URL) {
         guard AloDeepLinkTarget(url: url) != nil else { return }
+        chatBackgroundedAt = nil
         UserDefaults.standard.set(url.absoluteString, forKey: pendingDeepLinkKey)
         Task { await processPendingDeepLinkIfPossible() }
+    }
+
+    func applicationDidEnterBackground(at date: Date = Date()) {
+        // Do not restart the interval on duplicate lifecycle notifications.
+        if chatBackgroundedAt == nil { chatBackgroundedAt = date }
+    }
+
+    func applicationDidBecomeActive(at date: Date = Date()) {
+        AloMediaDiskCache.shared.scheduleMaintenance()
+        if phase == .app {
+            publications.resume()
+            Task { await processPendingPushOpens() }
+        }
+        defer { chatBackgroundedAt = nil }
+        guard let backgroundedAt = chatBackgroundedAt,
+              date.timeIntervalSince(backgroundedAt) >= Self.conversationResumeTimeout,
+              phase == .app,
+              activeConversation != nil,
+              calls.activeCall == nil,
+              calls.groupCall.activeCall == nil else { return }
+        // Messages arriving while away were not actually viewed. An automatic
+        // return to the inbox must not acknowledge them as read.
+        dismissConversation(markRead: false)
     }
 
     func retryInitialBootstrap() {
@@ -359,13 +473,9 @@ final class AloAppModel: ObservableObject {
                 notice = e2eeWarning
             }
             if peerId > 0, let summary = data.conversations.first(where: { $0.peerId == peerId }) {
-                let detail = AloConversationDetail(summary: summary, items: data.activeMessages)
-                let mergedDetail = mergePendingLocalMessages(into: detail)
-                activeConversation = mergedDetail
-                startConversationLive(mergedDetail)
-                Task(priority: .utility) {
-                    try? await api.backfillConversationSearchHistory(peerId: summary.peerId)
-                }
+                // A list summary has no membership/admin rights. Open through
+                // the normal history path, which restores the authoritative room.
+                openConversation(summary)
             }
             scheduleLocalSearchIndexBackfill(conversations: data.conversations, ownerUserId: data.me.id)
             phase = .app
@@ -396,6 +506,10 @@ final class AloAppModel: ObservableObject {
         isBusy = false
         if phase == .app, UserDefaults.standard.string(forKey: pendingDeepLinkKey) != nil {
             Task { await processPendingDeepLinkIfPossible() }
+        }
+        if phase == .app {
+            publications.resume()
+            Task { await processPendingPushOpens() }
         }
     }
 
@@ -853,6 +967,16 @@ final class AloAppModel: ObservableObject {
     }
 
     private func clearAccountRuntimeState(discardPendingOutbox: Bool = false) {
+        accountGeneration = UUID()
+        saveCurrentChatDraft()
+        publications.reset()
+        requestedPostPublication = nil; requestedStoryPublication = nil
+        isCreatingPost = false; isCreatingStory = false
+        pushFriendRequest = nil
+        chatDraftLoadTask?.cancel()
+        chatDraftOwner = 0; chatDraftKey = nil; chatDrafts = [:]
+        changedDraftKeys = []; chatDraftsLoaded = false
+        restoreChatDraft(AloChatDraft())
         cancelInitialRefresh()
         searchIndexBackfillTask?.cancel()
         searchIndexBackfillTask = nil
@@ -908,37 +1032,16 @@ final class AloAppModel: ObservableObject {
         errorMessage = ""
         postPublishingError = ""
         lastPublishedPostId = 0
-        isBusy = true
-        isCreatingPost = true
-        Task {
-            defer {
-                isBusy = false
-                isCreatingPost = false
-            }
-            do {
-                var media = [AloMessageAttachment]()
-                for attachment in localAttachments {
-                    media.append(try await api.uploadAttachment(attachment, purpose: "post"))
-                }
-                let post = try await api.createPost(body: body, media: media, draftMedia: draftMedia,
-                                                    draftId: draftId, captchaToken: captchaToken)
-                lastPublishedPostId = post.id
-                composeText = ""
-                if let draftId { postDrafts.removeAll { $0.id == draftId } }
-                if let data = bootstrap {
-                    bootstrap = AloBootstrapDataPatch.prepend(post, to: data)
-                }
-            } catch let error as AloAPIError {
-                if handleChallenge(error, retry: { token in
-                    self.createPost(localAttachments: localAttachments, draftMedia: draftMedia, draftId: draftId, captchaToken: token)
-                }) { return }
-                errorMessage = error.message
-                postPublishingError = error.message
-            } catch {
-                errorMessage = "Не удалось опубликовать пост."
-                postPublishingError = "Не удалось опубликовать пост. Черновик сохранён — повторите попытку."
-            }
+        guard let owner = bootstrap?.me.id, owner > 0 else {
+            postPublishingError = "Войдите в аккаунт перед публикацией."
+            return
         }
+        publications.activate(owner: owner)
+        isCreatingPost = true
+        var job = AloPublicationJob(kind: .post, body: body, attachments: localAttachments)
+        job.draftMedia = draftMedia; job.draftId = draftId; job.captchaToken = captchaToken
+        requestedPostPublication = job.id
+        requestedPostPublication = publications.enqueue(job)
     }
 
     func refreshStories(silently: Bool = false) async {
@@ -963,32 +1066,18 @@ final class AloAppModel: ObservableObject {
     ) {
         let text = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (!text.isEmpty || !localAttachments.isEmpty), !isCreatingStory else { return }
+        guard let owner = bootstrap?.me.id, owner > 0 else {
+            storyPublishingError = "Войдите в аккаунт перед публикацией."
+            return
+        }
+        publications.activate(owner: owner)
         isCreatingStory = true
         errorMessage = ""
         storyPublishingError = ""
-        Task {
-            defer { isCreatingStory = false }
-            do {
-                var media = [AloMessageAttachment]()
-                for attachment in localAttachments {
-                    media.append(try await api.uploadAttachment(attachment, purpose: "post"))
-                }
-                _ = try await api.createStory(
-                    body: text,
-                    media: media,
-                    lifetimeHours: lifetimeHours,
-                    audience: audience,
-                    audienceUserIds: audienceUserIds
-                )
-                // Publication has already succeeded. Refreshing the tray must
-                // not keep the editor's submit button spinning.
-                Task { await refreshStories(silently: true) }
-            } catch let error as AloAPIError {
-                storyPublishingError = error.message
-            } catch {
-                storyPublishingError = "Не удалось опубликовать историю. Проверьте подключение и повторите попытку."
-            }
-        }
+        var job = AloPublicationJob(kind: .story, body: text, attachments: localAttachments)
+        job.lifetimeHours = lifetimeHours; job.audience = audience; job.audienceUserIds = audienceUserIds
+        requestedStoryPublication = job.id
+        requestedStoryPublication = publications.enqueue(job)
     }
 
     // MARK: Story audiences, archive and highlights
@@ -1975,6 +2064,7 @@ final class AloAppModel: ObservableObject {
     }
 
     func openConversation(_ summary: AloConversationSummary) {
+        chatBackgroundedAt = nil
         AloChatMediaSession.reset()
         markConversationRead(summary)
 #if DEBUG
@@ -2014,8 +2104,12 @@ final class AloAppModel: ObservableObject {
     }
 
     func closeConversation() {
+        dismissConversation(markRead: true)
+    }
+
+    private func dismissConversation(markRead: Bool) {
         AloChatMediaSession.reset()
-        if let open = activeConversation,
+        if markRead, let open = activeConversation,
            let summary = bootstrap?.conversations.first(where: { $0.kind == open.kind && $0.peerId == open.peerId }) {
             markConversationRead(summary)
         }
@@ -2268,6 +2362,7 @@ final class AloAppModel: ObservableObject {
     }
 
     func openConversation(with profile: AloUserProfile) {
+        chatBackgroundedAt = nil
         closeProfile()
         activeTab = .messages
         let emptyFallbackDetail = AloConversationDetail(
@@ -2291,6 +2386,9 @@ final class AloAppModel: ObservableObject {
         Task {
             do {
                 let detail = try await api.loadConversation(peerId: profile.user.id)
+                guard activeConversation?.peerId == profile.user.id,
+                      activeConversation?.kind == detail.kind,
+                      activeConversation?.roomId == detail.roomId else { return }
                 let mergedDetail = mergePendingLocalMessages(into: detail)
                 activeConversation = mergedDetail
                 startConversationLive(mergedDetail)
@@ -2304,7 +2402,7 @@ final class AloAppModel: ObservableObject {
         }
     }
 
-    func sendMessage(
+    @discardableResult func sendMessage(
         localAttachments: [AloLocalAttachment] = [],
         forwardFrom: AloForwardMeta? = nil,
         replyToMessageId: Int = 0,
@@ -2315,11 +2413,11 @@ final class AloAppModel: ObservableObject {
         sendWhenOnline: Bool = false,
         captchaToken: String? = nil,
         onSent: (() -> Void)? = nil
-    ) {
-        guard let conversation = activeConversation else { return }
-        guard !isDirectPeerBlocked(conversation) else { return }
+    ) -> Task<Void, Never>? {
+        guard let conversation = activeConversation, let owner = bootstrap?.me.id, owner > 0 else { return nil }
+        guard !isDirectPeerBlocked(conversation) else { return nil }
         let body = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !body.isEmpty || !localAttachments.isEmpty || forwardFrom != nil else { return }
+        guard !body.isEmpty || !localAttachments.isEmpty || forwardFrom != nil else { return nil }
         if selfDestructSeconds <= 0, captchaToken == nil, (!localAttachments.isEmpty || forwardFrom != nil) {
             sendDraftMessageOptimistically(
                 body: body,
@@ -2333,7 +2431,7 @@ final class AloAppModel: ObservableObject {
                 sendWhenOnline: sendWhenOnline
             )
             onSent?()
-            return
+            return nil
         }
         if !body.isEmpty && localAttachments.isEmpty && forwardFrom == nil && captchaToken == nil {
             sendTextMessageOptimistically(
@@ -2346,14 +2444,21 @@ final class AloAppModel: ObservableObject {
                 sendWhenOnline: sendWhenOnline
             )
             onSent?()
-            return
+            return nil
         }
-        Task {
-            isBusy = true
+        let generation = accountGeneration
+        let target = pendingTarget(for: conversation)
+        let draftKey = chatDraftKey
+        let sentDraft = currentChatDraft()
+        isBusy = true
+        return Task {
+            guard accountGeneration == generation, bootstrap?.me.id == owner else { return }
+            defer { if accountGeneration == generation { isBusy = false } }
             do {
                 var uploadedAttachments = [AloMessageAttachment]()
                 for attachment in localAttachments {
                     uploadedAttachments.append(try await api.uploadE2EEAttachment(attachment))
+                    guard accountGeneration == generation, bootstrap?.me.id == owner else { return }
                 }
                 try await api.sendMessage(
                     peerId: conversation.peerId,
@@ -2370,15 +2475,19 @@ final class AloAppModel: ObservableObject {
                     sendWhenOnline: sendWhenOnline,
                     captchaToken: captchaToken
                 )
-                messageText = ""
-                let updatedConversation = try await api.loadConversation(peerId: conversation.peerId)
-                withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) {
-                    activeConversation = updatedConversation
+                guard accountGeneration == generation, bootstrap?.me.id == owner else { return }
+                if clearSentChatDraft(key: draftKey, matching: sentDraft), isActiveConversation(target) {
+                    onSent?()
                 }
-                await loadBootstrap(peerId: conversation.peerId)
-                onSent?()
+                // ACK completes sending. A failed/delayed history read must
+                // neither reopen this chat nor turn a delivered message into a failure.
+                await refreshConversationIfCurrent(target)
+                scheduleBootstrapRefreshFromUpdates(ownerUserId: owner)
             } catch let error as AloAPIError {
-                if handleChallenge(error, retry: { token in
+                guard accountGeneration == generation, bootstrap?.me.id == owner else { return }
+                if isActiveConversation(target), handleChallenge(error, retry: { token in
+                    guard self.accountGeneration == generation, self.isActiveConversation(target),
+                          self.currentChatDraft() == sentDraft else { return }
                     self.sendMessage(
                         localAttachments: localAttachments,
                         forwardFrom: forwardFrom,
@@ -2392,7 +2501,8 @@ final class AloAppModel: ObservableObject {
                         onSent: onSent
                     )
                 }) { return }
-                if shouldQueueForConnectivity(error), !body.isEmpty, localAttachments.isEmpty, forwardFrom == nil {
+                if isActiveConversation(target), currentChatDraft() == sentDraft,
+                   shouldQueueForConnectivity(error), !body.isEmpty, localAttachments.isEmpty, forwardFrom == nil {
                     sendTextMessageOptimistically(
                         body: body,
                         conversation: conversation,
@@ -2403,14 +2513,13 @@ final class AloAppModel: ObservableObject {
                         sendWhenOnline: sendWhenOnline
                     )
                     onSent?()
-                    isBusy = false
                     return
                 }
                 errorMessage = error.message
             } catch {
+                guard accountGeneration == generation, bootstrap?.me.id == owner else { return }
                 errorMessage = "Не удалось отправить сообщение."
             }
-            isBusy = false
         }
     }
 
@@ -2872,7 +2981,9 @@ final class AloAppModel: ObservableObject {
         replaceComposer: Bool
     ) {
         guard conversation.kind == "group", conversation.roomId > 0, topicId > 0 else { return }
+        switchChatDraft(to: conversation, topicId: topicId)
         if replaceComposer,
+           chatDraftsLoaded, messageText.isEmpty, chatDrafts[chatDraftKey ?? ""] == nil,
            let state = conversation.forumTopicStates.first(where: { $0.topicId == topicId }) {
             messageText = state.draftText
         }
@@ -3675,6 +3786,7 @@ final class AloAppModel: ObservableObject {
     private func scheduleBootstrapRefreshFromUpdates(ownerUserId: Int) {
         guard ownerUserId > 0, ownerUserId == chatStreamOwnerUserId else { return }
         guard updatesBootstrapRefreshTask == nil else { return }
+        let generation = accountGeneration
         updatesBootstrapRefreshTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 220_000_000)
             guard let self,
@@ -3683,7 +3795,8 @@ final class AloAppModel: ObservableObject {
             self.updatesBootstrapRefreshTask = nil
             do {
                 let snapshot = try await self.api.loadBootstrapSnapshot()
-                guard snapshot.data.me.id == ownerUserId else { return }
+                guard self.accountGeneration == generation, self.bootstrap?.me.id == ownerUserId,
+                      snapshot.data.me.id == ownerUserId else { return }
                 self.saveBootstrapCache(snapshot.raw)
                 self.bootstrap = snapshot.data
                 self.configureBlockedUserState(ownerUserId: ownerUserId)
@@ -3981,6 +4094,55 @@ final class AloAppModel: ObservableObject {
     }
 
     @Published private(set) var pendingFriendRequestIds = Set<Int>()
+
+    func processPendingPushOpens(store: AloPushOpenStore = .shared) async {
+        guard phase == .app, let owner = bootstrap?.me.id, owner > 0, !processingPushOpen else { return }
+        processingPushOpen = true
+        defer { processingPushOpen = false }
+        while let entry = store.first() {
+            do {
+                let destination: AloPushDestination
+                if let token = entry.token { destination = try await api.resolvePushOpen(token: token) }
+                else { destination = .notifications } // Older generic pushes have no object address.
+                guard phase == .app, bootstrap?.me.id == owner else { return }
+                switch destination {
+                case let .chat(peerId, roomId):
+                    // Fetch before dismissing the current screen. A failed
+                    // connection keeps the pending tap, without an empty chat.
+                    let detail = try await api.loadConversation(peerId: peerId)
+                    guard phase == .app, bootstrap?.me.id == owner else { return }
+                    guard roomId == 0 || detail.roomId == roomId else { return }
+                    closeComments(); selectedProfile = nil; selectedChannelProfile = nil
+                    activeTab = .messages
+                    activeConversation = mergePendingLocalMessages(into: detail)
+                    if let activeConversation { startConversationLive(activeConversation) }
+                case let .post(postId, commentId):
+                    let post = try await api.loadPost(postId: postId)
+                    guard phase == .app, bootstrap?.me.id == owner else { return }
+                    selectedProfile = nil; selectedChannelProfile = nil
+                    activeTab = .feed
+                    if commentId > 0 {
+                        openLegacyComments(for: post)
+                        focusedCommentId = commentId
+                    } else { openComments(for: post) }
+                case let .friendRequest(item):
+                    closeComments(); selectedProfile = nil; selectedChannelProfile = nil
+                    activeTab = .alerts
+                    pushFriendRequest = item
+                case .notifications:
+                    closeComments(); selectedProfile = nil; selectedChannelProfile = nil
+                    activeTab = .alerts
+                }
+                store.remove(entry)
+            } catch let error as AloAPIError {
+                guard bootstrap?.me.id == owner else { return }
+                if error.status == 401 || error.status == 0 || error.status >= 500 { return }
+                store.remove(entry)
+                activeTab = .alerts
+                notice = "Объект из уведомления больше недоступен."
+            } catch { return }
+        }
+    }
 
     func openNotification(_ item: AloNotificationItem) {
         if item.entityType == "post", item.entityId > 0 {
@@ -4309,6 +4471,7 @@ final class AloAppModel: ObservableObject {
     }
 
     func closeComments() {
+        focusedCommentId = 0
         commentsLoadTask?.cancel()
         commentsLoadTask = nil
         commentsSession = UUID()
@@ -4353,7 +4516,7 @@ final class AloAppModel: ObservableObject {
         }
         #endif
         do {
-            let loaded = try await api.loadPostComments(postId: postId)
+            let loaded = try await api.loadPostComments(postId: postId, focusCommentId: focusedCommentId)
             guard !Task.isCancelled, commentsLoadRequest == request, commentsSession == session,
                   bootstrap?.me.id == owner, commentsPost?.id == postId else { return }
             // A send may finish while the initial page is loading. Keep it.
@@ -5668,6 +5831,148 @@ final class AloAppModel: ObservableObject {
         }
     }
 
+    private func activateChatDrafts(owner: Int, retry: Bool = false) {
+        guard owner > 0, owner != chatDraftOwner || retry else { return }
+        chatDraftLoadTask?.cancel()
+        if owner != chatDraftOwner {
+            chatDraftOwner = owner
+            chatDraftKey = nil
+            chatDrafts = [:]
+            changedDraftKeys = []
+            chatDraftsLoaded = false
+            switchChatDraft(to: activeConversation, topicId: 0)
+        }
+        chatDraftLoadTask = Task { [weak self] in
+            let result = await Task.detached(priority: .utility) {
+                Result {
+                    try AloSecureOutboxStore.shared.loadChecked(ownerUserId: owner, collection: .drafts).reduce(into: [String: AloChatDraft]()) {
+                        $0[$1.string("key")] = AloChatDraft(record: $1, owner: owner)
+                    }
+                }
+            }.value
+            guard let self, !Task.isCancelled, chatDraftOwner == owner else { return }
+            guard case let .success(loaded) = result else {
+                chatDraftError = "Не удалось открыть защищённые черновики. Они не перезаписаны. Нажмите «Повторить»."
+                return
+            }
+            for (key, draft) in loaded where !changedDraftKeys.contains(key) { chatDrafts[key] = draft }
+            chatDraftsLoaded = true
+            if let key = chatDraftKey, !changedDraftKeys.contains(key) {
+                var draft = chatDrafts[key] ?? AloChatDraft()
+                if chatDrafts[key] == nil, composerTopicId > 0,
+                   let remote = activeConversation?.forumTopicStates.first(where: { $0.topicId == composerTopicId }) {
+                    draft.text = remote.draftText
+                    if !draft.isEmpty { chatDrafts[key] = draft }
+                }
+                restoreChatDraft(draft)
+            }
+            persistChatDrafts()
+        }
+    }
+
+    private func switchChatDraft(to conversation: AloConversationDetail?, topicId: Int) {
+        let topic = conversation?.kind == "group" ? max(0, topicId) : 0
+        let key = conversation.map { "\($0.kind):\($0.roomId):\($0.peerId):\(topic)" }
+        guard key != chatDraftKey else { return }
+        saveCurrentChatDraft()
+        chatDraftKey = key
+        composerTopicId = topic
+        editingComposer = false
+        restoreChatDraft(key.flatMap { chatDrafts[$0] } ?? AloChatDraft())
+    }
+
+    private func restoreChatDraft(_ draft: AloChatDraft) {
+        restoringChatDraft = true
+        messageText = draft.text
+        composerReply = draft.reply
+        pendingForwardDraft = draft.forward
+        pendingForwardTitle = draft.forwardTitle
+        composerAttachments = draft.attachments
+        composerSelfDestructSeconds = draft.selfDestructSeconds
+        chatDraftError = draft.missingAttachments ? "Не удалось восстановить часть вложений. Добавьте их заново." : ""
+        restoringChatDraft = false
+        let key = chatDraftKey, owner = chatDraftOwner, attachments = draft.attachments
+        guard attachments.contains(where: { $0.encryptedSourceURL != nil && $0.localPlaybackURL == nil }) else { return }
+        Task { [weak self] in
+            let previews = await Task.detached(priority: .utility) { attachments.map(AloDurableAttachment.preparingPreview) }.value
+            guard let self, chatDraftOwner == owner, chatDraftKey == key,
+                  composerAttachments.map(\.id) == attachments.map(\.id) else { return }
+            restoringChatDraft = true
+            composerAttachments = previews
+            restoringChatDraft = false
+        }
+    }
+
+    private func saveCurrentChatDraft() {
+        guard !restoringChatDraft, !editingComposer, chatDraftOwner > 0, let key = chatDraftKey else { return }
+        let draft = currentChatDraft()
+        changedDraftKeys.insert(key)
+        chatDrafts[key] = draft.isEmpty ? nil : draft
+        if chatDraftsLoaded { persistChatDrafts() }
+    }
+
+    private func currentChatDraft() -> AloChatDraft {
+        var draft = AloChatDraft()
+        draft.text = messageText
+        draft.reply = composerReply
+        draft.forward = pendingForwardDraft
+        draft.forwardTitle = pendingForwardTitle
+        draft.attachments = composerAttachments
+        draft.missingAttachments = chatDraftKey.flatMap { chatDrafts[$0]?.missingAttachments } ?? false
+        draft.selfDestructSeconds = composerSelfDestructSeconds
+        return draft
+    }
+
+    /// Clear the consumed snapshot, never edits made while its request was in flight.
+    /// An off-screen chat's draft can be removed without touching the visible composer.
+    private func clearSentChatDraft(key: String?, matching sent: AloChatDraft) -> Bool {
+        guard let key, (chatDrafts[key] ?? AloChatDraft()) == sent,
+              key != chatDraftKey || !editingComposer else { return false }
+        changedDraftKeys.insert(key)
+        chatDrafts[key] = nil
+        if key == chatDraftKey { restoreChatDraft(AloChatDraft()) }
+        if chatDraftsLoaded { persistChatDrafts() }
+        return key == chatDraftKey
+    }
+
+    private func persistChatDrafts() {
+        let owner = chatDraftOwner
+        guard owner > 0, chatDraftsLoaded else { return }
+        let drafts = chatDrafts
+        let writes = drafts.values.flatMap(\.attachments).map {
+            AloSecureOutboxStore.AttachmentWrite(id: AloDurableAttachment.fileID($0, prefix: "draft"), attachment: $0)
+        }
+        let receipt = AloSecureOutboxStore.shared.scheduleSave(records: drafts.map { $0.value.record(key: $0.key) },
+            attachments: writes, ownerUserId: owner, collection: .drafts)
+        Task { [weak self] in
+            do { try await receipt.value }
+            catch {
+                guard let self, chatDraftOwner == owner else { return }
+                chatDraftError = "Не удалось сохранить черновик на устройстве. Проверьте свободное место."
+            }
+        }
+    }
+
+    func beginComposerEdit() {
+        saveCurrentChatDraft()
+        editingComposer = true
+    }
+
+    func acknowledgeMissingDraftAttachments() {
+        if !chatDraftsLoaded {
+            activateChatDrafts(owner: chatDraftOwner, retry: true)
+            return
+        }
+        if let key = chatDraftKey { chatDrafts[key]?.missingAttachments = false }
+        chatDraftError = ""
+        saveCurrentChatDraft()
+    }
+
+    func endComposerEdit() {
+        editingComposer = false
+        restoreChatDraft(chatDraftKey.flatMap { chatDrafts[$0] } ?? AloChatDraft())
+    }
+
     private func persistPendingChatOperations() {
         guard let ownerUserId = pendingChatOperationsOwnerUserId else { return }
         let records = pendingChatOperations.compactMap {
@@ -5683,6 +5988,7 @@ final class AloAppModel: ObservableObject {
     }
 
     private func activatePendingChatOutbox(ownerUserId: Int) {
+        activateChatDrafts(owner: ownerUserId)
         guard ownerUserId > 0, pendingChatOperationsOwnerUserId != ownerUserId else { return }
         pendingChatOperations.removeAll()
         pendingChatMessageIds.removeAll()
@@ -5721,6 +6027,17 @@ final class AloAppModel: ObservableObject {
     }
 
     private func clearPendingChatOutboxForLogout() {
+        publications.reset()
+        requestedPostPublication = nil; requestedStoryPublication = nil
+        isCreatingPost = false; isCreatingStory = false
+        pushFriendRequest = nil
+        chatDraftLoadTask?.cancel()
+        chatDraftOwner = 0
+        chatDraftKey = nil
+        chatDrafts = [:]
+        changedDraftKeys = []
+        chatDraftsLoaded = false
+        restoreChatDraft(AloChatDraft())
         pendingChatRetryTask?.cancel()
         pendingChatRetryTask = nil
         pendingChatRefreshTask?.cancel()
@@ -6153,6 +6470,7 @@ final class AloAppModel: ObservableObject {
 
     private func refreshConversationIfCurrent(_ target: PendingChatTarget, droppingLocalId: Int? = nil) async {
         guard isActiveConversation(target) else { return }
+        let generation = accountGeneration
         pendingChatRefreshRevision += 1
         let revision = pendingChatRefreshRevision
         pendingChatRefreshTask?.cancel()
@@ -6161,9 +6479,10 @@ final class AloAppModel: ObservableObject {
         pendingChatRefreshTask = Task { [weak self] in
             do {
                 try await Task.sleep(nanoseconds: 250_000_000)
-                guard let self, !Task.isCancelled, self.isActiveConversation(target) else { return }
+                guard let self, !Task.isCancelled, self.accountGeneration == generation,
+                      self.isActiveConversation(target) else { return }
                 let updatedConversation = try await self.api.loadConversation(peerId: target.peerId)
-                guard !Task.isCancelled, revision == self.pendingChatRefreshRevision,
+                guard !Task.isCancelled, self.accountGeneration == generation, revision == self.pendingChatRefreshRevision,
                       self.isActiveConversation(target) else { return }
                 self.activeConversation = self.mergePendingLocalMessages(into: updatedConversation)
             } catch {
@@ -6255,13 +6574,6 @@ final class AloAppModel: ObservableObject {
         if peerId > 0, let summary = cached.conversations.first(where: { $0.peerId == peerId }) {
             let messages = cached.activePeerId == peerId ? cached.activeMessages : []
             let detail = AloConversationDetail(summary: summary, items: messages)
-            let projected = mergePendingLocalMessages(into: detail)
-            activeConversation = projected
-            if startNetwork { startConversationLive(projected) }
-        } else if activeConversation == nil,
-                  cached.activePeerId > 0,
-                  let summary = cached.conversations.first(where: { $0.peerId == cached.activePeerId }) {
-            let detail = AloConversationDetail(summary: summary, items: cached.activeMessages)
             let projected = mergePendingLocalMessages(into: detail)
             activeConversation = projected
             if startNetwork { startConversationLive(projected) }

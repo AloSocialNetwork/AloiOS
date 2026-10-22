@@ -61,12 +61,12 @@ final class AloDesignReferenceUITests: XCTestCase {
         app.buttons["Профиль"].firstMatch.tap()
         XCTAssertTrue(app.buttons["alo.profile.settings"].waitForExistence(timeout: 4))
         app.buttons["alo.profile.settings"].tap()
-        XCTAssertTrue(app.buttons["Закрыть настройки"].waitForExistence(timeout: 4))
+        XCTAssertTrue(app.buttons["alo.settings.back"].waitForExistence(timeout: 4))
         sleep(1)
         capture("ref-settings-root")
         for (title, name) in [("Безопасность", "security"), ("Приватность", "privacy"), ("Уведомления", "notifications"), ("Бизнес-профиль", "business")] {
             app.buttons[title].firstMatch.tap()
-            XCTAssertTrue(app.buttons["Назад к настройкам"].waitForExistence(timeout: 4))
+            XCTAssertTrue(app.buttons["alo.settings.back"].waitForExistence(timeout: 4))
             sleep(1)
             capture("ref-settings-\(name)")
             app.swipeUp()
@@ -75,8 +75,8 @@ final class AloDesignReferenceUITests: XCTestCase {
             app.swipeUp()
             sleep(1)
             capture("ref-settings-\(name)-3")
-            app.buttons["Назад к настройкам"].tap()
-            XCTAssertTrue(app.buttons["Закрыть настройки"].waitForExistence(timeout: 4))
+            app.buttons["alo.settings.back"].tap()
+            XCTAssertTrue(app.buttons["alo.settings.back"].waitForExistence(timeout: 4))
         }
     }
     func testSignInReference() {

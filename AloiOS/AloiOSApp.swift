@@ -187,7 +187,7 @@ struct AloiOSApp: App {
                     Task { await app.loadBootstrap() }
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .aloPushOpened)) { _ in
-                    Task { await app.loadBootstrap() }
+                    Task { await app.processPendingPushOpens() }
                 }
                 .onOpenURL { url in
                     app.handleDeepLink(url)

@@ -53,6 +53,9 @@ struct FeedView: View {
                 } rows: {
                     LazyVStack(spacing: 0) {
                         storiesTray
+                        if !app.publicationJobs.isEmpty || !app.publications.restorationError.isEmpty {
+                            AloPublicationStatusView().padding(.horizontal, 16).padding(.vertical, 8)
+                        }
 
                         ForEach(Array(posts.enumerated()), id: \.element.id) { index, post in
                             if let reason = app.hiddenFeedPosts[post.id] {
@@ -407,6 +410,7 @@ private struct PostComposerSheet: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    AloPublicationStatusView(kind: .post)
                     if !publishingError.isEmpty { errorBanner }
                     if !importError.isEmpty {
                         Label(importError, systemImage: "exclamationmark.triangle.fill")
@@ -496,7 +500,7 @@ private struct PostComposerSheet: View {
             toolbar
         }
         .background(AloTheme.background.ignoresSafeArea())
-        .interactiveDismissDisabled(app.isCreatingPost || hasContent)
+        .interactiveDismissDisabled(app.currentPostPublication?.isDurable != true && (app.isCreatingPost || hasContent))
         .confirmationDialog(draftId == nil ? "Сохранить черновик?" : "Сохранить изменения?", isPresented: $confirmsClose,
                             titleVisibility: .visible) {
             if let draftId {
@@ -561,9 +565,10 @@ private struct PostComposerSheet: View {
         HStack(spacing: 12) {
                 AloChatCircleButton(systemImage: "xmark", label: "Закрыть редактор поста") {
                     isComposerFocused = false
-                    if hasContent { confirmsClose = true } else { dismiss() }
+                    if app.currentPostPublication?.isDurable == true { app.composeText = ""; dismiss() }
+                    else if hasContent { confirmsClose = true } else { dismiss() }
                 }
-                .disabled(app.isCreatingPost || isSavingDraft)
+                .disabled((app.isCreatingPost && app.currentPostPublication?.isDurable != true) || isSavingDraft)
                 Text(draftId == nil ? "Новый пост" : "Черновик").font(.system(size: 17, weight: .semibold)).foregroundStyle(AloTheme.text)
                     .lineLimit(1)
                     .accessibilityAddTraits(.isHeader)
@@ -885,6 +890,18 @@ struct AloPostDetailScreen: View {
                     if let parent = app.comments.first(where: { $0.id == id })?.parentId { expandedThreads.insert(parent) }
                     withAnimation(accessibility.reduceMotion ? nil : AloPressFeedback.release) {
                         proxy.scrollTo(id, anchor: .bottom)
+                    }
+                }
+                .onChange(of: app.comments.map(\.id), initial: true) { _, _ in
+                    let id = app.focusedCommentId
+                    guard id > 0, let comment = app.comments.first(where: { $0.id == id }) else { return }
+                    if let parent = comment.parentId { expandedThreads.insert(parent) }
+                    // Expand the thread before asking the lazy stack to locate it.
+                    Task { @MainActor in
+                        await Task.yield()
+                        guard app.focusedCommentId == id else { return }
+                        proxy.scrollTo(id, anchor: .center)
+                        app.focusedCommentId = 0
                     }
                 }
                 }

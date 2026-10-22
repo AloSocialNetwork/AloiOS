@@ -230,6 +230,9 @@ final class AloAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationC
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
+        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier else { return }
+        AloPushOpenStore.shared.enqueue(requestID: response.notification.request.identifier,
+            payload: response.notification.request.content.userInfo)
         NotificationCenter.default.post(
             name: .aloPushOpened,
             object: nil,

@@ -211,7 +211,7 @@ struct AloStoryEditorScreen: View {
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .background(Color.black.ignoresSafeArea())
         .preferredColorScheme(.dark)
-        .interactiveDismissDisabled(app.isCreatingStory || isPreparing)
+        .interactiveDismissDisabled((app.isCreatingStory && app.currentStoryPublication?.isDurable != true) || isPreparing)
         .animation(accessibility.reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.88), value: mode)
         .onAppear {
             // A new story starts as a text story with the keyboard up.
@@ -517,7 +517,7 @@ struct AloStoryEditorScreen: View {
                 switch mode {
                 case .none:
                     AloChatCircleButton(systemImage: "xmark", label: "Закрыть редактор истории") { dismiss() }
-                        .disabled(app.isCreatingStory)
+                        .disabled(app.isCreatingStory && app.currentStoryPublication?.isDurable != true)
                     Spacer()
                     AloChatCircleButton(systemImage: "scribble", label: "Рисовать") {
                         isTextFocused = false
@@ -659,6 +659,16 @@ struct AloStoryEditorScreen: View {
                 ProgressView(isPreparing ? "Готовим историю…" : "Подготовка медиа…").tint(.white).foregroundStyle(.white)
                     .padding(.horizontal, 14).padding(.vertical, 10)
                     .modifier(AloChatGlass(interactive: false, role: .chrome))
+            }
+            if publishRequested, let job = app.publicationJobs.first(where: { $0.kind == .story && $0.status != .failed }) {
+                VStack(spacing: 6) {
+                    Text(job.label).font(.footnote)
+                    if job.status == .uploading { ProgressView(value: job.progress).tint(.white) }
+                }
+                .foregroundStyle(.white).padding(12)
+                .modifier(AloChatGlass(interactive: false, role: .chrome))
+                .padding(.horizontal, 16)
+                .accessibilityIdentifier("alo.story.publish-progress")
             }
             if let message = [importError, publishRequested ? app.storyPublishingError : ""].first(where: { !$0.isEmpty }) {
                 Label(message, systemImage: "exclamationmark.triangle.fill")

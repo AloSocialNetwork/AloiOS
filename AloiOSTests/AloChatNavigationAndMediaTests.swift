@@ -5,6 +5,85 @@ import UIKit
 
 @Suite(.serialized)
 struct AloChatNavigationAndMediaTests {
+    @MainActor private func navigationModel() -> AloAppModel {
+        let model = AloAppModel(api: AloAPIClient(baseURLs: [URL(string: "http://127.0.0.1:9/")!]),
+                                startupCacheLoader: { nil })
+        model.phase = .app
+        model.activeConversation = AloConversationDetail(
+            summary: AloConversationSummary(["peerId": 2, "peer": ["id": 2, "name": "Test peer"]]),
+            items: []
+        )
+        return model
+    }
+
+    @Test(arguments: [0.0, 30.0, 299.0])
+    @MainActor func shortBackgroundVisitPreservesConversation(seconds: TimeInterval) {
+        let model = navigationModel()
+        let start = Date(timeIntervalSince1970: 1_000)
+        model.applicationDidEnterBackground(at: start)
+        model.applicationDidBecomeActive(at: start.addingTimeInterval(seconds))
+        #expect(model.activeConversation?.peerId == 2)
+    }
+
+    @Test(arguments: [300.0, 3_600.0])
+    @MainActor func longBackgroundVisitReturnsToInboxWithoutMarkingMessagesRead(seconds: TimeInterval) {
+        let model = navigationModel()
+        model.bootstrap = AloBootstrapData(["data": [
+            "me": ["id": 1_999_998_764],
+            "messages": ["conversations": [["peerId": 2, "unreadCount": 3]]]
+        ]])
+        model.messageText = "Неотправленный текст"
+        let unreadRevision = model.unreadRevision
+        let start = Date(timeIntervalSince1970: 1_000)
+        model.applicationDidEnterBackground(at: start)
+        model.applicationDidBecomeActive(at: start.addingTimeInterval(seconds))
+        #expect(model.activeConversation == nil)
+        #expect(model.messageText == "Неотправленный текст")
+        #expect(model.unreadRevision == unreadRevision)
+        #expect(model.bootstrap?.conversations.first?.unreadCount == 3)
+    }
+
+    @Test @MainActor func duplicateBackgroundEventsDoNotExtendConversationLifetime() {
+        let model = navigationModel()
+        let start = Date(timeIntervalSince1970: 1_000)
+        model.applicationDidEnterBackground(at: start)
+        model.applicationDidEnterBackground(at: start.addingTimeInterval(250))
+        model.applicationDidBecomeActive(at: start.addingTimeInterval(301))
+        #expect(model.activeConversation == nil)
+    }
+
+    @Test @MainActor func inactiveEventAndRepeatedActivationDoNotResetANewConversation() {
+        let model = navigationModel()
+        let now = Date(timeIntervalSince1970: 1_000)
+        model.applicationDidBecomeActive(at: now)
+        #expect(model.activeConversation?.peerId == 2)
+        model.applicationDidEnterBackground(at: now)
+        model.applicationDidBecomeActive(at: now.addingTimeInterval(1))
+        model.applicationDidBecomeActive(at: now.addingTimeInterval(3_600))
+        #expect(model.activeConversation?.peerId == 2)
+    }
+
+    @Test @MainActor func explicitlyOpeningAConversationSupersedesBackgroundExpiration() {
+        let model = navigationModel()
+        let start = Date(timeIntervalSince1970: 1_000)
+        model.applicationDidEnterBackground(at: start)
+        model.openConversation(AloConversationSummary(["peerId": 3, "peer": ["id": 3, "name": "New peer"]]))
+        model.applicationDidBecomeActive(at: start.addingTimeInterval(3_600))
+        #expect(model.activeConversation?.peerId == 3)
+        model.closeConversation()
+    }
+
+    @Test @MainActor func aBackgroundRefreshDoesNotExtendConversationLifetime() async {
+        let model = navigationModel()
+        model.bootstrap = AloBootstrapData(["data": ["me": ["id": 1_999_998_762]]])
+        let start = Date(timeIntervalSince1970: 1_000)
+        model.applicationDidEnterBackground(at: start)
+        await model.loadBootstrap(peerId: 2)
+        model.suspendConnectionRefresh()
+        model.applicationDidBecomeActive(at: start.addingTimeInterval(3_600))
+        #expect(model.activeConversation == nil)
+    }
+
     private func message(_ id: Int, sender: Int = 2, scheduled: Bool = false) -> AloChatMessage {
         AloChatMessage(["id": id, "senderId": sender, "body": "Сообщение", "sendWhenOnline": scheduled])
     }

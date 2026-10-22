@@ -14,6 +14,20 @@ final class AloLaunchUITests: XCTestCase {
         XCTAssertTrue(app.windows.firstMatch.exists)
     }
 
+    func testShortBackgroundVisitPreservesTheOpenChat() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "text"]
+        app.launch()
+        let back = app.buttons["alo.chat.back"]
+        XCTAssertTrue(back.waitForExistence(timeout: 15))
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(back.waitForExistence(timeout: 5))
+        XCTAssertTrue(back.isHittable)
+        back.tap()
+        XCTAssertFalse(back.exists)
+    }
+
     func testCallMinimizeButtonAndForegroundReturn() {
         let app = XCUIApplication()
         app.launchArguments += ["-ALO_UI_CALL_PREVIEW", "1"]

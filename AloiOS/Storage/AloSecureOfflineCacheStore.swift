@@ -21,6 +21,7 @@ final class AloSecureOfflineCacheStore: @unchecked Sendable {
     private let lastOwnerKey = "alo.ios.offline-cache.owner.v2"
     private let fileName = "bootstrap-v2.bin"
     private let historyLock = NSLock()
+    var currentOwnerUserId: Int { UserDefaults.standard.integer(forKey: lastOwnerKey) }
 
     func save(_ data: Data, ownerUserId: Int) throws {
         guard ownerUserId > 0 else { throw AloSecureOfflineCacheError.invalidOwner }
@@ -66,17 +67,18 @@ final class AloSecureOfflineCacheStore: @unchecked Sendable {
     /// Avatar and non-E2EE preview bytes are still private account data. Keep
     /// them encrypted alongside the bootstrap cache so an offline launch can
     /// render the last known people and media instead of empty placeholders.
-    func saveRemoteImage(_ data: Data, cacheKey: String) {
-        let ownerUserId = UserDefaults.standard.integer(forKey: lastOwnerKey)
+    func saveRemoteImage(_ data: Data, cacheKey: String, ownerUserId: Int? = nil) {
+        let ownerUserId = ownerUserId ?? currentOwnerUserId
         guard ownerUserId > 0, !data.isEmpty else { return }
         let url = (try? ownerRootURL(ownerUserId: ownerUserId))?
             .appendingPathComponent(remoteImageFileName(for: cacheKey))
         guard let url else { return }
         try? writeEncrypted(data, to: url, ownerUserId: ownerUserId)
+        AloMediaDiskCache.shared.record(url, scope: .previews)
     }
 
-    func loadRemoteImage(cacheKey: String) -> Data? {
-        let ownerUserId = UserDefaults.standard.integer(forKey: lastOwnerKey)
+    func loadRemoteImage(cacheKey: String, ownerUserId: Int? = nil) -> Data? {
+        let ownerUserId = ownerUserId ?? currentOwnerUserId
         guard ownerUserId > 0,
               let url = try? ownerRootURL(ownerUserId: ownerUserId)
                 .appendingPathComponent(remoteImageFileName(for: cacheKey)),
@@ -84,6 +86,7 @@ final class AloSecureOfflineCacheStore: @unchecked Sendable {
               let sealed = try? AES.GCM.SealedBox(combined: combined) else {
             return nil
         }
+        AloMediaDiskCache.shared.touch(url)
         return try? AES.GCM.open(sealed, using: encryptionKey())
     }
 

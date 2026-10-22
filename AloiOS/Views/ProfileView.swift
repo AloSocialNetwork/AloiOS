@@ -867,6 +867,18 @@ func aloProfileGradient(_ style: String) -> LinearGradient {
     return LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
 }
 
+/// Hide only the iOS 26 button capsule, not the native bar's scroll-edge blur.
+private extension ToolbarContent {
+    @ToolbarContentBuilder
+    func profileSettingsTextBackground() -> some ToolbarContent {
+        if #available(iOS 26.0, *) {
+            sharedBackgroundVisibility(.hidden)
+        } else {
+            self
+        }
+    }
+}
+
 enum ProfileSettingsPage: String, CaseIterable, Identifiable {
     case root
     case privacy
@@ -877,6 +889,7 @@ enum ProfileSettingsPage: String, CaseIterable, Identifiable {
     case passwordChange
     case moderation
     case creatorStats
+    case dataStorage
 
     var id: String { rawValue }
 
@@ -891,6 +904,7 @@ enum ProfileSettingsPage: String, CaseIterable, Identifiable {
         case .passwordChange: return "Смена пароля"
         case .moderation: return "Модерация"
         case .creatorStats: return "Панель автора"
+        case .dataStorage: return "Данные и память"
         }
     }
 
@@ -905,6 +919,7 @@ enum ProfileSettingsPage: String, CaseIterable, Identifiable {
         case .passwordChange: return "Введите текущий и новый пароль"
         case .moderation: return "Жалобы, обжалования, журнал и реклама"
         case .creatorStats: return "Просмотры, реакции и подписчики"
+        case .dataStorage: return "Кеш и автозагрузка медиа"
         }
     }
 }
@@ -988,19 +1003,20 @@ struct ProfileEditSheet: View {
     /// One settings page as a full screen. Sheets and dialogs hang off the page that shows them,
     /// because a page covered by a pushed one can no longer present anything.
     private func settingsScreen(_ page: ProfileSettingsPage) -> some View {
-        VStack(spacing: 0) {
-            header(for: page)
-
-            ScrollView(showsIndicators: false) {
-                pageContent(page)
-                    .padding(.horizontal, 12)
-                    .padding(.top, 4)
-                    .padding(.bottom, 44)
-            }
+        ScrollView(showsIndicators: false) {
+            pageContent(page)
+                .padding(.horizontal, 12)
+                .padding(.top, 4)
+                .padding(.bottom, 44)
         }
         .foregroundStyle(AloTheme.text)
         .background(AloTheme.background.ignoresSafeArea())
-        .toolbar(.hidden, for: .navigationBar)
+        // Reuse moderation's system navigation and scroll-edge effect. No
+        // global bar appearance is changed, so moderation stays untouched.
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
+        .toolbar(.visible, for: .navigationBar)
+        .toolbar { settingsToolbar(for: page) }
         .background(AloNativeBackSwipe())
         .sheet(isPresented: page == .theme ? $isChatAppearancePresented : .constant(false)) {
             ChatAppearanceSheet(appearance: chatAppearanceDraft) { updated in
@@ -1050,51 +1066,53 @@ struct ProfileEditSheet: View {
         }
     }
 
-    /// The chat header's layout: the same glass Back in the same place, the title centred between
-    /// fixed side slots.
-    private func header(for page: ProfileSettingsPage) -> some View {
+    @ToolbarContentBuilder
+    private func settingsToolbar(for page: ProfileSettingsPage) -> some ToolbarContent {
         let hasChanges = hasChanges(page)
-        return ZStack {
+        ToolbarItem(placement: .principal) {
             Text(page.title)
                 .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(AloTheme.text)
                 .lineLimit(1)
-                .padding(.horizontal, 96)
                 .accessibilityAddTraits(.isHeader)
-
-            HStack {
-                AloChatCircleButton(
-                    systemImage: "chevron.left",
-                    label: page == .root
-                        ? "Закрыть настройки"
-                        : page == .passwordChange ? "Назад к безопасности" : "Назад к настройкам"
-                ) {
-                    switch page {
-                    case .root: dismiss()
-                    case .passwordChange: isPasswordChangeOpen = false
-                    default: openedPage = nil
-                    }
+        }
+        ToolbarItem(placement: .topBarLeading) {
+            Button {
+                switch page {
+                case .root: dismiss()
+                case .passwordChange: isPasswordChangeOpen = false
+                default: openedPage = nil
                 }
-                .accessibilityIdentifier("alo.settings.back")
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 17, weight: .semibold))
+                    Text("Назад")
+                        .font(.system(size: 17))
+                }
+                .foregroundStyle(AloTheme.accent)
+                .frame(minWidth: 82, minHeight: AloSocialMetrics.controlHeight, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Назад")
+            .accessibilityIdentifier("alo.settings.back")
+        }
+        .profileSettingsTextBackground()
 
-                Spacer(minLength: 0)
-                if page == .privacy || page == .notifications {
-                    Button("Сохранить") {
-                        save(page)
-                    }
+        if page == .privacy || page == .notifications {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Сохранить") { save(page) }
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(hasChanges ? AloTheme.accent : AloTheme.muted.opacity(0.55))
-                    .frame(width: 82, height: AloChatMetrics.control, alignment: .trailing)
+                    .frame(width: 82, height: AloSocialMetrics.controlHeight, alignment: .trailing)
                     .contentShape(Rectangle())
                     .buttonStyle(.plain)
                     .disabled(!hasChanges)
                     .accessibilityHint(hasChanges ? "Сохранить изменения на сервере" : "Нет изменений для сохранения")
-                }
             }
+            .profileSettingsTextBackground()
         }
-        .frame(height: AloChatMetrics.headerHeight)
-        .padding(.horizontal, AloChatMetrics.headerHorizontalInset)
-        .padding(.top, AloChatMetrics.headerTopInset)
     }
 
     @ViewBuilder
@@ -1114,6 +1132,8 @@ struct ProfileEditSheet: View {
             securityPage
         case .passwordChange:
             passwordChangePage
+        case .dataStorage:
+            AloDataStorageSettings()
         case .moderation, .creatorStats:
             EmptyView()
         }
@@ -1127,6 +1147,9 @@ struct ProfileEditSheet: View {
                 settingsNavRow(title: "Приватность", subtitle: "", systemName: "hand.raised", target: .privacy, showsIconTile: false, showsChevron: false)
                 settingDivider
                 settingsNavRow(title: "Уведомления", subtitle: "", systemName: "bell", target: .notifications, showsIconTile: false, showsChevron: false)
+                settingDivider
+                settingsNavRow(title: "Данные и память", subtitle: "", systemName: "internaldrive", target: .dataStorage, showsIconTile: false, showsChevron: false)
+                    .accessibilityIdentifier("alo.settings.storage")
                 settingDivider
                 settingsNavRow(title: "Бизнес-профиль", subtitle: "", systemName: "briefcase", target: .business, showsIconTile: false, showsChevron: false)
                 settingDivider
@@ -1167,8 +1190,8 @@ struct ProfileEditSheet: View {
     private var privacyPage: some View {
         VStack(spacing: 14) {
             privacySelectionCard(
-                title: "Стена",
-                subtitle: "Кто может писать на вашей стене",
+                title: "Личные сообщения",
+                subtitle: "Кто может писать вам",
                 selected: $messageScope,
                 options: [
                     ("all", "Все"),
@@ -1178,8 +1201,8 @@ struct ProfileEditSheet: View {
             )
 
             privacySelectionCard(
-                title: "Лайки",
-                subtitle: "Кто может видеть ваши лайкнутые посты",
+                title: "Профиль",
+                subtitle: "Кто может видеть публикации вашего профиля",
                 selected: $profileVisibility,
                 options: [
                     ("all", "Все"),
@@ -1532,6 +1555,7 @@ struct ProfileEditSheet: View {
         case .passwordChange: tint = AloTheme.accent
         case .moderation: tint = AloTheme.destructive
         case .creatorStats: tint = AloTheme.accent
+        case .dataStorage: tint = AloTheme.accent
         case .root: tint = AloTheme.accent
         }
         return Button {

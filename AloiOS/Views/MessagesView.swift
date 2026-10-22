@@ -1329,9 +1329,9 @@ private extension ConversationView {
                 }
             }) {
                 ChatAttachmentSheet(
-                    attachments: $localAttachments,
+                    attachments: $app.composerAttachments,
                     caption: $app.messageText,
-                    selfDestructSeconds: $mediaSelfDestructSeconds,
+                    selfDestructSeconds: $app.composerSelfDestructSeconds,
                     canAttachMedia: canSendMedia,
                     canCreatePoll: canComposeMessages,
                     contacts: shareableContacts,
@@ -1853,8 +1853,14 @@ struct ConversationView: View {
     let conversation: AloConversationDetail
     @Binding var blocksParentSwipe: Bool
 
-    @State private var localAttachments = [AloLocalAttachment]()
-    @State private var mediaSelfDestructSeconds = 0
+    private var localAttachments: [AloLocalAttachment] {
+        get { app.composerAttachments }
+        nonmutating set { app.composerAttachments = newValue }
+    }
+    private var mediaSelfDestructSeconds: Int {
+        get { app.composerSelfDestructSeconds }
+        nonmutating set { app.composerSelfDestructSeconds = newValue }
+    }
     @State private var isAttachmentSheetPresented = false
     @State private var isComposerContentPickerPresented = false
     @State private var isPollComposerPresented = false
@@ -1875,7 +1881,10 @@ struct ConversationView: View {
     @State private var messageAssistantRequest: ChatMessageAssistantRequest?
     @State private var activeMediaViewer: ChatMediaViewerState?
     @State private var editingMessage: AloChatMessage?
-    @State private var replyingToMessage: AloChatMessage?
+    private var replyingToMessage: AloChatMessage? {
+        get { app.composerReply }
+        nonmutating set { app.composerReply = newValue }
+    }
     @State private var deleteCandidateIds = [Int]()
     @State private var forwardPickerMessage: AloChatMessage?
     @State private var recordingMode: ChatRecordingMode = .voice
@@ -3143,11 +3152,18 @@ struct ConversationView: View {
         let composerCornerRadius: CGFloat = app.messageText.count > 40 || app.messageText.contains("\n") ? AloInputMetrics.multiLineRadius : AloInputMetrics.singleLineRadius
 
         return VStack(spacing: 8) {
+            if !app.chatDraftError.isEmpty {
+                HStack {
+                    Text(app.chatDraftError).font(.footnote).foregroundStyle(.orange)
+                    Button(app.chatDraftRecoveryActionTitle) { app.acknowledgeMissingDraftAttachments() }.font(.footnote).frame(minHeight: 44)
+                }
+                .accessibilityIdentifier("chat.draft.error")
+            }
             if let editingMessage {
                 EditDraftBar(preview: chatPreviewText(editingMessage)) {
                     withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
                         self.editingMessage = nil
-                        app.messageText = ""
+                        app.endComposerEdit()
                     }
                 }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -3212,7 +3228,7 @@ struct ConversationView: View {
                 } else if let recordedDraft {
                     RecordedDraftComposerPanel(
                         attachment: recordedDraft,
-                        duration: recordedDurations[recordedDraft.id] ?? 0,
+                        duration: recordedDurations[recordedDraft.id] ?? recordedDraft.durationSeconds ?? 0,
                         levels: recordedWaveforms[recordedDraft.id] ?? recordedDraft.waveform,
                         accentColor: chatAppearance.outgoingColor,
                         onRemove: {
@@ -3688,6 +3704,7 @@ struct ConversationView: View {
 
     private func beginReply(_ message: AloChatMessage) {
         guard message.id > 0 else { return }
+        if editingMessage != nil { app.endComposerEdit() }
         withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
             editingMessage = nil
             replyingToMessage = message
@@ -3697,6 +3714,7 @@ struct ConversationView: View {
 
     private func beginEdit(_ message: AloChatMessage) {
         guard canEditMessage(message) else { return }
+        app.beginComposerEdit()
         withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
             editingMessage = message
             replyingToMessage = nil
@@ -3727,13 +3745,13 @@ struct ConversationView: View {
     }
 
     private func applyForward(_ message: AloChatMessage, to target: AloConversationSummary) {
-        app.pendingForwardDraft = AloForwardMeta(userId: message.senderId, messageId: message.id, user: nil)
-        app.pendingForwardTitle = "Переслать сообщение"
         forwardPickerMessage = nil
         clearSelection()
         if target.peerId != conversation.peerId {
             app.openConversation(target)
         }
+        app.pendingForwardDraft = AloForwardMeta(userId: message.senderId, messageId: message.id, user: nil)
+        app.pendingForwardTitle = "Переслать сообщение"
     }
 
     private func deleteSelected(mode: String) {
@@ -3752,7 +3770,7 @@ struct ConversationView: View {
         if let editingMessage {
             app.editMessage(editingMessage, body: app.messageText) {
                 self.editingMessage = nil
-                self.app.messageText = ""
+                self.app.endComposerEdit()
             }
             return
         }
@@ -6663,8 +6681,15 @@ private struct RemoteAttachmentCell: View {
                         image.resizable().scaledToFill()
                             .frame(width: geometry.size.width, height: geometry.size.height)
                             .clipped()
-                    case .failure:
-                        RemoteMediaLoadingPlaceholder(isVideo: isVideo, isFailed: true)
+                    case .failure(let error):
+                        if case AloSecureMediaError.downloadRequired = error {
+                            VStack(spacing: 8) {
+                                Image(systemName: "arrow.down.circle").font(.system(size: 34))
+                                Text("Нажмите, чтобы загрузить").font(.footnote)
+                            }.foregroundStyle(AloTheme.text)
+                        } else {
+                            RemoteMediaLoadingPlaceholder(isVideo: isVideo, isFailed: true)
+                        }
                     case .empty:
                         RemoteMediaLoadingPlaceholder(isVideo: isVideo, isFailed: false)
                     @unknown default:

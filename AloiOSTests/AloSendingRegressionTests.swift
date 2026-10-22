@@ -54,6 +54,52 @@ private final class SendingURLProtocol: URLProtocol {
 
 @Suite(.serialized)
 struct AloMediaSendDeliveryTests {
+    @Test func cachedFileDownloadUsesSessionAndRejectsOversizedResponses() async throws {
+        SendingURLProtocol.install { _ in (200, ["fixture": String(repeating: "a", count: 4_096)]) }
+        defer { SendingURLProtocol.install(nil) }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [SendingURLProtocol.self]
+        let api = AloAPIClient(baseURLs: [URL(string: "http://cache-download.invalid/")!], configuration: config)
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent("cache-download-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: destination) }
+        try await api.downloadCachedMedia("/media/file", to: destination, expectedSize: nil, maximumSize: 8_192)
+        let decoded = try JSONSerialization.jsonObject(with: Data(contentsOf: destination)) as? [String: String]
+        #expect(decoded?["fixture"]?.count == 4_096)
+        try FileManager.default.removeItem(at: destination)
+        do {
+            try await api.downloadCachedMedia("/media/file", to: destination, expectedSize: nil, maximumSize: 1_024)
+            Issue.record("A response exceeding the download ceiling must be rejected")
+        } catch { #expect(!FileManager.default.fileExists(atPath: destination.path)) }
+    }
+
+    @Test func loadingHistoryRegistersLegacyVoiceWithoutDownloadingItsBytes() async throws {
+        let lock = NSLock()
+        var unexpectedMediaRequests = 0
+        let remote = "/media/lazy-\(UUID().uuidString).m4a"
+        SendingURLProtocol.install { request in
+            if request.url?.path == "/api/messages/1999992" {
+                return (200, ["peer": ["id": 1_999_992, "name": "Тест"], "items": [[
+                    "id": 1, "senderId": 1_999_992, "attachmentType": "voice", "attachmentUrl": remote,
+                    "attachments": [["url": remote, "type": "voice", "name": "voice.m4a", "metadata": ["size": "3000"]]]
+                ]]])
+            }
+            lock.lock(); unexpectedMediaRequests += 1; lock.unlock()
+            throw URLError(.notConnectedToInternet)
+        }
+        defer { SendingURLProtocol.install(nil) }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [SendingURLProtocol.self]
+        let api = AloAPIClient(baseURLs: [URL(string: "http://cache-regression.invalid/")!], configuration: config)
+        let history = try await api.loadConversation(peerId: 1_999_992)
+        let message = try #require(history.items.first)
+        let url = try #require(URL(string: message.attachmentUrl))
+        defer { AloSecureMediaStore.shared.remove(urls: [url]) }
+        #expect(AloSecureMediaStore.shared.isSecureURL(url))
+        #expect(!AloSecureMediaStore.shared.isAvailableLocally(url))
+        #expect(unexpectedMediaRequests == 0)
+        #expect(AloSecureMediaStore.shared.remoteURL(for: url) == remote)
+    }
+
     @Test @MainActor func publicPhotoDraftUploadsPlainJPEGNotEmptyDataOrCiphertext() async throws {
         let source = FileManager.default.temporaryDirectory.appendingPathComponent("alo-public-photo-test-\(UUID().uuidString).png")
         let image = UIGraphicsImageRenderer(size: CGSize(width: 128, height: 128)).image { context in
@@ -395,6 +441,9 @@ final class AloSendingRegressionTests: XCTestCase {
     @MainActor func testStoryFailureStopsSpinnerAndKeepsUsefulError() async throws {
         SendingURLProtocol.install { _ in throw URLError(.timedOut) }
         let model = AloAppModel(api: api())
+        let owner = 1_999_997_904
+        model.bootstrap = AloBootstrapData(["data": ["me": ["id": owner, "name": "Тест"]]])
+        defer { AloSecureOutboxStore.shared.scheduleClear(ownerUserId: owner) }
         model.createStory(body: "Не терять текст")
         XCTAssertTrue(model.isCreatingStory)
         try await waitUntil { !model.isCreatingStory }
