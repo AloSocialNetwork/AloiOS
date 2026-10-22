@@ -117,10 +117,11 @@ struct AloGroupCallOverlay: View {
                     .transition(.scale(scale: 0.92).combined(with: .opacity))
                 }
 
+                // Telegram keeps the round buttons 48 pt above the safe area, their titles below them.
                 controls(call)
                     .padding(.horizontal, 16)
-                    .padding(.top, 14)
-                    .padding(.bottom, max(18, safeArea.bottom + 6))
+                    .padding(.top, 18)
+                    .padding(.bottom, max(24, safeArea.bottom + 26))
             }
 
             if isCameraPickerVisible {
@@ -308,88 +309,113 @@ struct AloGroupCallOverlay: View {
         .accessibilityIdentifier("alo.group-call.participant.\(participant.id)")
     }
 
-    /// Video and speaker on the left, Telegram's big microphone button in the middle, leave on the right.
+    /// Telegram's video-chat controls (VideoChatScreen): one row of equal 56 pt round buttons —
+    /// speaker, video, microphone, leave — centred up to 33 pt apart, each titled underneath.
     private func controls(_ call: AloGroupCallState) -> some View {
-        HStack(alignment: .top, spacing: 0) {
-            VStack(spacing: 14) {
-                smallControl(title: "Видео", icon: call.isVideoEnabled ? "video.fill" : "video.slash.fill",
-                             selected: call.isVideoEnabled, loading: coordinator.isCameraStarting) {
-                    selectedCamera = call.isFrontCamera ? .front : .back
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) { isCameraPickerVisible = true }
-                }
-                smallControl(title: call.isSpeakerOn ? "Динамик" : "Телефон",
-                             icon: call.isSpeakerOn ? "speaker.wave.2.fill" : "iphone",
-                             selected: call.isSpeakerOn, action: coordinator.toggleSpeaker)
+        let mic = AloGroupCallMicState(call: call, coordinator: coordinator)
+        return HStack(alignment: .top, spacing: 0) {
+            actionButton(
+                title: "Динамик",
+                icon: call.isSpeakerOn ? "speaker.wave.2.fill" : "speaker.fill",
+                background: activeColor(call.isSpeakerOn, mic: mic),
+                action: coordinator.toggleSpeaker
+            )
+            .accessibilityLabel(call.isSpeakerOn ? "Динамик включён" : "Динамик выключен")
+            controlGap
+            actionButton(
+                title: "Видео",
+                icon: call.isVideoEnabled ? "video.fill" : "video.slash.fill",
+                background: activeColor(call.isVideoEnabled, mic: mic),
+                loading: coordinator.isCameraStarting
+            ) {
+                selectedCamera = call.isFrontCamera ? .front : .back
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) { isCameraPickerVisible = true }
             }
-            Spacer(minLength: 4)
-            microphoneButton(call)
-                .layoutPriority(1)
-            Spacer(minLength: 4)
-            VStack(spacing: 14) {
-                smallControl(title: "Выйти", icon: "xmark", destructive: true, action: coordinator.leave)
-                    .accessibilityIdentifier("alo.group-call.leave")
-            }
+            controlGap
+            microphoneButton(call, state: mic)
+            controlGap
+            actionButton(title: "Выйти", icon: "xmark", background: AloGroupCallTheme.leave, action: coordinator.leave)
+                .accessibilityIdentifier("alo.group-call.leave")
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    /// Up to Telegram's 33 pt between buttons, less on a narrow phone.
+    private var controlGap: some View {
+        Spacer(minLength: 12).frame(maxWidth: 33)
+    }
+
+    /// Telegram's colours for an action button that is on: blue while muted, green while live.
+    private func activeColor(_ isOn: Bool, mic: AloGroupCallMicState) -> Color {
+        guard isOn else { return AloGroupCallTheme.control }
+        switch mic.kind {
+        case .live: return AloGroupCallTheme.controlLive
+        case .raiseHand: return AloGroupCallTheme.controlHand
+        case .muted: return AloGroupCallTheme.controlMuted
         }
     }
 
-    private func microphoneButton(_ call: AloGroupCallState) -> some View {
-        let state = AloGroupCallMicState(call: call, coordinator: coordinator)
+    private func microphoneButton(_ call: AloGroupCallState, state: AloGroupCallMicState) -> some View {
         let speaking = coordinator.sfuRoom?.speakingParticipantIds.contains(coordinator.localUserId) == true && !call.isMuted
         return Button(action: coordinator.toggleMute) {
-            VStack(spacing: 10) {
+            VStack(spacing: 5) {
                 ZStack {
+                    // While you speak the button breathes, as Telegram's blob does.
                     Circle()
                         .fill(LinearGradient(colors: state.colors, startPoint: .topLeading, endPoint: .bottomTrailing))
-                        .opacity(0.28)
-                        .frame(width: 136, height: 136)
-                        .scaleEffect(speaking ? 1.08 : 0.94)
-                        .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true), value: speaking)
+                        .opacity(0.3)
+                        .frame(width: 56, height: 56)
+                        .scaleEffect(speaking ? 1.3 : 1)
+                        .animation(speaking ? .easeInOut(duration: 0.5).repeatForever(autoreverses: true) : .easeOut(duration: 0.2), value: speaking)
                     Circle()
                         .fill(LinearGradient(colors: state.colors, startPoint: .topLeading, endPoint: .bottomTrailing))
-                        .frame(width: 112, height: 112)
-                        .shadow(color: state.colors.first!.opacity(0.45), radius: 18)
+                        .frame(width: 56, height: 56)
                     Image(systemName: state.icon)
-                        .font(.system(size: 38, weight: .semibold))
+                        .font(.system(size: 22, weight: .semibold))
                         .foregroundStyle(.white)
                         .contentTransition(.symbolEffect(.replace))
                 }
-                VStack(spacing: 2) {
-                    Text(state.title).font(.system(size: 17, weight: .semibold)).foregroundStyle(.white)
-                    Text(state.subtitle).font(.system(size: 13)).foregroundStyle(Color.white.opacity(0.6))
-                        .multilineTextAlignment(.center).lineLimit(2)
-                }
-                // Flexible, so the row of controls never grows wider than the screen.
-                .frame(maxWidth: 230)
+                .frame(width: 56, height: 56)
+                Text(state.shortTitle)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .frame(width: 56)
             }
         }
-        .buttonStyle(AloPressBounceButtonStyle(pressedScale: 0.94))
+        .buttonStyle(AloPressBounceButtonStyle(pressedScale: 0.92))
         .accessibilityLabel(state.title)
+        .accessibilityHint(state.subtitle)
         .accessibilityIdentifier("alo.group-call.microphone")
         .sensoryFeedback(.impact(weight: .medium), trigger: call.isMuted)
     }
 
-    private func smallControl(
+    private func actionButton(
         title: String,
         icon: String,
-        selected: Bool = false,
-        destructive: Bool = false,
+        background: Color,
         loading: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            VStack(spacing: 6) {
+            VStack(spacing: 5) {
                 ZStack {
-                    Circle().fill(destructive ? AloGroupCallTheme.leave : selected ? Color.white.opacity(0.28) : Color.white.opacity(0.14))
+                    Circle().fill(background)
                     if loading {
                         ProgressView().tint(.white)
                     } else {
-                        Image(systemName: icon).font(.system(size: 20, weight: .semibold)).foregroundStyle(.white)
+                        Image(systemName: icon).font(.system(size: 21, weight: .semibold)).foregroundStyle(.white)
                     }
                 }
-                .frame(width: 54, height: 54)
-                Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(.white).lineLimit(1)
+                .frame(width: 56, height: 56)
+                Text(title)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .frame(width: 56)
             }
-            .frame(width: 72)
         }
         .buttonStyle(AloPressBounceButtonStyle(pressedScale: 0.90))
     }
@@ -437,7 +463,13 @@ enum AloGroupCallTheme {
     static let live = Color(red: 0.20, green: 0.80, blue: 0.47)
     static let hand = Color(red: 0.36, green: 0.62, blue: 1.0)
     static let recording = Color(red: 1.0, green: 0.27, blue: 0.27)
-    static let leave = Color(red: 1.0, green: 0.23, blue: 0.19).opacity(0.9)
+    /// VideoChatActionButtonComponent: the idle button, an active one while muted / live / asking
+    /// to speak, and the dark red of Leave.
+    static let control = Color(red: 0x25 / 255, green: 0x27 / 255, blue: 0x2e / 255).opacity(0.72)
+    static let controlMuted = Color(red: 0x21 / 255, green: 0x47 / 255, blue: 0x7d / 255)
+    static let controlLive = Color(red: 0x34 / 255, green: 0xC6 / 255, blue: 0x59 / 255)
+    static let controlHand = Color(red: 0x32 / 255, green: 0x52 / 255, blue: 0xEF / 255)
+    static let leave = Color(red: 0x33 / 255, green: 0x0d / 255, blue: 0x0b / 255)
     static let muted = [Color(red: 0.23, green: 0.55, blue: 0.96), Color(red: 0.35, green: 0.35, blue: 0.85)]
     static let speaking = [Color(red: 0.20, green: 0.80, blue: 0.47), Color(red: 0.19, green: 0.69, blue: 0.78)]
     static let raiseHand = [Color(red: 0.61, green: 0.35, blue: 0.96), Color(red: 0.96, green: 0.42, blue: 0.61)]
@@ -445,33 +477,45 @@ enum AloGroupCallTheme {
 
 /// What the big button says: muted, live, or (muted by an admin) raise / lower your hand.
 struct AloGroupCallMicState {
+    enum Kind { case muted, live, raiseHand }
+
+    let kind: Kind
     let colors: [Color]
     let icon: String
     let title: String
     let subtitle: String
+    /// The word under Telegram's round microphone button.
+    let shortTitle: String
 
     @MainActor init(call: AloGroupCallState, coordinator: AloGroupCallCoordinator) {
         if coordinator.isMutedByAdmin && call.isMuted {
+            kind = .raiseHand
             colors = AloGroupCallTheme.raiseHand
             if coordinator.isHandRaised {
                 icon = "hand.raised.fill"
                 title = "Вы подняли руку"
                 subtitle = "Ждём разрешения администратора"
+                shortTitle = "Рука поднята"
             } else {
                 icon = "hand.raised"
                 title = "Поднять руку"
                 subtitle = "Микрофон выключен администратором"
+                shortTitle = "Поднять руку"
             }
         } else if call.isMuted {
+            kind = .muted
             colors = AloGroupCallTheme.muted
             icon = "mic.slash.fill"
             title = "Микрофон выключен"
             subtitle = "Нажмите, чтобы говорить"
+            shortTitle = "Включить"
         } else {
+            kind = .live
             colors = AloGroupCallTheme.speaking
             icon = "mic.fill"
             title = "Вы в эфире"
             subtitle = "Нажмите, чтобы выключить микрофон"
+            shortTitle = "Выключить"
         }
     }
 }
