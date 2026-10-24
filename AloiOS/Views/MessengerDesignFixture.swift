@@ -40,6 +40,9 @@ struct AloMessageDesignGeometryModifier: ViewModifier {
 /// Explicit, offline UI-test fixture. Never loaded in Release or persisted as an account.
 extension AloAppModel {
     func installMessengerDesignFixture() async {
+        let defaults = UserDefaults.standard
+        let toolsOn = defaults.object(forKey: "ALO_UI_CONTENT_TOOLS") == nil || defaults.bool(forKey: "ALO_UI_CONTENT_TOOLS")
+        contentTools.installFixture(translation: toolsOn, transcription: toolsOn, consent: defaults.bool(forKey: "ALO_UI_CONTENT_CONSENT"))
         var peer: [String: Any] = ["id": 990002, "name": "Александр", "username": "alex_ui_fixture", "description": "Тестовый профиль интерфейса, не реальный аккаунт", "online": false, "lastSeenAt": "2026-09-05T09:40:00Z"]
         if UserDefaults.standard.bool(forKey: "ALO_UI_SEARCH_INCOMING") {
             peer["relation"] = ["friendStatus": "incoming", "incomingRequestId": 990012]

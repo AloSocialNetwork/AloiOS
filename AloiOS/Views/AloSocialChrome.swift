@@ -183,6 +183,8 @@ struct AloSocialSegments<Value: Hashable>: View {
                 } label: {
                     Text(title(value))
                         .font(.system(size: min(labelSize, AloSocialMetrics.maximumUtilitySize), weight: .semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                         .foregroundStyle(selected == value ? AloTheme.text : AloTheme.muted)
                         .frame(maxWidth: .infinity, minHeight: min(height, AloSocialMetrics.maximumControlHeight))
                         .contentShape(Capsule())

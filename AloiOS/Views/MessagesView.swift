@@ -1466,17 +1466,20 @@ private extension ConversationView {
                     localAttachments.append(attachment)
                 }
             }
-            .sheet(item: $messageAssistantRequest) { request in
-                ChatMessageAssistantSheet(
-                    request: request,
-                    onTranslate: { targetLanguage in
-                        try await app.translateMessage(request.message, targetLanguage: targetLanguage)
-                    },
-                    onTranscribe: { language in
-                        try await app.transcribeVoiceMessage(request.message, language: language)
-                    }
-                )
+            .sheet(item: $translationPickerMessage, onDismiss: {
+                // Ask for consent (if it is still missing) only once the picker is gone, or the alert is lost under it.
+                guard let pending = pendingTranslation else { return }
+                pendingTranslation = nil
+                app.contentTools.translate(message: pending.message, conversation: conversation, to: pending.language)
+            }) { message in
+                ChatTranslationLanguageSheet(
+                    languages: app.contentTools.orderedLanguages(),
+                    lastLanguage: app.contentTools.lastTargetLanguage
+                ) { language in
+                    pendingTranslation = (message, language)
+                }
             }
+            .modifier(AloContentConsentAlert(store: app.contentTools))
             .fullScreenCover(item: $localPreviewAttachment) { attachment in
                 LocalAttachmentFullscreenPreview(
                     attachment: attachment,
@@ -1880,7 +1883,8 @@ struct ConversationView: View {
     @State private var selectionMode = false
     @State private var actionMessage: AloChatMessage?
     @State private var actionMessageFrame: CGRect?
-    @State private var messageAssistantRequest: ChatMessageAssistantRequest?
+    @State private var translationPickerMessage: AloChatMessage?
+    @State private var pendingTranslation: (message: AloChatMessage, language: AloContentLanguage)?
     @State private var activeMediaViewer: ChatMediaViewerState?
     @State private var editingMessage: AloChatMessage?
     private var replyingToMessage: AloChatMessage? {
@@ -2431,21 +2435,21 @@ struct ConversationView: View {
                     let message = actionMessage
                     closeMessageActions()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
-                        messageAssistantRequest = ChatMessageAssistantRequest(
-                            message: message,
-                            kind: .translation
-                        )
+                        translationPickerMessage = message
                     }
+                },
+                onHideTranslation: {
+                    app.contentTools.hideTranslation(actionMessage.id)
+                    closeMessageActions()
                 },
                 onTranscribe: {
                     let message = actionMessage
                     closeMessageActions()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
-                        messageAssistantRequest = ChatMessageAssistantRequest(
-                            message: message,
-                            kind: .transcription
-                        )
-                    }
+                    let attachments = message.attachments.isEmpty
+                        ? [AloMessageAttachment(["type": message.attachmentType, "url": message.attachmentUrl, "name": message.attachmentName])]
+                        : message.attachments
+                    guard let attachment = attachments.last(where: { $0.isVoiceLike || $0.isCircleLike }) else { return }
+                    app.contentTools.toggleTranscript(message: message, attachment: attachment, conversation: conversation)
                 },
                 onReply: {
                     beginReply(actionMessage)
@@ -4985,7 +4989,8 @@ private struct ChatMessageRow: View {
                     isScheduled: message.isScheduled,
                     preparePlayback: prepareExpiringMediaPlayback,
                     onLongPress: { onLongPress(bubbleFrame) },
-                    isTapSuppressed: { shouldSuppressMediaOpen }
+                    isTapSuppressed: { shouldSuppressMediaOpen },
+                    tools: attachment.id == voiceAttachments.last?.id ? toolsContext(transcribing: true) : nil
                 )
             }
 
@@ -5099,7 +5104,8 @@ private struct ChatMessageRow: View {
                         accentColor: appearance.outgoingColor,
                         preparePlayback: prepareExpiringMediaPlayback,
                         onLongPress: { onLongPress(bubbleFrame) },
-                        isTapSuppressed: { shouldSuppressMediaOpen }
+                        isTapSuppressed: { shouldSuppressMediaOpen },
+                        tools: attachment.id == voiceAttachments.last?.id ? toolsContext(transcribing: true) : nil
                     )
                         .frame(maxWidth: 292)
                 }
@@ -5114,6 +5120,8 @@ private struct ChatMessageRow: View {
                         isTapSuppressed: { shouldSuppressMediaOpen }
                     )
                         .frame(width: min(212, bubbleMaxWidth), height: min(212, bubbleMaxWidth))
+                        .overlay(alignment: .bottomLeading) { circleTranscribePill(attachment) }
+                    circleTranscript(attachment)
                 }
 
                 if let callLogMeta {
@@ -5126,6 +5134,7 @@ private struct ChatMessageRow: View {
                 } else if !message.body.isEmpty {
                     AloRichMessageText(body: message.body, entities: message.entities)
                         .accessibilityIdentifier("alo.message.body.\(message.id)")
+                    translationUnderText
                 }
 
                 if callLogMeta == nil {
@@ -5249,6 +5258,7 @@ private struct ChatMessageRow: View {
                         .opacity(message.reactions.isEmpty ? 1 : 0)
                         .accessibilityHidden(!message.reactions.isEmpty)
                 }
+                translationUnderText
             }
             VStack(spacing: 0) {
                 if !message.reactions.isEmpty { inlineReactionFooter(showMeta: true) }
@@ -5346,6 +5356,14 @@ private struct ChatMessageRow: View {
         }
     }
 
+    /// What «Aa» (a voice message or circle) or «Перевести» (text) needs; nil where the server or the chat does not allow it.
+    private func toolsContext(transcribing: Bool) -> AloContentToolsContext? {
+        guard !previewOnly, !selectionMode, let conversation = app.activeConversation else { return nil }
+        let store = app.contentTools
+        let allowed = transcribing ? store.canTranscribe(message, in: conversation) : store.canTranslate(message, in: conversation)
+        return allowed ? AloContentToolsContext(store: store, message: message, conversation: conversation) : nil
+    }
+
     private func circleDiameter(_ attachment: AloMessageAttachment) -> CGFloat {
         AloCirclePresentation.diameter(available: bubbleMaxWidth,
             expanded: !previewOnly && circlePlayback?.item?.id == attachment.id)
@@ -5389,6 +5407,8 @@ private struct ChatMessageRow: View {
                             .clipShape(Capsule())
                             .padding(10)
                     }
+                    .overlay(alignment: .bottomLeading) { circleTranscribePill(attachment) }
+                circleTranscript(attachment)
                 if attachment.id == circleAttachments.last?.id, !message.reactions.isEmpty {
                     MessageReactionStrip(reactions: message.reactions, onTap: {
                         guard !shouldSuppressMediaOpen else { return }
@@ -5399,6 +5419,34 @@ private struct ChatMessageRow: View {
             }
 
             messageExpiryBadge
+        }
+    }
+
+    /// «Aa» on the corner of a video circle, in the same dark pill as its time.
+    @ViewBuilder
+    private func circleTranscribePill(_ attachment: AloMessageAttachment) -> some View {
+        if attachment.id == circleAttachments.last?.id, let tools = toolsContext(transcribing: true) {
+            AloTranscribeAccessory(store: tools.store, context: tools, attachment: attachment,
+                                   tint: .white, fill: Color.black.opacity(0.46))
+                .padding(10)
+        }
+    }
+
+    /// What the circle says, in a bubble of its own under it.
+    @ViewBuilder
+    private func circleTranscript(_ attachment: AloMessageAttachment) -> some View {
+        if attachment.id == circleAttachments.last?.id, let tools = toolsContext(transcribing: true) {
+            AloTranscriptAccessory(store: tools.store, messageId: message.id,
+                                   bubbleFill: isMine ? appearance.outgoingColor : appearance.incomingColor)
+                .frame(width: AloCirclePresentation.diameter(available: bubbleMaxWidth, expanded: false), alignment: .leading)
+        }
+    }
+
+    /// «Перевод · English» and the translated text, when the person asked for it.
+    @ViewBuilder
+    private var translationUnderText: some View {
+        if let tools = toolsContext(transcribing: false) {
+            AloTranslationAccessory(store: tools.store, messageId: message.id)
         }
     }
 
@@ -6260,6 +6308,8 @@ private struct VoiceMessageAttachmentView: View {
     var preparePlayback: (() async -> Bool)?
     let onLongPress: () -> Void
     var isTapSuppressed: () -> Bool = { false }
+    /// Set when the server can turn this sound into text: adds Telegram's «Aa» pill and the text under the waveform.
+    var tools: AloContentToolsContext?
 
     @State private var player: AVPlayer?
     @State private var timeObserver: Any?
@@ -6275,6 +6325,15 @@ private struct VoiceMessageAttachmentView: View {
     @State private var isPreparingPlayback = false
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            voiceRow
+            if let tools {
+                AloTranscriptAccessory(store: tools.store, messageId: tools.message.id)
+            }
+        }
+    }
+
+    private var voiceRow: some View {
         HStack(alignment: .center, spacing: 9) {
             Button(action: requestPlaybackToggle) {
                 ZStack {
@@ -6344,6 +6403,9 @@ private struct VoiceMessageAttachmentView: View {
                     }
                 }
                 .frame(height: 12, alignment: .center)
+            }
+            if let tools {
+                AloTranscribeAccessory(store: tools.store, context: tools, attachment: attachment)
             }
         }
         .frame(maxWidth: .infinity, minHeight: 39, alignment: .leading)
@@ -7503,7 +7565,7 @@ private enum ChatRecordingMode: Equatable {
 
     var shortTitle: String {
         switch self {
-        case .voice: return "ГС"
+        case .voice: return "Голосовое"
         case .circle: return "Кружок"
         }
     }
@@ -8761,6 +8823,7 @@ private struct MessageActionOverlay: View {
     let onCopy: () -> Void
     let onForward: () -> Void
     let onTranslate: () -> Void
+    let onHideTranslation: () -> Void
     let onTranscribe: () -> Void
     let onReply: () -> Void
     let onPin: () -> Void
@@ -8974,8 +9037,19 @@ private struct MessageActionOverlay: View {
                     if message.chatCallLogMeta == nil, message.selfDestructSeconds <= 0, !isProtected {
                         action("Переслать", "arrowshape.turn.up.right", perform: onForward)
                     }
-                    if canTranslate { action("Перевести", "translate", perform: onTranslate) }
-                    if canTranscribe { action("Расшифровать голосовое", "waveform.badge.magnifyingglass", perform: onTranscribe) }
+                    if canTranslate {
+                        if shownTranslation {
+                            action("Скрыть перевод", "translate", perform: onHideTranslation)
+                                .accessibilityIdentifier("alo.message.action.hide-translation")
+                        } else {
+                            action("Перевести", "translate", perform: onTranslate)
+                                .accessibilityIdentifier("alo.message.action.translate")
+                        }
+                    }
+                    if canTranscribe {
+                        action(transcribeTitle, "text.bubble", perform: onTranscribe)
+                            .accessibilityIdentifier("alo.message.action.transcribe")
+                    }
                     if canClosePoll {
                         MessageActionButton(title: "Завершить опрос", systemName: "chart.bar.xaxis") {
                             showsClosePollConfirmation = true
@@ -9105,14 +9179,22 @@ private struct MessageActionOverlay: View {
     }
 
     private var canTranslate: Bool {
-        !message.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-            AloPollCodec.decode(message.body) == nil &&
-            message.chatCallLogMeta == nil
+        app.contentTools.canTranslate(message, in: app.activeConversation)
+    }
+
+    private var shownTranslation: Bool {
+        app.contentTools.shownTranslation(message.id) != nil
     }
 
     private var canTranscribe: Bool {
         let attachments = !message.attachments.isEmpty ? message.attachments : legacyAttachments
-        return attachments.contains(where: \.isVoiceLike)
+        return attachments.contains(where: { $0.isVoiceLike || $0.isCircleLike }) &&
+            app.contentTools.canTranscribe(message, in: app.activeConversation)
+    }
+
+    private var transcribeTitle: String {
+        guard case .ready? = app.contentTools.transcriptPhase(message.id) else { return "Расшифровать" }
+        return app.contentTools.isTranscriptExpanded(message.id) ? "Скрыть расшифровку" : "Показать расшифровку"
     }
 
     private var legacyAttachments: [AloMessageAttachment] {
@@ -10216,169 +10298,6 @@ private struct ChatEmojiEntry: Identifiable {
     }
 
     var id: String { emoji }
-}
-
-private struct ChatMessageAssistantRequest: Identifiable {
-    enum Kind {
-        case translation
-        case transcription
-
-        var title: String {
-            switch self {
-            case .translation: return "Перевод"
-            case .transcription: return "Расшифровка"
-            }
-        }
-    }
-
-    let id = UUID()
-    let message: AloChatMessage
-    let kind: Kind
-}
-
-private struct ChatMessageAssistantSheet: View {
-    enum Phase: Equatable {
-        case ready
-        case processing
-        case result(String)
-        case unavailable(String)
-    }
-
-    @Environment(\.dismiss) private var dismiss
-    let request: ChatMessageAssistantRequest
-    let onTranslate: (String) async throws -> AloMessageTranslation
-    let onTranscribe: (String) async throws -> AloVoiceTranscription
-    @State private var preferredLanguage = "ru"
-    @State private var phase: Phase = .ready
-
-    private var actionTitle: String {
-        request.kind == .translation ? "Перевести" : "Расшифровать"
-    }
-
-    private var sourcePreview: String {
-        if request.kind == .translation { return request.message.body }
-        return "Голосовое сообщение будет расшифровано после вашего явного подтверждения."
-    }
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    VStack(alignment: .leading, spacing: 7) {
-                        Label(request.kind == .translation ? "Перевод сообщения" : "Расшифровка голосового", systemImage: request.kind == .translation ? "translate" : "waveform.badge.magnifyingglass")
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(AloTheme.text)
-                        Text(sourcePreview)
-                            .font(.system(size: 15))
-                            .foregroundStyle(AloTheme.muted)
-                            .lineLimit(request.kind == .translation ? 6 : 3)
-                    }
-                    .padding(15)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(AloTheme.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(request.kind == .translation ? "Перевести на" : "Язык речи")
-                            .font(.system(size: 14, weight: .bold))
-                            .foregroundStyle(AloTheme.muted)
-                        Picker("Язык", selection: $preferredLanguage) {
-                            Text("Русский").tag("ru")
-                            Text("English").tag("en")
-                            Text("Deutsch").tag("de")
-                            Text("Español").tag("es")
-                        }
-                        .pickerStyle(.segmented)
-                    }
-
-                    phaseView
-                }
-                .padding(18)
-            }
-            .background(AloTheme.background.ignoresSafeArea())
-            .navigationTitle(request.kind.title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button(phase == .processing ? "" : "Закрыть") { dismiss() }
-                        .disabled(phase == .processing)
-                }
-                if phase == .ready {
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button(actionTitle) { perform() }
-                            .fontWeight(.semibold)
-                    }
-                }
-            }
-        }
-        .presentationDetents([.medium, .large])
-    }
-
-    @ViewBuilder
-    private var phaseView: some View {
-        switch phase {
-        case .ready:
-            Text("Данные будут отправлены на обработку только после нажатия «\(actionTitle)». Для защищённых чатов сервер должен поддерживать этот запрос.")
-                .font(.system(size: 14))
-                .foregroundStyle(AloTheme.muted)
-        case .processing:
-            HStack(spacing: 10) {
-                ProgressView().tint(AloTheme.accent)
-                Text("Обрабатываем…")
-                    .font(.system(size: 16, weight: .semibold))
-            }
-            .foregroundStyle(AloTheme.text)
-            .padding(15)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(AloTheme.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        case let .result(text):
-            VStack(alignment: .leading, spacing: 8) {
-                Label("Готово", systemImage: "checkmark.circle.fill")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(AloTheme.accent)
-                Text(text)
-                    .font(.system(size: 16))
-                    .foregroundStyle(AloTheme.text)
-                    .textSelection(.enabled)
-            }
-            .padding(15)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(AloTheme.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        case let .unavailable(message):
-            VStack(alignment: .leading, spacing: 8) {
-                Label("Пока недоступно", systemImage: "exclamationmark.triangle.fill")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(AloTheme.muted)
-                Text(message)
-                    .font(.system(size: 14))
-                    .foregroundStyle(AloTheme.muted)
-            }
-            .padding(15)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(AloTheme.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        }
-    }
-
-    private func perform() {
-        phase = .processing
-        Task {
-            do {
-                let text: String
-                switch request.kind {
-                case .translation:
-                    text = try await onTranslate(preferredLanguage).text
-                case .transcription:
-                    text = try await onTranscribe(preferredLanguage).text
-                }
-                phase = .result(text)
-            } catch let error as AloAPIError where error.status == 404 || error.status == 501 {
-                phase = .unavailable("Сервер Alo ещё не поддерживает эту операцию. Контракт клиента уже подготовлен; повторите после обновления сервера.")
-            } catch let error as AloAPIError {
-                phase = .unavailable(error.message)
-            } catch {
-                phase = .unavailable("Не удалось выполнить запрос. Проверьте соединение и попробуйте ещё раз.")
-            }
-        }
-    }
 }
 
 private enum ChatAttachmentTab: String, CaseIterable {
@@ -14129,7 +14048,7 @@ private enum PeerMediaTab: String, CaseIterable, Identifiable {
         switch self {
         case .photos: return "Фото"
         case .videos: return "Видео"
-        case .voices: return "ГС"
+        case .voices: return "Голосовые"
         case .files: return "Файлы"
         }
     }
@@ -14676,6 +14595,12 @@ private extension String {
     var hasVideoExtension: Bool {
         hasSuffix(".mp4") || hasSuffix(".mov") || hasSuffix(".m4v") || hasSuffix(".webm")
     }
+}
+
+/// The checks the content tools need from this file's private attachment helpers.
+extension AloMessageAttachment {
+    var isCircleAttachment: Bool { isCircleLike }
+    var isVoiceAttachment: Bool { isVoiceLike }
 }
 
 private extension AloMessageAttachment {

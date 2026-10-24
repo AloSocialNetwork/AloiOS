@@ -158,7 +158,10 @@ final class AloAppModel: ObservableObject {
     private var accountGeneration = UUID()
     @Published var bootstrap: AloBootstrapData? {
         didSet {
-            if oldValue?.me.id != bootstrap?.me.id { accountGeneration = UUID(); likedPosts = [] }
+            if oldValue?.me.id != bootstrap?.me.id {
+                accountGeneration = UUID(); likedPosts = []
+                contentTools.accountChanged(bootstrap?.me.id)
+            }
             if let owner = bootstrap?.me.id, owner > 0 {
                 activateChatDrafts(owner: owner)
                 publications.activate(owner: owner)
@@ -324,10 +327,17 @@ final class AloAppModel: ObservableObject {
     @Published private(set) var storedAccounts = AloAccountSessionStore.shared.accounts
 
     let api: AloAPIClient
+    /// Translations and transcripts of the messages this person asked for, and the consent that lets them ask.
+    let contentTools: AloContentToolsStore
     private let startupCacheLoader: (() -> Data?)?
     init(api: AloAPIClient = .shared, startupCacheLoader: (() -> Data?)? = nil) {
         self.api = api
         self.startupCacheLoader = startupCacheLoader
+        let tools = AloContentToolsStore(transport: AloLiveContentToolsTransport(api: api))
+        tools.audioLoader = { [api] attachment, maxBytes in
+            try await AloContentAudio.load(attachment, api: api, maxBytes: maxBytes)
+        }
+        contentTools = tools
     }
     lazy var calls = AloCallCoordinator(api: api, app: self)
     private var challengeToken = ""
@@ -486,6 +496,7 @@ final class AloAppModel: ObservableObject {
                 openConversation(summary)
             }
             scheduleLocalSearchIndexBackfill(conversations: data.conversations, ownerUserId: data.me.id)
+            Task { await contentTools.refreshCapabilities() }
             phase = .app
             startChatRealtime(ownerUserId: data.me.id)
             AloPushCoordinator.shared.sync(api: api)
@@ -2823,61 +2834,6 @@ final class AloAppModel: ObservableObject {
                 errorMessage = "Не удалось запланировать повторную отправку."
             }
         }
-    }
-
-    func translateMessage(
-        _ message: AloChatMessage,
-        targetLanguage: String
-    ) async throws -> AloMessageTranslation {
-        let text = message.body.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard message.id > 0, !text.isEmpty else {
-            throw AloAPIError(
-                status: 0,
-                code: "INVALID_MESSAGE",
-                message: "Нельзя перевести это сообщение.",
-                payload: [:]
-            )
-        }
-        return try await api.translateMessage(
-            messageId: message.id,
-            text: text,
-            targetLanguage: targetLanguage
-        )
-    }
-
-    func transcribeVoiceMessage(
-        _ message: AloChatMessage,
-        language: String
-    ) async throws -> AloVoiceTranscription {
-        let allAttachments = message.attachments.isEmpty
-            ? [
-                AloMessageAttachment([
-                    "type": message.attachmentType,
-                    "url": message.attachmentUrl,
-                    "name": message.attachmentName
-                ])
-            ]
-            : message.attachments
-        guard message.id > 0,
-              let attachment = allAttachments.first(where: { attachment in
-                  let type = attachment.type.lowercased()
-                  let name = attachment.name.lowercased()
-                  let url = attachment.url.lowercased()
-                  return type == "audio" || type == "voice" || name.hasPrefix("voice-") ||
-                      url.hasSuffix(".m4a") || url.hasSuffix(".aac") || url.hasSuffix(".mp3") || url.hasSuffix(".wav")
-              }) else {
-            throw AloAPIError(
-                status: 0,
-                code: "VOICE_ATTACHMENT_NOT_FOUND",
-                message: "В сообщении не найдено голосовое вложение.",
-                payload: [:]
-            )
-        }
-        return try await api.transcribeVoiceMessage(
-            messageId: message.id,
-            attachmentId: attachment.id,
-            language: language
-        )
     }
 
     func voicePlaybackTitle(for message: AloChatMessage) -> String {

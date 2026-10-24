@@ -901,6 +901,7 @@ enum ProfileSettingsPage: String, CaseIterable, Identifiable {
     case creatorStats
     case dataStorage
     case profileInfo
+    case contentTools
 
     var id: String { rawValue }
 
@@ -917,6 +918,7 @@ enum ProfileSettingsPage: String, CaseIterable, Identifiable {
         case .creatorStats: return "Панель автора"
         case .dataStorage: return "Данные и память"
         case .profileInfo: return "Профиль"
+        case .contentTools: return "Перевод и расшифровка"
         }
     }
 
@@ -933,6 +935,7 @@ enum ProfileSettingsPage: String, CaseIterable, Identifiable {
         case .creatorStats: return "Просмотры, реакции и подписчики"
         case .dataStorage: return "Кеш и автозагрузка медиа"
         case .profileInfo: return "Имя, имя пользователя и о себе"
+        case .contentTools: return "Согласие и сохранённые тексты"
         }
     }
 }
@@ -1155,6 +1158,8 @@ struct ProfileEditSheet: View {
             AloDataStorageSettings()
         case .profileInfo:
             profileInfoPage
+        case .contentTools:
+            AloContentToolsSettingsView(store: app.contentTools)
         case .moderation, .creatorStats:
             EmptyView()
         }
@@ -1174,6 +1179,9 @@ struct ProfileEditSheet: View {
                 settingDivider
                 settingsNavRow(title: "Данные и память", subtitle: "", systemName: "internaldrive", target: .dataStorage, showsIconTile: false, showsChevron: false)
                     .accessibilityIdentifier("alo.settings.storage")
+                settingDivider
+                settingsNavRow(title: "Перевод и расшифровка", subtitle: "", systemName: "translate", target: .contentTools, showsIconTile: false, showsChevron: false)
+                    .accessibilityIdentifier("alo.settings.content-tools")
                 settingDivider
                 settingsNavRow(title: "Бизнес-профиль", subtitle: "", systemName: "briefcase", target: .business, showsIconTile: false, showsChevron: false)
                 settingDivider
@@ -1665,6 +1673,7 @@ struct ProfileEditSheet: View {
         case .creatorStats: tint = AloTheme.accent
         case .dataStorage: tint = AloTheme.accent
         case .profileInfo: tint = AloTheme.accent
+        case .contentTools: tint = AloTheme.accent
         case .root: tint = AloTheme.accent
         }
         return Button {

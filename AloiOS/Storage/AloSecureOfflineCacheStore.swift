@@ -326,6 +326,26 @@ final class AloSecureOfflineCacheStore: @unchecked Sendable {
         )
     }
 
+    /// A small named record of this account's, encrypted with the offline-cache key and removed with the account's cache
+    /// (translations and transcripts of messages the person asked for).
+    func saveRecord(_ data: Data, named name: String, ownerUserId: Int) throws {
+        guard ownerUserId > 0, name.range(of: "^[a-z0-9-]{1,40}$", options: .regularExpression) != nil else {
+            throw AloSecureOfflineCacheError.invalidOwner
+        }
+        let root = try ownerRootURL(ownerUserId: ownerUserId)
+        try writeEncrypted(data, to: root.appendingPathComponent("record-\(name)-v1.bin"), ownerUserId: ownerUserId)
+    }
+
+    func loadRecord(named name: String, ownerUserId: Int) -> Data? {
+        guard ownerUserId > 0,
+              let url = try? ownerRootURL(ownerUserId: ownerUserId).appendingPathComponent("record-\(name)-v1.bin"),
+              let combined = try? Data(contentsOf: url),
+              let sealed = try? AES.GCM.SealedBox(combined: combined) else {
+            return nil
+        }
+        return try? AES.GCM.open(sealed, using: encryptionKey())
+    }
+
     func clearCurrentOwner() {
         let ownerUserId = UserDefaults.standard.integer(forKey: lastOwnerKey)
         if ownerUserId > 0, let root = try? ownerRootURL(ownerUserId: ownerUserId) {

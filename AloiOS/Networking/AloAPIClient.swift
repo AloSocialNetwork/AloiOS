@@ -103,6 +103,43 @@ struct AloVoiceTranscription: Equatable {
     }
 }
 
+struct AloContentLanguage: Identifiable, Equatable, Hashable {
+    let code: String
+    let name: String
+    let english: String
+    var id: String { code }
+}
+
+/// What the server can do with `/api/messages/:id/translate` and `/transcribe`, from `contentTools` in `/api/config`.
+struct AloContentToolsCapabilities: Equatable {
+    var translation = false
+    var transcription = false
+    var maxAudioBytes = 24 * 1_024 * 1_024
+    var languages: [AloContentLanguage] = []
+
+    static let unavailable = AloContentToolsCapabilities()
+
+    init(translation: Bool = false, transcription: Bool = false, maxAudioBytes: Int = 24 * 1_024 * 1_024,
+         languages: [AloContentLanguage] = []) {
+        self.translation = translation
+        self.transcription = transcription
+        self.maxAudioBytes = maxAudioBytes
+        self.languages = languages
+    }
+
+    init(_ json: [String: Any]) {
+        translation = json["translation"] as? Bool ?? false
+        transcription = json["transcription"] as? Bool ?? false
+        let limit = json.int("maxAudioBytes")
+        maxAudioBytes = limit > 0 ? limit : 24 * 1_024 * 1_024
+        languages = json.array("languages").compactMap { item in
+            let code = item.string("code")
+            guard !code.isEmpty else { return nil }
+            return AloContentLanguage(code: code, name: item.string("name").ifBlank(code), english: item.string("english").ifBlank(code))
+        }
+    }
+}
+
 struct AloLiveLocationSession: Equatable {
     let id: String
     let expiresAt: String
@@ -3379,9 +3416,21 @@ final class AloAPIClient {
         return AloRecurringMessageSchedule(json)
     }
 
-    /// Future API contract. The user explicitly chooses this action from the
-    /// message menu before plaintext is sent for translation.
+    /// Which content tools the server has a provider for (`contentTools` in the public `/api/config`).
+    func loadContentTools() async throws -> AloContentToolsCapabilities {
+        AloContentToolsCapabilities(try await request("GET", "/api/config").object("contentTools"))
+    }
+
+    private func contentToolPath(_ conversation: AloConversationDetail, messageId: Int, tool: String) -> String {
+        conversation.kind == "group" && conversation.roomId > 0
+            ? "/api/group-chats/\(conversation.roomId)/messages/\(messageId)/\(tool)"
+            : "/api/messages/\(messageId)/\(tool)"
+    }
+
+    /// The person chose «Перевести» for one message and agreed to send its text. The server only checks that they may read the
+    /// message and passes the text on to its translation provider; nothing is stored there.
     func translateMessage(
+        conversation: AloConversationDetail,
         messageId: Int,
         text: String,
         targetLanguage: String,
@@ -3389,32 +3438,40 @@ final class AloAPIClient {
     ) async throws -> AloMessageTranslation {
         let json = try await request(
             "POST",
-            "/api/messages/\(messageId)/translate",
+            contentToolPath(conversation, messageId: messageId, tool: "translate"),
             body: [
+                "consent": true,
                 "text": text,
                 "sourceLanguage": sourceLanguage,
                 "targetLanguage": targetLanguage,
-                "consent": true
-            ]
+                "chatKind": conversation.kind == "group" ? "group" : "direct"
+            ],
+            timeout: 45
         )
         return AloMessageTranslation(json)
     }
 
-    /// Future API contract for a consented transcription. Voice media stays
-    /// E2EE until a compatible service is available to process this request.
+    /// Same for a voice message or a video circle: `audio` is what this device decrypted and the person agreed to send.
     func transcribeVoiceMessage(
+        conversation: AloConversationDetail,
         messageId: Int,
-        attachmentId: String,
-        language: String
+        audio: Data,
+        mimeType: String,
+        language: String = "auto",
+        attachmentId: String = ""
     ) async throws -> AloVoiceTranscription {
         let json = try await request(
             "POST",
-            "/api/messages/\(messageId)/transcribe",
+            contentToolPath(conversation, messageId: messageId, tool: "transcribe"),
             body: [
-                "attachmentId": attachmentId,
+                "consent": true,
+                "audioBase64": audio.base64EncodedString(),
+                "mimeType": mimeType,
                 "language": language,
-                "consent": true
-            ]
+                "attachmentId": attachmentId,
+                "chatKind": conversation.kind == "group" ? "group" : "direct"
+            ],
+            timeout: 120
         )
         return AloVoiceTranscription(json)
     }
