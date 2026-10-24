@@ -1347,6 +1347,65 @@ final class AloAPIClient {
         return json.int("deletedPostId").ifZero(postId)
     }
 
+    /// Changes the text of a published post; the server keeps its time and sets `editedAt`.
+    func editPost(postId: Int, body: String) async throws -> AloPost {
+        let json = try await request("PATCH", "/api/posts/\(postId)", body: ["body": body])
+        return AloPost(json.object("post"))
+    }
+
+    private func postPage(_ json: [String: Any], key: String = "posts") -> AloPage<AloPost> {
+        AloPage(items: json.array(key).map(AloPost.init), hasMore: json.bool("hasMore"), nextOffset: json.int("nextOffset"))
+    }
+
+    func loadFeedPage(subscriptions: Bool, offset: Int) async throws -> AloPage<AloPost> {
+        postPage(try await request("GET", "/api/feed/posts?mode=\(subscriptions ? "subs" : "popular")&limit=50&offset=\(offset)"))
+    }
+
+    func loadUserPostsPage(userId: Int, offset: Int) async throws -> AloPage<AloPost> {
+        postPage(try await request("GET", "/api/users/\(userId)/posts?limit=50&offset=\(offset)"))
+    }
+
+    func loadChannelPostsPage(channelId: Int, offset: Int) async throws -> AloPage<AloPost> {
+        postPage(try await request("GET", "/api/channels/\(channelId)/posts?limit=50&offset=\(offset)"))
+    }
+
+    /// Every post the person has liked, newest like first (the «Нравится» tab).
+    func loadLikedPostsPage(offset: Int) async throws -> AloPage<AloPost> {
+        postPage(try await request("GET", "/api/feed/liked?limit=50&offset=\(offset)"))
+    }
+
+    private func encodedQuery(_ query: String) -> String {
+        query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&+#=?"))) ?? query
+    }
+
+    func searchPostsPage(query: String, offset: Int) async throws -> AloPage<AloPost> {
+        postPage(try await request("GET", "/api/feed/search/posts?limit=20&offset=\(offset)&q=\(encodedQuery(query))"))
+    }
+
+    func searchChannelsPage(query: String, offset: Int) async throws -> AloPage<AloEntitySummary> {
+        let json = try await request("GET", "/api/feed/search/channels?limit=20&offset=\(offset)&q=\(encodedQuery(query))")
+        return AloPage(
+            items: json.array("channels").map { channel in
+                var entity = channel
+                entity["isChannel"] = true
+                return AloEntitySummary(entity)
+            },
+            hasMore: json.bool("hasMore"),
+            nextOffset: json.int("nextOffset")
+        )
+    }
+
+    func loadNotificationsPage(offset: Int) async throws -> AloPage<AloNotificationItem> {
+        let json = try await request("GET", "/api/notifications?limit=50&offset=\(offset)")
+        return AloPage(items: json.array("items").map(AloNotificationItem.init), hasMore: json.bool("hasMore"), nextOffset: json.int("nextOffset"))
+    }
+
+    /// Name, @username and about text; the server leaves every other field as it is.
+    func updateProfileInfo(name: String, username: String, bio: String) async throws -> AloCurrentUser {
+        let json = try await request("PATCH", "/api/profile", body: ["name": name, "username": username, "bio": bio])
+        return AloCurrentUser(json.object("user"))
+    }
+
     func loadConversation(peerId: Int) async throws -> AloConversationDetail {
         let raw = try await request("GET", "/api/messages/\(peerId)")
         let decryptedMessages = await decryptE2EEMessages(inConversation: raw)

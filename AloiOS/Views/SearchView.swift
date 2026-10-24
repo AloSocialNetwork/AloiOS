@@ -9,14 +9,42 @@ struct SearchView: View {
     @State private var incomingRequest: AloEntitySummary?
     /// People the server found for the current query, beyond the suggestions already loaded.
     @State private var remoteUsers: [AloEntitySummary] = []
+    /// Communities and posts the server found for the same text (a community also by its description).
+    @State private var remoteChannels: [AloEntitySummary] = []
+    @State private var remotePosts: [AloPost] = []
+    @State private var remotePostsHasMore = false
+    @State private var remotePostsLoading = false
+    @State private var remoteQuery = ""
 
     private var users: [AloEntitySummary] {
         let query = app.searchQuery.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         let all = (app.bootstrap?.searchUsers ?? []) + (app.bootstrap?.searchChannels ?? [])
         guard !query.isEmpty else { return all }
         let local = all.filter { $0.name.lowercased().contains(query) || $0.username.lowercased().contains(query) }
-        let known = Set(local.map(\.id))
-        return local + remoteUsers.filter { !known.contains($0.id) }
+        let known = Set(local.map { "\($0.isChannel):\($0.id)" })
+        // The server matched its own answers, so they are not filtered by the typed text again.
+        let remote = (remoteUsers + remoteChannels).filter { !known.contains("\($0.isChannel):\($0.id)") }
+        return local + remote
+    }
+
+    private var foundPosts: [AloPost] {
+        remoteQuery == app.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines) ? remotePosts : []
+    }
+
+    private func loadMoreFoundPosts() {
+        guard !remotePostsLoading, remotePostsHasMore else { return }
+        let query = remoteQuery
+        remotePostsLoading = true
+        Task {
+            defer { remotePostsLoading = false }
+            guard let page = try? await app.api.searchPostsPage(query: query, offset: remotePosts.count), query == remoteQuery else {
+                remotePostsHasMore = false
+                return
+            }
+            let known = Set(remotePosts.map(\.id))
+            remotePosts += page.items.filter { !known.contains($0.id) }
+            remotePostsHasMore = page.hasMore && !page.items.isEmpty
+        }
     }
 
     var body: some View {
@@ -90,6 +118,45 @@ struct SearchView: View {
                             Divider().background(AloTheme.border).padding(.leading, 74)
                         }
                     }
+
+                    if !foundPosts.isEmpty {
+                        Text("Публикации")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(AloTheme.muted)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 16)
+                            .padding(.top, 18)
+                            .padding(.bottom, 4)
+                        ForEach(foundPosts) { post in
+                            Button { app.openComments(for: post) } label: {
+                                HStack(alignment: .top, spacing: 12) {
+                                    AloAvatar(name: post.author.name, url: post.author.avatarUrl, size: 40, colorSeed: String(post.author.id))
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack(spacing: 6) {
+                                            Text(post.author.name).font(.system(size: 15, weight: .semibold)).lineLimit(1)
+                                            Text(AloPostTimestamp.string(post.createdAt))
+                                                .font(.system(size: 12)).foregroundStyle(AloTheme.muted)
+                                        }
+                                        Text(post.body.isEmpty ? "Публикация с вложением" : post.body)
+                                            .font(.system(size: 15)).foregroundStyle(AloTheme.text)
+                                            .lineLimit(3).multilineTextAlignment(.leading)
+                                    }
+                                    Spacer(minLength: 0)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 16).padding(.vertical, 10)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("alo.search.post.\(post.id)")
+                            Divider().background(AloTheme.border).padding(.leading, 16)
+                        }
+                        if remotePostsHasMore {
+                            HStack { Spacer(); ProgressView(); Spacer() }
+                                .frame(height: 56)
+                                .onAppear { loadMoreFoundPosts() }
+                        }
+                    }
                 }
         }
         .navigationDestination(isPresented: $settingsPresented) { AloSocialSettingsSheet().environmentObject(app) }
@@ -107,11 +174,24 @@ struct SearchView: View {
             let query = app.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
             guard query.replacingOccurrences(of: "@", with: "").count >= 2 else {
                 remoteUsers = []
+                remoteChannels = []
+                remotePosts = []
+                remotePostsHasMore = false
+                remoteQuery = ""
                 return
             }
             try? await Task.sleep(for: .milliseconds(250))
-            guard !Task.isCancelled, let found = try? await app.api.searchUsers(query: query), !Task.isCancelled else { return }
-            remoteUsers = found
+            guard !Task.isCancelled else { return }
+            async let people = try? app.api.searchUsers(query: query)
+            async let communities = try? app.api.searchChannelsPage(query: query, offset: 0)
+            async let posts = try? app.api.searchPostsPage(query: query, offset: 0)
+            let (foundPeople, foundCommunities, foundPosts) = await (people, communities, posts)
+            guard !Task.isCancelled else { return }
+            remoteUsers = foundPeople ?? []
+            remoteChannels = foundCommunities?.items ?? []
+            remotePosts = foundPosts?.items ?? []
+            remotePostsHasMore = foundPosts?.hasMore ?? false
+            remoteQuery = query
         }
         .task(id: "\(app.searchQuery):\(app.bootstrap?.me.id ?? 0)") {
             let query = app.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)

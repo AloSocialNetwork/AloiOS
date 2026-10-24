@@ -61,6 +61,7 @@ struct AlertsView: View {
                             Rectangle().fill(AloTheme.separator).frame(height: 0.5).padding(.horizontal, 16)
                         }
                     }
+                    AloLoadMoreRow(list: .notifications, loaded: app.bootstrap?.notifications.count ?? 0)
                 }.id(filter).transition(.opacity)
         }
         .refreshable { await app.loadBootstrap() }

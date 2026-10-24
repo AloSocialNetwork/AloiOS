@@ -1634,10 +1634,13 @@ struct AloPost: Identifiable, Equatable {
     let author: AloEntitySummary
     /// Why the feed shows it; only feed listings carry it.
     let feedReason: AloFeedReason?
+    /// When the author last changed it; empty for a post never edited.
+    let editedAt: String
 
     init(_ json: [String: Any]) {
         id = json.int("id")
         feedReason = AloFeedReason(rawValue: json.string("feedReason"))
+        editedAt = json.string("editedAt")
         creatorId = json.int("creatorId").ifZero(json.int("creator_id"))
         body = json.string("body")
         media = json.array("media").map(AloMediaItem.init)
@@ -1680,6 +1683,7 @@ struct AloPost: Identifiable, Equatable {
         discussionRoomId = post.discussionRoomId; discussionTopicId = post.discussionTopicId
         messengerRoomId = post.messengerRoomId; viewCount = post.viewCount
         createdAt = post.createdAt; author = post.author; feedReason = post.feedReason
+        editedAt = post.editedAt
         self.likeCount = max(0, likeCount); self.viewerLiked = viewerLiked
         self.repostCount = max(0, repostCount); self.viewerReposted = viewerReposted
         self.commentCount = max(0, commentCount)
@@ -3850,4 +3854,16 @@ enum AloFormatters {
         formatter.dateFormat = "yyyy-MM-dd"
         return formatter
     }()
+}
+
+/// One page of a list the first screen only shows the top of: `nextOffset` is where the following page starts.
+struct AloPage<Item> {
+    let items: [Item]
+    let hasMore: Bool
+    let nextOffset: Int
+}
+
+/// The lists that are loaded page by page as the person scrolls to their end.
+enum AloPagedList: Hashable {
+    case feedPopular, feedSubscriptions, profilePosts, notifications, likedPosts, viewedProfilePosts
 }

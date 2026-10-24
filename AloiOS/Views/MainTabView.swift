@@ -34,6 +34,9 @@ struct MainTabView: View {
             Text(app.errorMessage)
         }
         .onChange(of: app.activeTab) { _, tab in app.refreshForTabIfNeeded(tab) }
+        .sheet(item: $app.postBeingEdited) { post in
+            AloPostEditSheet(post: post).environmentObject(app)
+        }
     }
 
     private var mainContent: some View {

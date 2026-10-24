@@ -25,6 +25,8 @@ struct AloTimelinePost: View, Equatable {
     var isLikePending = false
     var isRepostPending = false
     var onDelete: () -> Void = {}
+    /// Opens the editor of this post; nil leaves «Изменить» out.
+    var onEdit: (() -> Void)?
     var onNotice: (String) -> Void = { _ in }
     /// The reader's actions on someone else's post; nil hides them.
     var onReaderAction: ((AloPostReaderAction) -> Void)?
@@ -130,6 +132,9 @@ struct AloTimelinePost: View, Equatable {
                     } label: { Label("Скопировать ссылку", systemImage: "link") }
                 }
                 if isMine {
+                    if let onEdit {
+                        Button(action: onEdit) { Label("Изменить", systemImage: "pencil") }
+                    }
                     Button(role: .destructive) { confirmsDeletion = true } label: {
                         Label("Удалить пост", systemImage: "trash")
                     }
@@ -179,7 +184,7 @@ struct AloTimelinePost: View, Equatable {
     }
 
     private var metadata: some View {
-        Text([post.author.username.withAtPrefix, AloPostTimestamp.string(post.createdAt)]
+        Text([post.author.username.withAtPrefix, AloPostTimestamp.string(post.createdAt), post.editedAt.isEmpty ? "" : "изменено"]
             .filter { !$0.isEmpty }.joined(separator: " · "))
             .font(.system(size: metadataSize, weight: .regular))
             .foregroundStyle(AloTheme.muted).lineLimit(dynamicType.isAccessibilitySize ? 2 : 1)

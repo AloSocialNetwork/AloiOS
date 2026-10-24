@@ -56,6 +56,7 @@ struct ProfileView: View {
                                 .padding(.horizontal, AloTheme.pageInset)
                             }
                         }
+                        AloLoadMoreRow(list: selectedSection == .posts ? .profilePosts : .likedPosts, loaded: posts.count)
                     } header: {
                         stickyProfileSwitcher
                     }
@@ -77,6 +78,10 @@ struct ProfileView: View {
         }
         .background(AloTheme.background)
         .refreshable { await app.loadBootstrap() }
+        // «Нравится» asks the server for every liked post when the tab is opened.
+        .onChange(of: selectedSection) { _, section in
+            if section == .likes, app.likedPosts.isEmpty { app.loadMore(.likedPosts) }
+        }
         .fullScreenCover(isPresented: $isPalettePresented) {
             if let me = app.bootstrap?.me {
                 AloProfileBannerEditor(user: me) { style, photo in
@@ -109,10 +114,11 @@ struct ProfileView: View {
         }
     }
 
+    /// «Нравится»: the server's list of every liked post, with what is already on the screen while it loads.
     private var ownLikedPosts: [AloPost] {
         guard let data = app.bootstrap else { return [] }
         var seen = Set<Int>()
-        return (data.profilePosts + data.feedPopular + data.feedSubscriptions).filter { post in
+        return (app.likedPosts + data.profilePosts + data.feedPopular + data.feedSubscriptions).filter { post in
             post.viewerLiked && seen.insert(post.id).inserted
         }
     }
@@ -194,6 +200,9 @@ struct ProfileDetailView: View {
                                     }
                                     .padding(.horizontal, AloTheme.pageInset)
                                 }
+                            }
+                            if selectedSection == .posts {
+                                AloLoadMoreRow(list: .viewedProfilePosts, loaded: posts.count)
                             }
                         } header: {
                             ProfileContentSwitcher(selected: $selectedSection)
@@ -471,6 +480,7 @@ struct ChannelProfileDetailView: View {
                                     app.toggleRepost(post)
                                 }
                             }
+                            AloLoadMoreRow(list: .viewedProfilePosts, loaded: channel.posts.count)
                         }
                     }
                 }
@@ -890,6 +900,7 @@ enum ProfileSettingsPage: String, CaseIterable, Identifiable {
     case moderation
     case creatorStats
     case dataStorage
+    case profileInfo
 
     var id: String { rawValue }
 
@@ -905,6 +916,7 @@ enum ProfileSettingsPage: String, CaseIterable, Identifiable {
         case .moderation: return "Модерация"
         case .creatorStats: return "Панель автора"
         case .dataStorage: return "Данные и память"
+        case .profileInfo: return "Профиль"
         }
     }
 
@@ -920,6 +932,7 @@ enum ProfileSettingsPage: String, CaseIterable, Identifiable {
         case .moderation: return "Жалобы, обжалования, журнал и реклама"
         case .creatorStats: return "Просмотры, реакции и подписчики"
         case .dataStorage: return "Кеш и автозагрузка медиа"
+        case .profileInfo: return "Имя, имя пользователя и о себе"
         }
     }
 }
@@ -956,6 +969,12 @@ struct ProfileEditSheet: View {
     @State private var pendingSessionRevocation: AloSecuritySession?
     @State private var revokeOtherSessionsConfirmationPresented = false
     @State private var currentPassword = ""
+    @State private var infoName = ""
+    @State private var infoUsername = ""
+    @State private var infoBio = ""
+    @State private var infoLoaded = false
+    @State private var infoSaving = false
+    @State private var infoNotice = ""
     @State private var newPassword = ""
     @State private var confirmPassword = ""
 
@@ -1134,6 +1153,8 @@ struct ProfileEditSheet: View {
             passwordChangePage
         case .dataStorage:
             AloDataStorageSettings()
+        case .profileInfo:
+            profileInfoPage
         case .moderation, .creatorStats:
             EmptyView()
         }
@@ -1142,6 +1163,9 @@ struct ProfileEditSheet: View {
     private var rootPage: some View {
         VStack(spacing: 0) {
             settingsCard(title: nil) {
+                settingsNavRow(title: "Редактировать профиль", subtitle: "", systemName: "pencil", target: .profileInfo, showsIconTile: false, showsChevron: false)
+                    .accessibilityIdentifier("alo.settings.profile-info")
+                settingDivider
                 settingsNavRow(title: "Безопасность", subtitle: "", systemName: "shield", target: .security, showsIconTile: false, showsChevron: false)
                 settingDivider
                 settingsNavRow(title: "Приватность", subtitle: "", systemName: "hand.raised", target: .privacy, showsIconTile: false, showsChevron: false)
@@ -1273,15 +1297,15 @@ struct ProfileEditSheet: View {
             settingsCard(title: "Пользователи") {
                 settingToggle(
                     title: "Подписки",
-                    subtitle: "Уведомления о подписках и запросах в друзья",
+                    subtitle: "Уведомления о новых подписчиках",
                     systemName: "person.badge.plus",
                     isOn: $notificationSettingsDraft.followsEnabled
                 )
                 settingDivider
                 settingToggle(
-                    title: "Посты на стене",
-                    subtitle: "Уведомления о новых постах на вашей стене",
-                    systemName: "text.bubble.fill",
+                    title: "Заявки в друзья",
+                    subtitle: "Уведомления о новых заявках в друзья",
+                    systemName: "person.2.fill",
                     isOn: $notificationSettingsDraft.friendRequestsEnabled
                 )
             }
@@ -1480,6 +1504,90 @@ struct ProfileEditSheet: View {
         }
     }
 
+    /// Name, @username and about text of the signed-in person (the same page as «Редактировать профиль» on Android and the web).
+    private var profileInfoPage: some View {
+        let usernameOK = infoUsername.count >= 3
+        let nameOK = infoName.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2
+        let changed = infoName.trimmingCharacters(in: .whitespacesAndNewlines) != (user?.name ?? "")
+            || infoUsername != (user?.username ?? "")
+            || infoBio.trimmingCharacters(in: .whitespacesAndNewlines) != (user?.bio ?? "")
+        return VStack(spacing: 22) {
+            settingsCard(title: "Имя") {
+                TextField("Имя", text: $infoName)
+                    .textContentType(.name)
+                    .font(.system(size: 16))
+                    .foregroundStyle(AloTheme.text)
+                    .frame(minHeight: 50)
+                    .onChange(of: infoName) { _, value in if value.count > 50 { infoName = String(value.prefix(50)) } }
+            }
+            settingsCard(title: "Имя пользователя") {
+                HStack(spacing: 2) {
+                    Text("@").foregroundStyle(AloTheme.muted)
+                    TextField("username", text: $infoUsername)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .onChange(of: infoUsername) { _, value in
+                            let cleaned = String((value.hasPrefix("@") ? String(value.dropFirst()) : value).lowercased().filter { ("a"..."z").contains($0) || ("0"..."9").contains($0) || $0 == "_" }.prefix(32))
+                            if cleaned != value { infoUsername = cleaned }
+                        }
+                }
+                .font(.system(size: 16))
+                .foregroundStyle(AloTheme.text)
+                .frame(minHeight: 50)
+            }
+            Text("От 3 символов: латинские буквы, цифры и «_». По нему вас находят и упоминают.")
+                .font(.system(size: 13)).foregroundStyle(AloTheme.muted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            settingsCard(title: "О себе") {
+                TextField("Расскажите о себе", text: $infoBio, axis: .vertical)
+                    .lineLimit(3...6)
+                    .font(.system(size: 16))
+                    .foregroundStyle(AloTheme.text)
+                    .padding(.vertical, 12)
+                    .onChange(of: infoBio) { _, value in if value.count > 160 { infoBio = String(value.prefix(160)) } }
+            }
+            Text("\(infoBio.count) из 160").font(.system(size: 13)).foregroundStyle(AloTheme.muted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                Task { await saveProfileInfo() }
+            } label: {
+                Text(infoSaving ? "Сохраняем…" : "Сохранить")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 50)
+                    .background(changed && usernameOK && nameOK ? AloTheme.accent : AloTheme.surfaceRaised)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(AloPressBounceButtonStyle(pressedScale: 0.97))
+            .disabled(!(changed && usernameOK && nameOK) || infoSaving)
+            .accessibilityIdentifier("alo.settings.profile-info.save")
+            if !infoNotice.isEmpty {
+                infoRow(title: "Профиль", value: infoNotice)
+            }
+        }
+        .onAppear {
+            guard !infoLoaded else { return }
+            infoLoaded = true
+            infoName = user?.name ?? ""
+            infoUsername = user?.username ?? ""
+            infoBio = user?.bio ?? ""
+        }
+    }
+
+    @MainActor
+    private func saveProfileInfo() async {
+        infoSaving = true
+        infoNotice = ""
+        defer { infoSaving = false }
+        if let problem = await app.updateProfileInfo(name: infoName, username: infoUsername, bio: infoBio) {
+            infoNotice = problem
+        } else {
+            infoNotice = "Профиль сохранён."
+        }
+    }
+
     private var passwordChangePage: some View {
         VStack(spacing: 22) {
             settingsCard(title: "Новый пароль") {
@@ -1556,6 +1664,7 @@ struct ProfileEditSheet: View {
         case .moderation: tint = AloTheme.destructive
         case .creatorStats: tint = AloTheme.accent
         case .dataStorage: tint = AloTheme.accent
+        case .profileInfo: tint = AloTheme.accent
         case .root: tint = AloTheme.accent
         }
         return Button {

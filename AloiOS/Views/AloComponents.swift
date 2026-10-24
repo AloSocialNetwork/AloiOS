@@ -490,6 +490,7 @@ struct AloPostCard: View {
                 copyPostLink()
             }
             if canDelete {
+                Button("Изменить") { app.postBeingEdited = post }
                 Button("Удалить пост", role: .destructive) {
                     app.deletePost(post)
                 }
@@ -513,7 +514,7 @@ struct AloPostCard: View {
 
     private var postMeta: String {
         let username = post.author.username.withAtPrefix
-        let date = shortDate(post.createdAt)
+        let date = shortDate(post.createdAt) + (post.editedAt.isEmpty ? "" : " · изменено")
         if username.isEmpty { return date }
         if date.isEmpty { return username }
         return "\(username) · \(date)"

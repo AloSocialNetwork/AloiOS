@@ -158,7 +158,7 @@ final class AloAppModel: ObservableObject {
     private var accountGeneration = UUID()
     @Published var bootstrap: AloBootstrapData? {
         didSet {
-            if oldValue?.me.id != bootstrap?.me.id { accountGeneration = UUID() }
+            if oldValue?.me.id != bootstrap?.me.id { accountGeneration = UUID(); likedPosts = [] }
             if let owner = bootstrap?.me.id, owner > 0 {
                 activateChatDrafts(owner: owner)
                 publications.activate(owner: owner)
@@ -274,6 +274,13 @@ final class AloAppModel: ObservableObject {
     private var changedDraftKeys = Set<String>()
     private var chatDraftLoadTask: Task<Void, Never>?
     @Published var humanChallenge: HumanChallenge?
+    /// Lists whose later pages are all loaded, and those being asked for now (the first page comes with the bootstrap).
+    @Published private(set) var pagedListsEnded = Set<AloPagedList>()
+    @Published private(set) var pagedListsLoading = Set<AloPagedList>()
+    /// «Нравится»: every post the person liked, from the server (the bootstrap only carries the newest).
+    @Published private(set) var likedPosts = [AloPost]()
+    /// The post whose editor is open.
+    @Published var postBeingEdited: AloPost?
     @Published var selectedProfile: AloUserProfile?
     @Published var selectedChannelProfile: AloChannelProfile?
     @Published var channelAdminEvents = [AloChannelAdminEvent]()
@@ -464,6 +471,7 @@ final class AloAppModel: ObservableObject {
             let data = snapshot.data
             saveBootstrapCache(snapshot.raw)
             bootstrap = data
+            resetPaging()
             persistCurrentAccount(data.me)
             configureBlockedUserState(ownerUserId: data.me.id)
             scheduleBlockedUsersRefresh(ownerUserId: data.me.id)
@@ -1521,6 +1529,109 @@ final class AloAppModel: ObservableObject {
             } catch {
                 errorMessage = "Не удалось удалить пост."
             }
+        }
+    }
+
+    // MARK: Pages of long lists, editing a post and the profile
+
+    /// A fresh bootstrap brings the first pages again, so the lists may have later pages once more.
+    private func resetPaging() {
+        pagedListsEnded = []
+        pagedListsLoading = []
+    }
+
+    /// Asks for the page after the ones a list already has; the end of a list calls this as the person scrolls to it.
+    func loadMore(_ list: AloPagedList) {
+        guard let data = bootstrap, !pagedListsEnded.contains(list), !pagedListsLoading.contains(list) else { return }
+#if DEBUG
+        if isFeedInteractionPreview { return }
+#endif
+        pagedListsLoading.insert(list)
+        let owner = data.me.id
+        Task {
+            var ended = false
+            do {
+                switch list {
+                case .feedPopular, .feedSubscriptions:
+                    let subscriptions = list == .feedSubscriptions
+                    let loaded = bootstrap.map { subscriptions ? $0.feedSubscriptions.count : $0.feedPopular.count } ?? 0
+                    let page = try await api.loadFeedPage(subscriptions: subscriptions, offset: loaded)
+                    guard let current = bootstrap, current.me.id == owner else { break }
+                    bootstrap = AloBootstrapDataPatch.appendPosts(
+                        popular: subscriptions ? [] : page.items, subscriptions: subscriptions ? page.items : [], profile: [], to: current)
+                    ended = !page.hasMore || page.items.isEmpty
+                case .profilePosts:
+                    let page = try await api.loadUserPostsPage(userId: owner, offset: bootstrap?.profilePosts.count ?? 0)
+                    guard let current = bootstrap, current.me.id == owner else { break }
+                    bootstrap = AloBootstrapDataPatch.appendPosts(popular: [], subscriptions: [], profile: page.items, to: current)
+                    ended = !page.hasMore || page.items.isEmpty
+                case .notifications:
+                    let page = try await api.loadNotificationsPage(offset: bootstrap?.notifications.count ?? 0)
+                    guard let current = bootstrap, current.me.id == owner else { break }
+                    let known = Set(current.notifications.map(\.id))
+                    bootstrap = replacingNotifications(in: current, with: current.notifications + page.items.filter { !known.contains($0.id) })
+                    ended = !page.hasMore || page.items.isEmpty
+                case .likedPosts:
+                    let page = try await api.loadLikedPostsPage(offset: likedPosts.count)
+                    guard bootstrap?.me.id == owner else { break }
+                    let known = Set(likedPosts.map(\.id))
+                    likedPosts += page.items.filter { !known.contains($0.id) }
+                    ended = !page.hasMore || page.items.isEmpty
+                case .viewedProfilePosts:
+                    if let profile = selectedProfile {
+                        let page = try await api.loadUserPostsPage(userId: profile.id, offset: profile.posts.count)
+                        if let latest = selectedProfile, latest.id == profile.id {
+                            selectedProfile = AloUserProfilePatch.append(page.items, to: latest)
+                        }
+                        ended = !page.hasMore || page.items.isEmpty
+                    } else if let channel = selectedChannelProfile {
+                        let page = try await api.loadChannelPostsPage(channelId: channel.id, offset: channel.posts.count)
+                        if let latest = selectedChannelProfile, latest.id == channel.id {
+                            selectedChannelProfile = AloChannelProfilePatch.append(page.items, to: latest)
+                        }
+                        ended = !page.hasMore || page.items.isEmpty
+                    }
+                }
+            } catch let error as AloAPIError {
+                if error.status != 401 { ended = true }
+            } catch {
+                // A failing list stops asking until the next refresh, so the end of the screen does not retry in a loop.
+                ended = true
+            }
+            pagedListsLoading.remove(list)
+            if ended { pagedListsEnded.insert(list) }
+        }
+    }
+
+    /// Changes the text of a published post; the answer is the problem to show, or nil when it went through.
+    func editPost(_ post: AloPost, body: String) async -> String? {
+        do {
+            let updated = try await api.editPost(postId: post.id, body: body.trimmingCharacters(in: .whitespacesAndNewlines))
+            replacePost(updated)
+            return nil
+        } catch let error as AloAPIError {
+            return error.message
+        } catch {
+            return "Не удалось изменить пост."
+        }
+    }
+
+    /// Name, @username and about text; the answer is the problem to show, or nil when it was saved.
+    func updateProfileInfo(name: String, username: String, bio: String) async -> String? {
+        guard let data = bootstrap else { return "Нет данных аккаунта." }
+        do {
+            let user = try await api.updateProfileInfo(
+                name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+                username: username.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")),
+                bio: bio.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+            bootstrap = AloBootstrapDataPatch.replaceMe(user, in: bootstrap ?? data)
+            persistCurrentAccount(user)
+            return nil
+        } catch let error as AloAPIError {
+            return error.message
+        } catch {
+            return "Не удалось сохранить профиль."
         }
     }
 
@@ -3799,6 +3910,7 @@ final class AloAppModel: ObservableObject {
                       snapshot.data.me.id == ownerUserId else { return }
                 self.saveBootstrapCache(snapshot.raw)
                 self.bootstrap = snapshot.data
+                self.resetPaging()
                 self.configureBlockedUserState(ownerUserId: ownerUserId)
                 self.scheduleBlockedUsersRefresh(ownerUserId: ownerUserId)
                 self.lastBootstrapRefreshAt = Date()
@@ -4672,6 +4784,7 @@ final class AloAppModel: ObservableObject {
         if let data = bootstrap {
             bootstrap = AloBootstrapDataPatch.replace(post, in: data)
         }
+        likedPosts = likedPosts.map { $0.id == post.id ? post : $0 }
         patchVisiblePost(post, prepend: false)
     }
 
@@ -4679,6 +4792,7 @@ final class AloAppModel: ObservableObject {
         if let data = bootstrap {
             bootstrap = AloBootstrapDataPatch.remove(postId, from: data)
         }
+        likedPosts.removeAll { $0.id == postId }
         if let profile = selectedProfile {
             selectedProfile = AloUserProfilePatch.remove(postId, from: profile)
         }
@@ -6649,6 +6763,19 @@ final class AloAppModel: ObservableObject {
 }
 
 private enum AloUserProfilePatch {
+    static func append(_ posts: [AloPost], to profile: AloUserProfile) -> AloUserProfile {
+        let known = Set(profile.posts.map(\.id))
+        return AloUserProfile(
+            id: profile.id,
+            user: profile.user,
+            stats: profile.stats,
+            posts: profile.posts + posts.filter { !known.contains($0.id) },
+            likes: profile.likes,
+            relation: profile.relation,
+            permissions: profile.permissions
+        )
+    }
+
     static func prepend(_ post: AloPost, to profile: AloUserProfile) -> AloUserProfile {
         return AloUserProfile(
             id: profile.id,
@@ -6710,6 +6837,11 @@ private enum AloUserProfilePatch {
 }
 
 private enum AloChannelProfilePatch {
+    static func append(_ posts: [AloPost], to profile: AloChannelProfile) -> AloChannelProfile {
+        let known = Set(profile.posts.map(\.id))
+        return build(from: profile, posts: profile.posts + posts.filter { !known.contains($0.id) })
+    }
+
     static func prepend(_ post: AloPost, to profile: AloChannelProfile) -> AloChannelProfile {
         build(
             from: profile,
@@ -6809,6 +6941,20 @@ private enum AloChannelProfilePatch {
 }
 
 private enum AloBootstrapDataPatch {
+    /// Posts after the ones a list already has (a post already in the list is not added twice).
+    static func appendPosts(popular: [AloPost], subscriptions: [AloPost], profile: [AloPost], to data: AloBootstrapData) -> AloBootstrapData {
+        func merged(_ existing: [AloPost], _ more: [AloPost]) -> [AloPost] {
+            let known = Set(existing.map(\.id))
+            return existing + more.filter { !known.contains($0.id) }
+        }
+        return build(
+            from: data,
+            feedPopular: merged(data.feedPopular, popular),
+            feedSubscriptions: merged(data.feedSubscriptions, subscriptions),
+            profilePosts: merged(data.profilePosts, profile)
+        )
+    }
+
     static func prepend(_ post: AloPost, to data: AloBootstrapData) -> AloBootstrapData {
         build(
             from: data,

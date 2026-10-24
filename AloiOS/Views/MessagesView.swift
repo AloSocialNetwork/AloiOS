@@ -1489,7 +1489,9 @@ private extension ConversationView {
                     onDismiss: { activeMediaViewer = nil }
                 )
                 .environmentObject(app)
+                .modifier(AloMediaZoomDestination(messageId: viewer.sourceMessageId, namespace: mediaZoom))
             }
+            .environment(\.aloMediaZoom, mediaZoom)
             .task(id: conversation.roomId) {
                 channelAd = isChannelConversation ? await app.channelAd(roomId: conversation.roomId) : nil
             }
@@ -1934,6 +1936,9 @@ struct ConversationView: View {
     @StateObject private var dateHeaderController = AloChatDateHeaderController()
     @State private var measuredTopChromeHeight: CGFloat = 0
     @State private var requestedMessageScrollId: Int?
+    /// The message a jump (quote, pinned bar) just landed on, lit for a moment.
+    @State private var highlightedMessageId: Int?
+    @Namespace private var mediaZoom
     @State private var preservesComposerFocusForReaction = false
     @State private var activeTopicId: Int
     @State private var isForumSearchPresented = false
@@ -2720,6 +2725,7 @@ struct ConversationView: View {
                                                 activeMediaViewer = ChatMediaViewerState(
                                                     items: items,
                                                     startIndex: startIndex,
+                                                    sourceMessageId: item.id,
                                                     // A protected chat hides its media from screen capture too.
                                                     isSensitive: item.selfDestructSeconds > 0 ||
                                                         conversation.groupPolicy?.protectedContent == true,
@@ -2741,8 +2747,12 @@ struct ConversationView: View {
                                             },
                                             onOpenReply: { requestedMessageScrollId = $0 }
                                         )
+                                        .modifier(AloSwipeToReply(
+                                            enabled: canComposeMessages && !selectionMode && item.id > 0 && item.selfDestructSeconds <= 0
+                                        ) { beginReply(item) })
                                     }
                                 }
+                                .modifier(AloMessageHighlight(active: highlightedMessageId == item.id))
                                 .id(item.id)
                                 .transition(.scale(scale: 0.86).combined(with: .opacity))
                                 .background {
@@ -2871,6 +2881,15 @@ struct ConversationView: View {
                         proxy.scrollTo(messageId, anchor: .center)
                     }
                     requestedMessageScrollId = nil
+                    // Once the list has landed, the message glows for about a second and fades.
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 260_000_000)
+                        withAnimation(.easeOut(duration: 0.18)) { highlightedMessageId = messageId }
+                        try? await Task.sleep(nanoseconds: 900_000_000)
+                        withAnimation(.easeOut(duration: 0.4)) {
+                            if highlightedMessageId == messageId { highlightedMessageId = nil }
+                        }
+                    }
                 }
                 .overlay(alignment: .bottomTrailing) {
                     if showsHistoryDownButton, !selectionMode, actionMessage == nil,
@@ -3183,6 +3202,7 @@ struct ConversationView: View {
                         self.replyingToMessage = nil
                     }
                 }
+                .accessibilityIdentifier("alo.composer.reply")
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
@@ -4564,6 +4584,7 @@ private final class AloChatScrollMeasurements {
 private final class AloBubbleMeasurement { var frame: CGRect = .zero }
 
 private struct ChatMessageRow: View {
+    @Environment(\.aloMediaZoom) private var mediaZoom
     @EnvironmentObject private var app: AloAppModel
     @Environment(\.aloCirclePlayback) private var circlePlayback
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -5057,6 +5078,7 @@ private struct ChatMessageRow: View {
                                 }
                             )
                                 .frame(maxWidth: 310)
+                                .modifier(AloMediaZoomSource(messageId: message.id, namespace: mediaZoom))
                         }
                         ForEach(documents) { document in
                             AloFileAttachmentRow(attachment: document, isMine: isMine,
@@ -5150,6 +5172,7 @@ private struct ChatMessageRow: View {
                 }
             }
             .accessibilityIdentifier("alo.message.media.\(message.id)")
+            .modifier(AloMediaZoomSource(messageId: message.id, namespace: mediaZoom))
             .overlay(alignment: .topLeading) {
                 // A photo or video still uploading shows its progress, with pause and resume.
                 if isPending, !previewOnly {
@@ -6847,15 +6870,19 @@ private struct ChatMediaViewerState: Identifiable {
     let isSensitive: Bool
     let topicId: Int
     let reportsScreenshot: Bool
+    /// The message the media belongs to: the viewer grows out of its photo and shrinks back into it.
+    let sourceMessageId: Int
 
     init(
         items: [AloMediaItem],
         startIndex: Int,
+        sourceMessageId: Int = 0,
         isSensitive: Bool = false,
         topicId: Int = 0,
         reportsScreenshot: Bool = false
     ) {
         self.items = items
+        self.sourceMessageId = sourceMessageId
         self.startIndex = startIndex
         self.isSensitive = isSensitive
         self.topicId = topicId

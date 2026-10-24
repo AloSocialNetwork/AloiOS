@@ -67,6 +67,7 @@ struct FeedView: View {
                                                 isLikePending: app.pendingLikePostIds.contains(post.id),
                                                 isRepostPending: app.isRepostPending(post.id),
                                                 onDelete: { app.deletePost(post) },
+                                                onEdit: { app.postBeingEdited = post },
                                                 onNotice: { app.notice = $0 },
                                                 onReaderAction: { readerAction($0, on: post) }) {
                                     app.toggleLike(post)
@@ -88,6 +89,7 @@ struct FeedView: View {
                                     .transition(.opacity)
                             }
                         }
+                        AloLoadMoreRow(list: app.feedMode == .popular ? .feedPopular : .feedSubscriptions, loaded: posts.count)
                         if posts.isEmpty {
                             ContentUnavailableView(app.feedMode == .subscriptions ? "Пока нет публикаций" : "Лента пока пуста",
                                 systemImage: "text.bubble", description: Text(app.feedMode == .subscriptions
@@ -817,6 +819,7 @@ struct AloPostDetailScreen: View {
                                         isLikePending: app.pendingLikePostIds.contains(post.id),
                                         isRepostPending: app.isRepostPending(post.id),
                                         onDelete: { app.deletePost(post) },
+                                        onEdit: { app.postBeingEdited = post },
                                         onNotice: { app.notice = $0 },
                                         onReaderAction: { action in
                                             switch action {
