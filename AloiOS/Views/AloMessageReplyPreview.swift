@@ -1,6 +1,8 @@
 import SwiftUI
 
-/// A regular reply is two truncated lines, not a nested message bubble.
+/// A regular reply is two truncated lines, not a nested message bubble: Telegram iOS's ChatMessageReplyInfoNode on a
+/// MessageInlineBlockBackgroundView — 4 pt corners, a 3 pt stripe on the left, the colour at 10 % behind, 14 pt title
+/// (semibold) and text, 11 pt from the left and 6 pt from the right.
 /// Keep the accent rule bounded; Shapes otherwise consume a vertical proposal.
 struct AloMessageReplyPreview: View {
     let author: String
@@ -20,12 +22,14 @@ struct AloMessageReplyPreview: View {
                 .foregroundStyle(foreground)
                 .lineLimit(1).truncationMode(.tail)
         }
-        .padding(.leading, 9).padding(.trailing, 6).padding(.vertical, 4)
-        .frame(minHeight: 44, alignment: .leading)
-        .background(accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 5))
+        // The title's line starts 3 pt down and the text's line box ends at the block's edge: 37⅓ pt for two lines.
+        .padding(.leading, 11).padding(.trailing, 6).padding(.top, 3)
+        .frame(alignment: .leading)
+        .background(accent.opacity(0.1))
         .overlay(alignment: .leading) {
-            Capsule().fill(accent).frame(width: 2).padding(.vertical, 4)
+            Rectangle().fill(accent).frame(width: 3)
         }
+        .clipShape(RoundedRectangle(cornerRadius: 4, style: .circular))
         .accessibilityElement(children: .combine)
     }
 }

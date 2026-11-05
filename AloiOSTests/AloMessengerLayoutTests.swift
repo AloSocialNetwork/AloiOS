@@ -149,10 +149,11 @@ struct AloMessengerLayoutTests {
     }
     @Test(arguments: [320.0, 375.0, 390.0, 402.0, 430.0])
     func messageAndSelectionFitPhone(width: Double) {
-        let available = CGFloat(width) - 28
+        // Telegram iOS: the list keeps 10 pt each side and the widest body leaves 33 pt (43 from the screen).
+        let available = CGFloat(width) - 20
         let normal = AloChatMetrics.messageWidth(availableWidth: available, selecting: false)
         let selected = AloChatMetrics.messageWidth(availableWidth: available, selecting: true)
-        #expect(normal + 40 + 8 <= available)
+        #expect(normal + 33 == available)
         #expect(selected + 16 + 8 + 36 <= available)
         #expect(selected > 0 && selected < normal)
     }

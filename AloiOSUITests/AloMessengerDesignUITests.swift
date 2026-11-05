@@ -225,12 +225,12 @@ final class AloMessengerDesignUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Продолжить кружок"].waitForExistence(timeout: 3))
         XCTAssertGreaterThan(circle.frame.width, originalWidth + 50)
         capture("circle-expanded")
-        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.55, dy: 0.35))
-        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.55, dy: 0.82))
-        start.press(forDuration: 0.01, thenDragTo: end, withVelocity: .fast, thenHoldForDuration: 0)
+        // Messages sit closer now (2 pt inside a run), so one drag is no longer enough to take the circle off the screen.
+        app.scrollViews["alo.chat.history"].swipeDown()
         let floating = app.descendants(matching: .any).matching(identifier: "alo.circle.floating").firstMatch
         XCTAssertTrue(floating.waitForExistence(timeout: 4))
         capture("circle-floating")
+        Thread.sleep(forTimeInterval: 1.5) // let the swipe's momentum end before the tap
         floating.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         XCTAssertTrue(floating.waitForNonExistence(timeout: 4))
         XCTAssertTrue(circle.isHittable)
@@ -317,7 +317,7 @@ final class AloMessengerDesignUITests: XCTestCase {
         let app = launchChat(content: "reply-layout")
         let quote = app.buttons["alo.message.reply.990200"]
         XCTAssertTrue(quote.waitForExistence(timeout: 5))
-        XCTAssertEqual(quote.frame.height, 44, accuracy: 1)
+        XCTAssertEqual(quote.frame.height, 37.4, accuracy: 1)
         XCTAssertLessThanOrEqual(quote.frame.maxX, app.frame.maxX - 10)
         let row = app.otherElements["alo.message.990200"]
         XCTAssertLessThan(measuredBubble(row).height, 110)
@@ -332,7 +332,7 @@ final class AloMessengerDesignUITests: XCTestCase {
             let app = launchChat(content: content)
             let quote = app.buttons["alo.message.reply.990200"]
             XCTAssertTrue(quote.waitForExistence(timeout: 5))
-            XCTAssertEqual(quote.frame.height, 44, accuracy: 1)
+            XCTAssertEqual(quote.frame.height, 37.4, accuracy: 1)
             XCTAssertFalse(quote.label.contains("opaque-attachment"))
             XCTAssertTrue(quote.label.contains("Александр"))
             XCTAssertTrue(quote.label.contains(content == "reply-photo" ? "Фото" : "Голосовое сообщение"))
@@ -391,7 +391,9 @@ final class AloMessengerDesignUITests: XCTestCase {
                     withVelocity: .slow, thenHoldForDuration: 0.05)
         XCTAssertTrue(tab.waitForExistence(timeout: 4))
         XCTAssertEqual(tab.frame, frame)
-        XCTAssertTrue(tab.isHittable)
+        // A real tap: isHittable reports false for the tab bar's buttons over content while taps do reach them.
+        tab.tap()
+        XCTAssertTrue(app.buttons["alo.feed.create-post"].waitForExistence(timeout: 4))
         capture("bottom-bar-persistent-after-pop")
     }
 
@@ -411,11 +413,7 @@ final class AloMessengerDesignUITests: XCTestCase {
         app.terminate()
         app.launchArguments = arguments + ["-ALO_UI_MESSENGER_CONTENT", "own-profile"]
         app.launch()
-        let likes = app.buttons["alo.profile.tab.likes"]
-        XCTAssertTrue(likes.waitForExistence(timeout: 15))
-        likes.tap()
-        XCTAssertTrue(likes.isSelected)
-        app.buttons["alo.profile.tab.posts"].tap()
+        XCTAssertTrue(app.staticTexts["Записи"].waitForExistence(timeout: 15))
         app.swipeUp()
         capture("legacy-glass-profile")
     }
@@ -627,6 +625,87 @@ final class AloMessengerDesignUITests: XCTestCase {
         app.buttons["alo.voice.close"].tap()
         XCTAssertTrue(toggle.waitForNonExistence(timeout: 3))
         XCTAssertTrue(app.buttons["alo.voice.play"].label.hasPrefix("Воспроизвести"))
+    }
+
+    /// The voice message belongs to the app, not to the chat: leaving the chat keeps it (paused here, the fixture clip
+    /// is 3 s), and coming back shows the same bar.
+    func testVoiceBarOutlivesTheChat() {
+        let app = launchChat(content: "voice")
+        app.buttons["alo.voice.play"].tap()
+        let toggle = app.buttons["alo.voice.toggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 4))
+        toggle.tap()
+        XCTAssertEqual(toggle.label, "Продолжить голосовое")
+        app.buttons["alo.chat.back"].tap()
+        XCTAssertTrue(field(app, "alo.chat.composer").waitForNonExistence(timeout: 4))
+        capture("voice-left-chat")
+        let row = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Александр")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 4))
+        row.tap()
+        XCTAssertTrue(field(app, "alo.chat.composer").waitForExistence(timeout: 6))
+        XCTAssertTrue(toggle.waitForExistence(timeout: 3), "the voice bar is back in the chat")
+        XCTAssertEqual(toggle.label, "Продолжить голосовое")
+        XCTAssertTrue(app.staticTexts["alo.voice.sender-title"].exists)
+        capture("voice-back-in-chat")
+        app.buttons["alo.voice.close"].tap()
+        XCTAssertTrue(toggle.waitForNonExistence(timeout: 3))
+    }
+
+    /// A circle keeps playing after its chat closes (the app-wide AloCirclePlayback): back in the chat its bar is there,
+    /// still playing (the fixture circles last 30 s).
+    func testCircleBarOutlivesTheChat() {
+        let app = launchChat(content: "circle-flow")
+        let circle = app.otherElements["alo.message.990223"].buttons["alo.circle.play"]
+        XCTAssertTrue(circle.waitForExistence(timeout: 5))
+        circle.tap()
+        let close = app.buttons["alo.circle.close"]
+        XCTAssertTrue(close.waitForExistence(timeout: 4))
+        app.buttons["alo.chat.back"].tap()
+        XCTAssertTrue(field(app, "alo.chat.composer").waitForNonExistence(timeout: 4))
+        Thread.sleep(forTimeInterval: 1.5)
+        let row = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Александр")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 4))
+        row.tap()
+        XCTAssertTrue(field(app, "alo.chat.composer").waitForExistence(timeout: 6))
+        XCTAssertTrue(close.waitForExistence(timeout: 3), "the circle bar is back in the chat")
+        XCTAssertTrue(app.buttons["Приостановить кружок"].exists, "still playing")
+        capture("circle-back-in-chat")
+        close.tap()
+        XCTAssertTrue(close.waitForNonExistence(timeout: 4))
+    }
+
+    /// The chat to put beside Telegram: bubbles, runs, a reply, reactions and a photo, at the bottom and scrolled up.
+    func testTelegramChatReference() {
+        let app = launchChat(content: "telegram-chat")
+        XCTAssertTrue(app.otherElements["alo.message.990637"].waitForExistence(timeout: 6))
+        capture("telegram-chat-bottom")
+        let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.52, dy: 0.3))
+        let to = app.coordinate(withNormalizedOffset: CGVector(dx: 0.52, dy: 0.7))
+        from.press(forDuration: 0.01, thenDragTo: to, withVelocity: .slow, thenHoldForDuration: 0.3)
+        capture("telegram-chat-scrolled")
+        app.terminate()
+        for content in ["bubble-shapes", "forward", "reaction-counts", "group-info", "reply-photo", "voice"] {
+            let other = launchChat(content: content)
+            capture("telegram-\(content)")
+            other.terminate()
+        }
+    }
+
+    /// CPU spent flinging a long text chat up and down (the hitch metric reports on a device only).
+    func testTelegramChatScrollPerformance() {
+        let app = launchChat(content: "telegram-chat")
+        let options = XCTMeasureOptions()
+        options.iterationCount = 3
+        measure(metrics: [XCTOSSignpostMetric.scrollingAndDecelerationMetric, XCTCPUMetric(application: app)], options: options) {
+            let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.52, dy: 0.3))
+            let to = app.coordinate(withNormalizedOffset: CGVector(dx: 0.52, dy: 0.8))
+            for _ in 0..<2 {
+                from.press(forDuration: 0.01, thenDragTo: to, withVelocity: .fast, thenHoldForDuration: 0)
+            }
+            for _ in 0..<2 {
+                to.press(forDuration: 0.01, thenDragTo: from, withVelocity: .fast, thenHoldForDuration: 0)
+            }
+        }
     }
 
     func testMixedMediaScrollPerformance() {
@@ -909,13 +988,14 @@ final class AloMessengerDesignUITests: XCTestCase {
             // AX reports the stroked path, not its 15 pt layout slot. A single
             // sent tick ends at x=12 + half its 1.25 pt stroke (2.375 pt inset).
             let tickInkInset: CGFloat = id == 990202 ? 15 - 12 - 1.25 / 2 : 0
-            // Telegram: own checks run 5 pt into the 11 pt side inset; the time sits 1 pt below the
-            // last line; a single line is centred in the 35 pt minimum bubble.
+            // Telegram iOS: own checks run 5 pt into the 10 pt side inset; the time ends 3⅔ pt above the body's
+            // bottom (1 pt under a text frame that keeps a 0.12 line gap after the last line); one line fills
+            // the 33 pt minimum body.
             let isMine = id == 990202 || id == 990204
-            XCTAssertEqual(bubble.maxX - time.frame.maxX, (isMine ? 6 : 11) + tickInkInset, accuracy: 1)
+            XCTAssertEqual(bubble.maxX - time.frame.maxX, (isMine ? 5 : 10) + tickInkInset, accuracy: 1)
             let singleLine = bubble.height < 40
-            if singleLine { XCTAssertEqual(bubble.height, 35, accuracy: 0.5) }
-            XCTAssertEqual(bubble.maxY - time.frame.maxY, singleLine ? 6 + 1 / 3 : 5, accuracy: 1)
+            if singleLine { XCTAssertEqual(bubble.height, 33, accuracy: 0.5) }
+            XCTAssertEqual(bubble.maxY - time.frame.maxY, CGFloat(11) / 3, accuracy: 1)
         }
         let plain = measuredBubble(app.otherElements["alo.message.990200"])
         let rich = measuredBubble(app.otherElements["alo.message.990201"])
@@ -1046,7 +1126,7 @@ final class AloMessengerDesignUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(popular.frame.height, 44 - 0.01)
         XCTAssertEqual(subscriptions.frame.minX - popular.frame.maxX, 0, accuracy: 1)
         XCTAssertEqual(popular.frame.width, subscriptions.frame.width, accuracy: 1)
-        XCTAssertGreaterThan(popular.frame.width * 2, app.frame.width * 0.8)
+        XCTAssertGreaterThan(popular.frame.width * 3, app.frame.width * 0.8)
         let frame = popular.frame
         app.scrollViews["alo.feed.scroll"].swipeUp()
         XCTAssertEqual(popular.frame, frame)
@@ -1058,15 +1138,12 @@ final class AloMessengerDesignUITests: XCTestCase {
         app.terminate()
         app.launchArguments = ["-ALO_UI_MESSENGER_PREVIEW", "1", "-ALO_UI_MESSENGER_CONTENT", "own-profile"]
         app.launch()
-        let likes = app.buttons["alo.profile.tab.likes"]
-        XCTAssertTrue(likes.waitForExistence(timeout: 15))
-        likes.tap()
-        XCTAssertTrue(likes.isSelected)
-        capture("profile-rounded-tabs")
-        XCTAssertGreaterThanOrEqual(likes.frame.height, 44 - 0.01)
-        app.buttons["alo.profile.tab.posts"].tap()
+        let edit = app.buttons["Редактировать"]
+        XCTAssertTrue(edit.waitForExistence(timeout: 15))
+        XCTAssertGreaterThanOrEqual(edit.frame.height, 44 - 0.01)
+        capture("profile-website-buttons")
         app.swipeUp()
-        capture("profile-tabs-over-scrolled-posts")
+        capture("profile-scrolled-posts")
     }
 
     func testReactionMutationPreservesMessageGeometry() {
@@ -1080,10 +1157,12 @@ final class AloMessengerDesignUITests: XCTestCase {
             let offset = originalText.minX - originalBubble.minX
             capture("\(mode)-before")
 
+            // The text never rewraps or moves inside the bubble. As in Telegram the bubble's width follows the
+            // wider of the text and the row of chips plus the time (the time leaves the text's last line).
             func assertStable() {
                 XCTAssertEqual(body.frame.width, originalText.width, accuracy: 1, mode)
                 XCTAssertEqual(body.frame.height, originalText.height, accuracy: 1, mode)
-                XCTAssertEqual(measuredBubble(row).width, originalBubble.width, accuracy: 1, mode)
+                XCTAssertGreaterThanOrEqual(measuredBubble(row).maxX, body.frame.maxX + offset - 1, mode)
                 XCTAssertEqual(body.frame.minX - measuredBubble(row).minX, offset, accuracy: 1, mode)
             }
             func choose(_ emoji: String) {
@@ -1102,11 +1181,11 @@ final class AloMessengerDesignUITests: XCTestCase {
             assertStable()
             let chip = row.buttons["🥰, 1"]
             XCTAssertTrue(chip.waitForExistence(timeout: 3), mode)
-            // AX converts the frame through animated ancestors: a 44 pt
-            // target can be reported as 43.99999999999994, not a smaller control.
-            XCTAssertGreaterThanOrEqual(chip.frame.height, 44 - 0.01)
+            // Telegram iOS's chip is 30 pt tall (ReactionButtonListComponent).
+            XCTAssertEqual(chip.frame.height, 30, accuracy: 0.5, mode)
             chip.tap()
             assertStable()
+            XCTAssertEqual(measuredBubble(row).width, originalBubble.width, accuracy: 1, mode)
             XCTAssertEqual(measuredBubble(row).height, originalBubble.height, accuracy: 1, mode)
             capture("\(mode)-removed-reaction")
             app.terminate()
@@ -1205,8 +1284,9 @@ final class AloMessengerDesignUITests: XCTestCase {
         let chips = ["❤️, 12", "👍, 128", "🔥, 24", "🎉, 3"].map { row.buttons[$0] }
         for chip in chips {
             XCTAssertTrue(chip.waitForExistence(timeout: 3))
-            XCTAssertGreaterThanOrEqual(chip.frame.height, 44)
-            XCTAssertGreaterThanOrEqual(chip.frame.width, 44)
+            // Telegram iOS's reaction button: 30 pt tall, a lone emoji 41 pt wide.
+            XCTAssertEqual(chip.frame.height, 30, accuracy: 0.5)
+            XCTAssertGreaterThanOrEqual(chip.frame.width, 41)
             XCTAssertLessThanOrEqual(chip.frame.maxX, row.frame.maxX)
         }
         if app.windows.firstMatch.frame.width >= 375 {
@@ -1271,8 +1351,8 @@ final class AloMessengerDesignUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(comments.frame.minY, reaction.frame.maxY - 1)
         let time = row.descendants(matching: .any).matching(identifier: "alo.message.time.990200").firstMatch
         XCTAssertLessThan(time.frame.maxY, comments.frame.minY)
-        XCTAssertEqual(measuredBubble(row).maxX - time.frame.maxX, 11, accuracy: 1)
-        XCTAssertEqual(reaction.frame.minX - measuredBubble(row).minX, 11, accuracy: 1)
+        XCTAssertEqual(measuredBubble(row).maxX - time.frame.maxX, 10, accuracy: 1)
+        XCTAssertEqual(reaction.frame.minX - measuredBubble(row).minX, 10, accuracy: 1)
         capture("channel-media-comments")
     }
 
@@ -1315,7 +1395,8 @@ final class AloMessengerDesignUITests: XCTestCase {
             }
             capture("content-\(mode)-offline-fixture")
             // Press the message itself, not an embedded play/vote control.
-            row.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.12)).press(forDuration: 0.6)
+            // Rows start with the 8 pt gap above a run, so aim below it.
+            row.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.5)).press(forDuration: 0.6)
             XCTAssertTrue(app.buttons["Выбрать"].waitForExistence(timeout: 4), mode)
             capture("context-\(mode)-offline-fixture")
             selectMessage(app)
@@ -1462,14 +1543,19 @@ final class AloMessengerDesignUITests: XCTestCase {
                 predicate: NSPredicate(format: "label BEGINSWITH %@", "Приостановить"), object: control)
             XCTAssertEqual(XCTWaiter.wait(for: [playing], timeout: 3), .completed, mode)
             if mode == "voice" {
+                // The fixture clip lasts 3 s and an ended clip closes its bar: pause first, then read the bar.
+                control.tap()
+                XCTAssertTrue(control.label.hasPrefix("Воспроизвести"), mode)
                 let title = app.staticTexts["alo.voice.sender-title"]
                 XCTAssertTrue(title.waitForExistence(timeout: 2))
                 XCTAssertFalse(title.label.contains(".m4a"))
                 XCTAssertFalse(title.label.hasPrefix("voice-"))
+                capture("playing-\(mode)-offline-fixture")
+            } else {
+                capture("playing-\(mode)-offline-fixture")
+                control.tap()
+                XCTAssertTrue(control.label.hasPrefix("Воспроизвести"), mode)
             }
-            capture("playing-\(mode)-offline-fixture")
-            control.tap()
-            XCTAssertTrue(control.label.hasPrefix("Воспроизвести"), mode)
             app.terminate()
         }
     }

@@ -75,19 +75,23 @@ struct MessagesView: View {
     @State private var previewConversationMuted: Bool?
     @State private var previewConversationDetail: AloConversationDetail?
     @State private var previewConversationSourceFrame: CGRect?
+    @State private var pendingSecretDeletion: AloConversationSummary?
+
+    /// An ordinary chat or a secret chat covers the list.
+    private var isAnyChatOpen: Bool { app.activeConversation != nil || app.secretChats.isOpen }
 
     var body: some View {
         GeometryReader { proxy in
             ZStack {
                 inbox
-                    .offset(x: app.activeConversation == nil ? 0 : -proxy.size.width * 0.30 + max(0, chatDragOffset) * 0.30)
-                    .allowsHitTesting(app.activeConversation == nil && previewConversation == nil)
-                    .accessibilityHidden(app.activeConversation != nil || previewConversation != nil)
+                    .offset(x: !isAnyChatOpen ? 0 : -proxy.size.width * 0.30 + max(0, chatDragOffset) * 0.30)
+                    .allowsHitTesting(!isAnyChatOpen && previewConversation == nil)
+                    .accessibilityHidden(isAnyChatOpen || previewConversation != nil)
 
                 // Stay mounted in the same position throughout push/pop. The
                 // opaque conversation is above this layer, not a reason to
                 // remove and then reinsert the navigation bar after settling.
-                if isSelectingChats, app.activeConversation == nil {
+                if isSelectingChats, !isAnyChatOpen {
                     chatSelectionToolbar
                         .padding(.horizontal, 16).padding(.bottom, 2)
                         .frame(maxHeight: .infinity, alignment: .bottom)
@@ -96,8 +100,8 @@ struct MessagesView: View {
                 } else if let bottomBar {
                     bottomBar.frame(maxHeight: .infinity, alignment: .bottom)
                         .opacity(previewConversation == nil ? 1 : 0)
-                        .allowsHitTesting(app.activeConversation == nil && previewConversation == nil)
-                        .modifier(AloCoveredFromAccessibility(covered: app.activeConversation != nil || previewConversation != nil))
+                        .allowsHitTesting(!isAnyChatOpen && previewConversation == nil)
+                        .modifier(AloCoveredFromAccessibility(covered: isAnyChatOpen || previewConversation != nil))
                         .zIndex(1)
                 }
                 if app.activeConversation != nil {
@@ -122,7 +126,13 @@ struct MessagesView: View {
                         .zIndex(2)
                 }
 
-                if let conversation = previewConversation, app.activeConversation == nil {
+                if app.secretChats.isOpen, app.activeConversation == nil {
+                    AloSecretChatView(store: app.secretChats)
+                        .transition(.move(edge: .trailing))
+                        .zIndex(2)
+                }
+
+                if let conversation = previewConversation, !isAnyChatOpen {
                     ConversationPreviewOverlay(
                         conversation: conversation,
                         detail: previewConversationDetail,
@@ -179,6 +189,18 @@ struct MessagesView: View {
         .ignoresSafeArea(app.activeConversation != nil ? .keyboard : [], edges: .bottom)
         .preference(key: AloChatPreviewPresentedKey.self, value: previewConversation != nil)
         .animation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.9), value: app.activeConversation?.peerId)
+        .animation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.9), value: app.secretChats.activeId)
+        .confirmationDialog("Удалить секретный чат?", isPresented: Binding(
+            get: { pendingSecretDeletion != nil }, set: { if !$0 { pendingSecretDeletion = nil } }
+        ), titleVisibility: .visible) {
+            Button(pendingSecretDeletion?.lastBody == "Запрос секретного чата" ? "Отклонить" : "Удалить у обоих", role: .destructive) {
+                if let chat = pendingSecretDeletion { Task { await app.secretChats.delete(id: chat.roomId) } }
+                pendingSecretDeletion = nil
+            }
+            Button("Отмена", role: .cancel) { pendingSecretDeletion = nil }
+        } message: {
+            Text("Сообщения и файлы этого чата исчезнут на обоих устройствах и на сервере.")
+        }
         .onChange(of: app.activeConversation?.peerId) { _, _ in
             chatDragOffset = 0
             chatDragActive = false
@@ -271,9 +293,20 @@ struct MessagesView: View {
                         AloSocialTitle(text: selectedChatKeys.isEmpty ? "Выберите чаты" : "Выбрано: \(selectedChatKeys.count)")
                             .foregroundStyle(AloTheme.text)
                             .contentTransition(.numericText())
-                    } else {
-                        AloSocialTitle(text: showsArchive ? "Архив" : "Чаты")
-                            .foregroundStyle(AloTheme.text)
+                    } else if !showsArchive && !chatSearchActive {
+                        // The website's header: calls on the left, the title centred, a new chat on the right.
+                        Button {
+                            showsCallHistory = true
+                        } label: {
+                            Image(systemName: "phone")
+                                .font(.system(size: 20, weight: .regular))
+                                .foregroundStyle(AloTheme.accent)
+                                .frame(width: 44, height: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(AloPressBounceButtonStyle(pressedScale: 0.94))
+                        .accessibilityLabel("Звонки")
+                        .accessibilityIdentifier("alo.chats.calls")
                     }
                     Spacer()
                     if chatSearchActive {
@@ -288,37 +321,12 @@ struct MessagesView: View {
                             .frame(minHeight: 44)
                             .accessibilityIdentifier("alo.chats.select.done")
                     } else {
-                        // The text action leads; the two round buttons stay together at the edge.
-                        if !arrangedChats.isEmpty {
-                            Button("Изменить") { beginChatSelection(with: nil) }
-                                .font(.system(size: 17))
-                                .foregroundStyle(AloTheme.accent)
-                                .frame(minHeight: 44)
-                                .padding(.trailing, 6)
-                                .accessibilityIdentifier("alo.chats.select.begin")
-                        }
-                        Button {
-                            showsCallHistory = true
-                        } label: {
-                            Image(systemName: "phone")
-                                .font(.system(size: 18, weight: .semibold))
-                                .foregroundStyle(AloTheme.accent)
-                                .frame(width: AloSocialMetrics.glassButton, height: AloSocialMetrics.glassButton)
-                                .modifier(AloChatGlass(interactive: false, role: .chrome))
-                                .frame(width: 44, height: 44)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(AloPressBounceButtonStyle(pressedScale: 0.94))
-                        .accessibilityLabel("Звонки")
-                        .accessibilityIdentifier("alo.chats.calls")
                         Button {
                             showsCommunityCreation = true
                         } label: {
                             Image(systemName: "square.and.pencil")
-                                .font(.system(size: 18, weight: .semibold))
+                                .font(.system(size: 21, weight: .regular))
                                 .foregroundStyle(AloTheme.accent)
-                                .frame(width: AloSocialMetrics.glassButton, height: AloSocialMetrics.glassButton)
-                                .modifier(AloChatGlass(interactive: false, role: .chrome))
                                 .frame(width: 44, height: 44)
                                 .contentShape(Rectangle())
                         }
@@ -327,6 +335,13 @@ struct MessagesView: View {
                     }
                 }
                 .frame(minHeight: AloSocialMetrics.controlHeight)
+                .overlay {
+                    if !isSelectingChats {
+                        AloSocialTitle(text: showsArchive ? "Архив" : "Чаты")
+                            .foregroundStyle(AloTheme.text)
+                            .allowsHitTesting(false)
+                    }
+                }
                 .padding(.horizontal, AloSocialMetrics.inset)
                 .padding(.top, 8)
             }
@@ -433,7 +448,46 @@ struct MessagesView: View {
 
     private func chatKey(_ conversation: AloConversationSummary) -> String { AloChatListPrefs.key(for: conversation) }
 
+    @ViewBuilder
     private func chatRow(_ conversation: AloConversationSummary) -> some View {
+        if conversation.kind == "secret" {
+            secretChatRow(conversation)
+        } else {
+            ordinaryChatRow(conversation)
+        }
+    }
+
+    /// A secret chat in the list: a tap opens it, a swipe deletes it for both people; it is never pinned or archived.
+    private func secretChatRow(_ conversation: AloConversationSummary) -> some View {
+        AloSwipeActionRow(
+            id: chatKey(conversation), openedID: $swipeOpenID,
+            leading: [],
+            trailing: [
+                AloSwipeAction(id: "delete", title: "Удалить", systemImage: "trash.fill", color: Color(red: 1, green: 0.27, blue: 0.23)) {
+                    pendingSecretDeletion = conversation
+                }
+            ],
+            isEnabled: !isSelectingChats
+        ) {
+            VStack(spacing: 0) {
+                ConversationRow(conversation: conversation, isUnread: conversation.unreadCount > 0,
+                                unreadCount: conversation.unreadCount, isSelecting: isSelectingChats)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        if swipeOpenID != nil { swipeOpenID = nil; return }
+                        guard !isSelectingChats else { return }
+                        app.secretChats.open(id: conversation.roomId)
+                    }
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityIdentifier("alo.chats.secret.\(conversation.roomId)")
+                Rectangle().fill(AloTheme.separator).frame(height: 1 / UIScreen.main.scale)
+                    .padding(.leading, isSelectingChats ? 120 : 86)
+            }
+        }
+        .id(conversation.id)
+    }
+
+    private func ordinaryChatRow(_ conversation: AloConversationSummary) -> some View {
         let key = chatKey(conversation)
         let pinned = app.isChatPinned(conversation)
         let archived = app.isChatArchived(conversation)
@@ -645,7 +699,7 @@ struct MessagesView: View {
 #endif
         Task {
             do {
-                let detail = try await app.api.loadConversation(peerId: conversation.peerId)
+                let detail = try await app.api.loadConversation(peerId: conversation.peerId, markRead: false)
                 guard previewConversation?.peerId == conversation.peerId else { return }
                 previewConversationDetail = detail
                 let muted = try await app.api.chatMuteState(conversation: detail)
@@ -671,7 +725,7 @@ struct MessagesView: View {
         previewConversationMuted = nil
         Task {
             do {
-                let detail = try await app.api.loadConversation(peerId: conversation.peerId)
+                let detail = try await app.api.loadConversation(peerId: conversation.peerId, markRead: false)
                 let muted = try await app.api.setChatMuted(!currentMuted, conversation: detail)
                 guard previewConversation?.peerId == conversation.peerId else { return }
                 previewConversationMuted = muted
@@ -772,18 +826,34 @@ private struct ConversationRow: View, Equatable {
                     size: 60,
                     colorSeed: String(conversation.peer.id)
                 )
+                .aloPremiumFrame(userId: conversation.kind == "direct" ? conversation.peer.id : 0, size: 60)
             }
             VStack(alignment: .leading, spacing: -1) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    if conversation.kind == "group" || conversation.peer.entityType == "channel" {
+                    if conversation.kind == "secret" {
+                        // Telegram's secret chat: a green lock and a green name.
+                        Image(systemName: "lock.fill")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(AloSecretChatView.green)
+                            .accessibilityLabel("Секретный чат")
+                    } else if conversation.kind == "group" || conversation.peer.entityType == "channel" {
                         Image(systemName: conversation.peer.entityType == "channel" ? "megaphone.fill" : "person.2.fill")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(AloTheme.text.opacity(0.7))
                     }
-                    Text(conversation.peer.entityType == "saved" ? "Избранное" : conversation.peer.name)
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(AloTheme.text)
-                        .lineLimit(1)
+                    if conversation.kind == "direct" && conversation.peer.entityType != "saved" {
+                        // Alo Премиум: the name in its colour, then the star or the emoji status.
+                        HStack(spacing: 4) {
+                            AloPremiumName(text: conversation.peer.name, userId: conversation.peer.id, font: .system(size: 16, weight: .semibold))
+                                .lineLimit(1)
+                            AloPremiumMark(userId: conversation.peer.id, size: 14)
+                        }
+                    } else {
+                        Text(conversation.peer.entityType == "saved" ? "Избранное" : conversation.peer.name)
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(conversation.kind == "secret" ? AloSecretChatView.green : AloTheme.text)
+                            .lineLimit(1)
+                    }
                     Spacer(minLength: 8)
                     Text(AloFormatters.messageTime(conversation.lastAt))
                         .font(.system(size: 14, weight: .regular))
@@ -1170,6 +1240,12 @@ private extension ConversationView {
                 activeTopicId = conversation.forumTopics.first(where: { $0.isGeneral && !$0.isHidden })?.id
                     ?? conversation.forumTopics.first(where: { !$0.isClosed && !$0.isHidden })?.id
                     ?? 0
+                // «N комментариев» under a channel post opens the discussion group in this same screen: go to the post's thread.
+                let requestedTopicId = app.consumeRequestedForumTopic(roomId: conversation.roomId)
+                if requestedTopicId > 0,
+                   conversation.forumTopics.contains(where: { $0.id == requestedTopicId && !$0.isHidden }) {
+                    activeTopicId = requestedTopicId
+                }
                 app.startConversationLive(conversation)
                 if activeTopicId > 0 {
                     app.selectForumTopic(
@@ -1248,27 +1324,6 @@ private extension ConversationView {
                     }
                 }
             }
-            .onReceive(NotificationCenter.default.publisher(for: .aloVoicePlaybackDidStart)) { notification in
-                guard let attachmentId = notification.object as? String else { return }
-                let title = (notification.userInfo?["title"] as? String)?.ifBlank("Голосовое сообщение") ?? "Голосовое сообщение"
-                let speed = notification.userInfo?["speed"] as? Double
-                withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
-                    activeVoicePlayback = ActiveVoicePlayback(
-                        attachmentId: attachmentId,
-                        title: title,
-                        isPlaying: notification.userInfo?["isPlaying"] as? Bool ?? true,
-                        speed: speed ?? activeVoicePlayback?.speed ?? 1
-                    )
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .aloVoicePlaybackDidStop)) { notification in
-                guard let attachmentId = notification.object as? String else { return }
-                if activeVoicePlayback?.attachmentId == attachmentId {
-                    withAnimation(.spring(response: 0.24, dampingFraction: 0.9)) {
-                        activeVoicePlayback = nil
-                    }
-                }
-            }
             .onDisappear {
                 scrollMeasurements.bottomScrollRevision = nil
                 dateHeaderController.reset()
@@ -1295,7 +1350,7 @@ private extension ConversationView {
             }
 #endif
             .animation(.spring(response: 0.28, dampingFraction: 0.9), value: selectionMode)
-            .animation(.spring(response: 0.26, dampingFraction: 0.86), value: activeVoicePlayback)
+            .animation(.spring(response: 0.26, dampingFraction: 0.86), value: voicePlayback.attachmentId)
             .sheet(isPresented: forwardPickerBinding) {
                 ForwardTargetSheet(
                     conversations: app.bootstrap?.conversations ?? [],
@@ -1603,13 +1658,6 @@ private struct SavedMessagesIntroIcon: View {
     }
 }
 
-private struct ActiveVoicePlayback: Equatable {
-    let attachmentId: String
-    let title: String
-    let isPlaying: Bool
-    var speed: Double
-}
-
 private struct ChatCallLogMeta: Equatable {
     let callType: String
     let status: String
@@ -1651,12 +1699,20 @@ struct AloChatAppearance: Codable, Equatable {
     }
 
     var outgoingColor: Color {
-        Color(hue: outgoingHue / 360, saturation: 0.88, brightness: outgoingBrightness)
+        // «Классика» is the website's chat: its blue (#177dff) and its dark blue-grey (#1e2128).
+        if isWebClassic { return Color(red: 23 / 255, green: 125 / 255, blue: 1) }
+        return Color(hue: outgoingHue / 360, saturation: 0.88, brightness: outgoingBrightness)
     }
 
     var incomingColor: Color {
-        Color(hue: incomingHue / 360, saturation: 0.24, brightness: incomingBrightness)
+        if isWebClassic { return Color(red: 30 / 255, green: 33 / 255, blue: 40 / 255) }
+        return Color(hue: incomingHue / 360, saturation: 0.24, brightness: incomingBrightness)
     }
+
+    /// The default look matches the website (~/alo/web/css/chat.css `.chat-wall`): a deep blue background with a blue glow
+    /// at the top right and a violet one at the bottom left, the doodle pattern in light blue at 10 % (the owner, 2026-10-28:
+    /// the old near-black one with a 5 % pattern looked dull and cramped).
+    var isWebClassic: Bool { preset.lowercased() == "classic" }
 
     private var usesNeutralDarkWallpaper: Bool {
         ["classic", "black", "graphite"].contains(preset.lowercased()) && wallpaperBrightness <= 0.12
@@ -1903,9 +1959,18 @@ struct ConversationView: View {
     @State private var recordingStartedAt = Date()
     @State private var recordedDurations = [UUID: TimeInterval]()
     @State private var recordedWaveforms = [UUID: [CGFloat]]()
-    @State private var activeVoicePlayback: ActiveVoicePlayback?
-    @State private var circlePlayback = AloCirclePlayback()
+    @ObservedObject private var voicePlayback = AloVoicePlayback.shared
+    @ObservedObject private var musicPlayback = AloMusicPlayback.shared
+    private let circlePlayback = AloCirclePlayback.shared
     @State private var historyProjectionCache = AloChatHistoryProjectionCache()
+    /// Joins and leaves of a group, drawn between the messages (AloGroupServiceEvents.swift).
+    @State private var groupServiceEvents = [AloGroupServiceEvent]()
+    @State private var channelMuted: Bool?
+    @State private var isChannelMuteChanging = false
+    @State private var chatDetailsOpensSearch = false
+    @State private var isPremiumGiftPresented = false
+    /// The gift button shows only once Премиум is switched on for everyone (Telegram shows it when gifts are on).
+    @ObservedObject private var premiumDirectory = AloPremiumDirectory.shared
     @State private var isChatDetailsPresented = false
     @State private var isChatAppearancePresented = false
     @State private var chatAppearance: AloChatAppearance
@@ -1957,7 +2022,7 @@ struct ConversationView: View {
     /// title/presence capsule, or below the voice/circle player when it is
     /// shown in that same slot.
     private var hasTopPlaybackChrome: Bool {
-        circlePlayback.item != nil || activeVoicePlayback != nil
+        circlePlayback.item != nil || voicePlayback.attachmentId != nil || musicPlayback.track != nil
     }
 
     private var conversationTopChromeHeight: CGFloat {
@@ -1965,7 +2030,7 @@ struct ConversationView: View {
         var height = AloChatMetrics.headerHeight + 16
         if app.pendingSendError(in: conversation) != nil { height += 68 }
         if !pinnedMessages.isEmpty { height += 51 }
-        if conversation.groupPolicy?.isForumGroup == true, !conversation.forumTopics.isEmpty {
+        if conversation.groupPolicy?.isForumGroup == true, !conversation.forumTopics.isEmpty, activeCommentsThread == nil {
             height += 51
             if isForumSearchPresented { height += 51 }
         }
@@ -1979,6 +2044,11 @@ struct ConversationView: View {
 
     private var floatingDateTrackingTop: CGFloat {
         floatingDateTopOffset + AloChatDateMetrics.sectionHeight + keyboardMessagesLift
+    }
+
+    /// Groups only: channels and direct chats have no join or leave lines; a forum topic shows its own messages.
+    private var showsGroupServiceLines: Bool {
+        conversation.kind == "group" && !isChannelConversation && activeForumTopic == nil
     }
 
     private var isChannelConversation: Bool {
@@ -2074,7 +2144,8 @@ struct ConversationView: View {
 
     private func canDeleteMessageForEveryone(_ message: AloChatMessage) -> Bool {
         guard message.id > 0 else { return false }
-        if conversation.kind != "group" && conversation.roomId <= 0 { return true }
+        // A private chat: only the author removes a message for both (the server refuses the rest).
+        if conversation.kind != "group" && conversation.roomId <= 0 { return message.senderId == app.bootstrap?.me.id }
         if message.senderId == app.bootstrap?.me.id { return true }
         return hasAdministrativeRight("deleteMessages")
     }
@@ -2120,20 +2191,23 @@ struct ConversationView: View {
     var body: some View {
         lifecycleBoundConversationView
             .environment(\.aloCirclePlayback, circlePlayback)
-            .onAppear(perform: updateCircleQueue)
+            .onAppear {
+                circlePlayback.activeScope = circleScope
+                updateCircleQueue()
+            }
             .onChange(of: conversation.items) { _, _ in updateCircleQueue() }
             .onChange(of: circlePlayback.focusRequest) { _, _ in
                 requestedMessageScrollId = circlePlayback.item?.messageID
             }
             .onChange(of: activeTopicId) { _, _ in circlePlayback.stop(); updateCircleQueue() }
-            .onReceive(NotificationCenter.default.publisher(for: .aloMediaPlaybackDidStart)) { note in
-                if let id = note.object as? String, circlePlayback.item?.id != id { circlePlayback.stop() }
-            }
-            .onDisappear { circlePlayback.stop() }
     }
 
+    /// Which chat a circle came from: its floating circle shows only there, other chats show its bar.
+    private var circleScope: String { "\(conversation.peerId)-\(conversation.roomId)" }
+
     private func updateCircleQueue() {
-        if let item = circlePlayback.item, !conversation.items.contains(where: { $0.id == item.messageID }) {
+        if let item = circlePlayback.item, circlePlayback.scope == circleScope,
+           !conversation.items.contains(where: { $0.id == item.messageID }) {
             circlePlayback.stop()
         }
         circlePlayback.setQueue(visibleConversationItems.filter { !$0.isScheduled && $0.selfDestructSeconds == 0 }.flatMap { message in
@@ -2154,7 +2228,7 @@ struct ConversationView: View {
             messagesList
                 .offset(y: -keyboardMessagesLift)
 
-            if visibleConversationItems.isEmpty {
+            if visibleConversationItems.isEmpty, activeCommentsThread == nil {
                 GeometryReader { proxy in
                     let topInset = max(104, conversationTopChromeHeight + 12)
                     let bottomInset = emptyStateBottomInset
@@ -2197,7 +2271,7 @@ struct ConversationView: View {
             // stop/play. UIKit owns its fade and drag; SwiftUI must not remove
             // that host in the middle of an interactive settle.
             AloFloatingCircle(playback: circlePlayback, accent: chatAppearance.outgoingColor,
-                isPresented: !isChatDetailsPresented && actionMessage == nil) { requestedMessageScrollId = $0 }
+                isPresented: !isChatDetailsPresented && actionMessage == nil && circlePlayback.scope == circleScope) { requestedMessageScrollId = $0 }
                     .padding(.top, conversationTopChromeHeight + 44)
                     .padding(.bottom, composerChromeHeight + keyboardComposerLift + 12 + AloCirclePresentation.bottomControlsClearance)
                     // An actively dragged media overlay can cross the header.
@@ -2209,6 +2283,7 @@ struct ConversationView: View {
                 ChatPeerInfoPanel(
                     conversation: conversation,
                     messages: conversation.items,
+                    startsWithSearch: chatDetailsOpensSearch,
                     onClose: dismissChatDetailsAfterInteractiveExit,
                     onOpenProfile: {
                         dismissChatDetails()
@@ -2362,7 +2437,7 @@ struct ConversationView: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
 
-            if conversation.groupPolicy?.isForumGroup == true, !conversation.forumTopics.isEmpty {
+            if conversation.groupPolicy?.isForumGroup == true, !conversation.forumTopics.isEmpty, activeCommentsThread == nil {
                 forumTopicPicker
                     .padding(.horizontal, 18)
                     .padding(.bottom, 7)
@@ -2379,18 +2454,30 @@ struct ConversationView: View {
                     .padding(.horizontal, 18)
                     .padding(.bottom, 7)
                     .transition(.opacity)
-            } else if let activeVoicePlayback {
-                VoicePlaybackTopBar(
-                    playback: activeVoicePlayback,
-                    onToggle: { toggleTopVoicePlayback(activeVoicePlayback.attachmentId) },
-                    onSpeed: { cycleVoicePlaybackSpeed(activeVoicePlayback.attachmentId) },
-                    onClose: { stopTopVoicePlayback(activeVoicePlayback.attachmentId) }
-                )
+            } else if voicePlayback.attachmentId != nil {
+                // The clip may come from another chat: it goes on wherever the person goes (AloVoicePlayback.swift).
+                VoicePlaybackTopBar(playback: voicePlayback)
                 .padding(.horizontal, 18)
                 .padding(.bottom, 7)
                 .transition(.move(edge: .top).combined(with: .opacity))
+            } else if musicPlayback.track != nil {
+                // A song: the same oval, with «назад» / «далее» through the chat's tracks (AloMusicPlayer.swift).
+                AloMusicPlaybackBar { requestedMessageScrollId = $0 }
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 7)
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
 
+        }
+        // The chat's songs make the queue of the music player (a song starting closes the voice bar: AloVoicePlayback).
+        .onAppear { musicPlayback.enter(scope: "\(conversation.peerId)") }
+        // Joins and leaves are read again when the history changes (someone joined, a message arrived).
+        .task(id: "\(conversation.roomId)-\(conversation.items.count)-\(conversation.groupMembers.count)") {
+            guard showsGroupServiceLines, conversation.roomId > 0 else { return }
+            if !groupServiceEvents.isEmpty { try? await Task.sleep(nanoseconds: 600_000_000) }
+            if let events = try? await app.api.loadGroupServiceEvents(roomId: conversation.roomId), events != groupServiceEvents {
+                groupServiceEvents = events
+            }
         }
     }
 
@@ -2542,6 +2629,9 @@ struct ConversationView: View {
                     composer
                         .aloChatSwipeControl()
                         .transition(.move(edge: .bottom).combined(with: .opacity))
+                } else if isChannelConversation {
+                    channelSubscriberBar
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 } else {
                     channelReadOnlyBar
                         .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -2550,6 +2640,118 @@ struct ConversationView: View {
             .padding(.horizontal, AloInputMetrics.inset)
             .padding(.top, ChatComposerMetrics.verticalChromePadding)
             .padding(.bottom, ChatComposerMetrics.verticalChromePadding)
+        }
+    }
+
+    /// A subscriber's bar under a channel, as in Telegram (ChatChannelSubscriberInputPanelNode): one glass capsule,
+    /// at least 165 pt wide and 40 pt tall, «Убрать звук» / «Включить звук» in 17 pt medium, centred on the screen,
+    /// and a 40 pt round search button on the right that opens the search of the channel's info page.
+    private var channelSubscriberBar: some View {
+        ZStack {
+            if conversation.isMember {
+                Button(action: toggleChannelMuted) {
+                    Text(channelMuted == true ? "Включить звук" : "Убрать звук")
+                        .font(.system(size: 17, weight: .medium))
+                        .foregroundStyle(AloTheme.text)
+                        .lineLimit(1)
+                        .padding(.horizontal, 10)
+                        .frame(minWidth: 165, minHeight: 40)
+                        .modifier(AloChatGlass(interactive: false, role: .chrome))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(AloControlPressStyle())
+                .disabled(channelMuted == nil || isChannelMuteChanging)
+                .padding(.horizontal, 48)
+                .accessibilityIdentifier("alo.channel.mute")
+            } else {
+                // A channel read before subscribing: «Подписаться» in the accent colour (Telegram's join panel).
+                Button { app.joinPreviewedChannel() } label: {
+                    Text("Подписаться")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .padding(.horizontal, 10)
+                        .frame(minWidth: 165, minHeight: 40)
+                        .background(Capsule().fill(AloTheme.accent))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(AloControlPressStyle())
+                .padding(.horizontal, 48)
+                .accessibilityIdentifier("alo.channel.join")
+            }
+            HStack {
+                if premiumDirectory.enabled, let owner = conversation.groupMembers.first(where: { $0.role == "owner" }) {
+                    Button { isPremiumGiftPresented = true } label: {
+                        Image(systemName: "gift")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundStyle(AloTheme.text)
+                            .frame(width: 40, height: 40)
+                            .modifier(AloChatGlass(interactive: false, role: .chrome))
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(AloControlPressStyle())
+                    .accessibilityLabel("Подарить Премиум автору")
+                    .accessibilityIdentifier("alo.channel.gift")
+                    .sheet(isPresented: $isPremiumGiftPresented) {
+                        NavigationStack {
+                            ScrollView {
+                                AloPremiumSettingsView(giftRecipient: AloPremiumGiftRecipient(id: owner.id, name: owner.name))
+                            }
+                            .background(AloTheme.background.ignoresSafeArea())
+                            .toolbar {
+                                ToolbarItem(placement: .cancellationAction) {
+                                    Button("Закрыть") { isPremiumGiftPresented = false }
+                                }
+                            }
+                        }
+                        .presentationDetents([.large])
+                    }
+                }
+                Spacer(minLength: 0)
+                Button {
+                    chatDetailsOpensSearch = true
+                    presentChatDetails()
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(AloTheme.text)
+                        .frame(width: 40, height: 40)
+                        .modifier(AloChatGlass(interactive: false, role: .chrome))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(AloControlPressStyle())
+                .accessibilityLabel("Поиск по каналу")
+                .accessibilityIdentifier("alo.channel.search")
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: ChatComposerMetrics.controlSize)
+        .task(id: conversation.roomId) { await loadChannelMuted() }
+    }
+
+    private func loadChannelMuted() async {
+        guard conversation.isMember else { channelMuted = false; return }
+        #if DEBUG
+        if UserDefaults.standard.bool(forKey: "ALO_UI_MESSENGER_PREVIEW") { channelMuted = false; return }
+        #endif
+        channelMuted = (try? await app.api.chatMuteState(conversation: conversation)) ?? false
+    }
+
+    private func toggleChannelMuted() {
+        guard let current = channelMuted, !isChannelMuteChanging else { return }
+        isChannelMuteChanging = true
+        channelMuted = !current
+        AloHaptics.impact(.light)
+        Task {
+            defer { isChannelMuteChanging = false }
+            #if DEBUG
+            if UserDefaults.standard.bool(forKey: "ALO_UI_MESSENGER_PREVIEW") { return }
+            #endif
+            do {
+                channelMuted = try await app.api.setChatMuted(!current, conversation: conversation)
+            } catch {
+                channelMuted = current
+                app.notice = "Не удалось изменить звук канала."
+            }
         }
     }
 
@@ -2673,23 +2875,34 @@ struct ConversationView: View {
         let dayKeys = snapshot.dayKeys
         let itemsByID = snapshot.byID
         let projectedPolls = snapshot.polls
+        let serviceLines = AloGroupServiceEvent.placement(
+            showsGroupServiceLines ? groupServiceEvents : [], messages: items,
+            hasOlder: items.count >= 30, meId: app.bootstrap?.me.id ?? 0)
         return GeometryReader { viewport in
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(spacing: 0) {
-                        LazyVStack(spacing: chatAppearance.compactSpacing ? 3 : 8) {
+                        LazyVStack(spacing: 0) {
                             Color.clear.frame(height: max(132, conversationTopChromeHeight + 16))
+                            if let thread = activeCommentsThread, let post = thread.post {
+                                CommentsThreadPostHeader(post: post, hasComments: !items.isEmpty, bubbleColor: chatAppearance.incomingColor)
+                            }
                             ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                                 if index == 0 || dayKeys[index - 1] != dayKeys[index] {
                                     AloChatInlineDateHeader(controller: dateHeaderController, id: item.id,
                                         label: snapshot.dateLabels[item.id] ?? "")
+                                }
+                                ForEach(serviceLines.before[item.id] ?? [], id: \.id) { line in
+                                    ChatDatePill(label: line.text)
+                                        .padding(.vertical, 6)
+                                        .accessibilityIdentifier("alo.chat.service.\(line.id)")
                                 }
                                 if shouldShowTopicSeparator(at: index, items: items),
                                    let topic = topic(for: item) {
                                     ChatDatePill(
                                         label: "\(topic.iconEmoji) \(topic.title)\(topic.isClosed ? " · закрыта" : "")"
                                     )
-                                    .padding(.vertical, 2)
+                                    .padding(.vertical, 6)
                                 }
                                 Group {
                                     if let systemEvent = AloChatSystemEventCodec.decode(item.body) {
@@ -2697,9 +2910,11 @@ struct ConversationView: View {
                                             event: systemEvent,
                                             isMine: item.senderId == app.bootstrap?.me.id
                                         )
+                                        .padding(.vertical, 6)
                                     } else if let callMeta = item.chatCallLogMeta,
                                        callMeta.scope == "group" {
                                         GroupCallHistoryEvent(message: item, meta: callMeta)
+                                            .padding(.vertical, 6)
                                     } else {
                                         ChatMessageRow(
                                             message: item,
@@ -2712,7 +2927,10 @@ struct ConversationView: View {
                                             isSelected: selectedMessageIds.contains(item.id),
                                             selectionMode: selectionMode,
                                             isContextMenuPresented: actionMessage != nil || isChatDetailsPresented,
-                                            availableWidth: max(0, viewport.size.width - 28),
+                                            isPrivateChat: conversation.kind == "direct",
+                                            // An incoming group message gives the avatar column its width.
+                                            availableWidth: max(0, viewport.size.width - 2 * ChatMessageRow.screenInset
+                                                - (showsGroupAvatars(for: item) ? ChatMessageRow.groupAvatarSlot : 0)),
                                             onTap: { handleMessageTap(item) },
                                             onReact: { emoji in
                                                 toggleReactionPreservingComposer(item, emoji: emoji)
@@ -2749,11 +2967,29 @@ struct ConversationView: View {
                                                     actionMessage = item
                                                 }
                                             },
-                                            onOpenReply: { requestedMessageScrollId = $0 }
+                                            onOpenReply: { requestedMessageScrollId = $0 },
+                                            startsGroupRun: index == 0 || !continuesGroupRun(
+                                                items[index - 1], item, sameDay: snapshot.sameRunWindow(index - 1, index),
+                                                serviceLineBeforeLater: !(serviceLines.before[item.id] ?? []).isEmpty),
+                                            endsGroupRun: index + 1 >= items.count || !continuesGroupRun(
+                                                item, items[index + 1], sameDay: snapshot.sameRunWindow(index, index + 1),
+                                                serviceLineBeforeLater: !(serviceLines.before[items[index + 1].id] ?? []).isEmpty),
+                                            senderRoleLabel: showsGroupAvatars(for: item) ? groupRoleLabel(for: item) : "",
+                                            // The avatar of a run is drawn over the list, sticky (ChatStickyRunAvatars).
+                                            drawsGroupAvatarInRow: false
                                         )
+                                        .equatable()
                                         .modifier(AloSwipeToReply(
                                             enabled: canComposeMessages && !selectionMode && item.id > 0 && item.selfDestructSeconds <= 0
                                         ) { beginReply(item) })
+                                        // A double tap sends the reaction chosen in the settings (the same in every app), the heart until then.
+                                        .simultaneousGesture(
+                                            TapGesture(count: 2).onEnded {
+                                                guard !selectionMode, item.id > 0, item.selfDestructSeconds <= 0 else { return }
+                                                AloHaptics.impact(.light)
+                                                toggleReactionPreservingComposer(item, emoji: app.bootstrap?.me.favoriteReaction ?? "❤️")
+                                            }
+                                        )
                                     }
                                 }
                                 .modifier(AloMessageHighlight(active: highlightedMessageId == item.id))
@@ -2761,13 +2997,21 @@ struct ConversationView: View {
                                 .transition(.scale(scale: 0.86).combined(with: .opacity))
                                 .background {
                                     GeometryReader { rowProxy in
-                                        Color.clear.preference(
-                                            key: ChatMessageFramePreferenceKey.self,
-                                            value: [item.id: rowProxy.frame(in: .named("conversationScroll"))]
-                                        )
+                                        let rowFrame = rowProxy.frame(in: .named("conversationScroll"))
+                                        Color.clear
+                                            .preference(key: ChatMessageFramePreferenceKey.self, value: [item.id: rowFrame])
+                                            .preference(key: ChatRunAvatarFramesKey.self, value: runAvatarFrame(
+                                                item, at: index, in: items, frame: rowFrame,
+                                                sameDay: { snapshot.sameRunWindow($0, $1) },
+                                                serviceLineBefore: { !(serviceLines.before[$0] ?? []).isEmpty }))
                                     }
                                 }
                             }
+                        }
+                        ForEach(serviceLines.after, id: \.id) { line in
+                            ChatDatePill(label: line.text)
+                                .padding(.vertical, 6)
+                                .accessibilityIdentifier("alo.chat.service.\(line.id)")
                         }
                         // Telegram's sponsored message under a channel's newest posts.
                         if isChannelConversation, let channelAd, !app.hiddenAdIds.contains(channelAd.id) {
@@ -2792,11 +3036,18 @@ struct ConversationView: View {
                             }
                     }
                     .frame(minHeight: viewport.size.height, alignment: .bottom)
-                    .padding(.horizontal, 14)
+                    .padding(.horizontal, ChatMessageRow.screenInset)
                     .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.86), value: snapshot.ids)
                 }
                 .scrollDismissesKeyboard(.interactively)
                 .coordinateSpace(name: "conversationScroll")
+                // Group members' avatars: by the bottom of the screen while a run goes on below it (Telegram on iPhone).
+                .overlayPreferenceValue(ChatRunAvatarFramesKey.self) { runs in
+                    if !selectionMode {
+                        ChatStickyRunAvatars(runs: runs, visibleBottom: viewport.size.height - messageListBottomInset,
+                                             leading: ChatMessageRow.groupAvatarLeading)
+                    }
+                }
                 .onPreferenceChange(ChatMessageFramePreferenceKey.self, perform: updateFloatingDate)
                 .onPreferenceChange(AloChatDateFramesKey.self) { frames in
                     scrollMeasurements.dates = frames
@@ -2937,6 +3188,20 @@ struct ConversationView: View {
         }
     }
 
+    /// The post's comments when this group chat was opened from «N комментариев» under a channel post.
+    private var activeCommentsThread: AloCommentsThread? {
+        guard let thread = app.commentsThread, thread.roomId == conversation.roomId, conversation.roomId > 0 else { return nil }
+        return thread
+    }
+
+    private func commentsThreadTitle(_ thread: AloCommentsThread) -> String {
+        let count = visibleConversationItems.filter { $0.id > 0 || !$0.body.isEmpty }.count
+        guard count > 0 else { return "Комментарии" }
+        let mod100 = count % 100
+        let word = (11...14).contains(mod100) ? "комментариев" : (count % 10 == 1 ? "комментарий" : ((2...4).contains(count % 10) ? "комментария" : "комментариев"))
+        return "\(count) \(word)"
+    }
+
     private var header: some View {
         // Keep navigation in fixed slots; a larger Dynamic Type title can grow
         // below without moving Back away from the media viewer's close button.
@@ -2955,28 +3220,44 @@ struct ConversationView: View {
                 presentChatDetails()
             } label: {
                 VStack(spacing: 1) {
-                    Text(conversation.title)
-                        .font(.headline)
-                        .foregroundStyle(AloTheme.text)
-                        .lineLimit(1)
+                    if let thread = activeCommentsThread {
+                        // A post's comments (Telegram): «N комментариев» over the channel's name.
+                        Text(commentsThreadTitle(thread))
+                            .font(.headline)
+                            .foregroundStyle(AloTheme.text)
+                            .lineLimit(1)
+                        Text(thread.post?.author.name ?? "")
+                            .font(.footnote)
+                            .foregroundStyle(AloTheme.muted)
+                            .lineLimit(1)
+                    } else {
+                    HStack(spacing: 4) {
+                        AloPremiumName(text: conversation.title, userId: conversation.kind == "direct" && conversation.entityType != "saved" ? conversation.peerId : 0, font: .headline)
+                            .lineLimit(1)
+                        AloPremiumMark(userId: conversation.kind == "direct" && conversation.entityType != "saved" ? conversation.peerId : 0, size: 15)
+                    }
                     HStack(spacing: 4) {
                         if case .updating = app.connectionState {
                             ProgressView().controlSize(.mini)
                         }
                         Text(conversationPresenceLabel)
                     }
-                    .font(.caption)
+                    .font(.footnote)
                     .foregroundStyle(conversationPresenceIsActive ? AloTheme.accent : AloTheme.muted)
                     .lineLimit(1)
+                    }
                 }
-                .padding(.horizontal, 12)
+                // The oval hugs the name and stays centred, as on the website and in Telegram;
+                // a bar stretched across the whole header read as one black strip.
+                .padding(.horizontal, 20)
                 .padding(.vertical, 4)
-                .frame(maxWidth: .infinity, minHeight: AloChatMetrics.headerHeight)
+                .frame(minHeight: AloChatMetrics.headerHeight)
                 .modifier(AloChatGlass())
                 .contentShape(Capsule())
             }
             .buttonStyle(AloControlPressStyle())
             .accessibilityIdentifier("alo.chat.info")
+            .frame(maxWidth: .infinity)
             .contextMenu { chatMenuItems }
 
             Button {
@@ -3030,6 +3311,7 @@ struct ConversationView: View {
         withAnimation(.spring(response: response, dampingFraction: 0.9)) {
             isChatDetailsPresented = false
         }
+        chatDetailsOpensSearch = false
         blocksParentSwipe = actionMessage != nil
     }
 
@@ -3042,6 +3324,7 @@ struct ConversationView: View {
         withTransaction(transaction) {
             isChatDetailsPresented = false
         }
+        chatDetailsOpensSearch = false
         blocksParentSwipe = actionMessage != nil
     }
 
@@ -3275,13 +3558,14 @@ struct ConversationView: View {
                     .accessibilityIdentifier("alo.chat.attach")
                     .transition(.scale(scale: 0.88).combined(with: .opacity))
 
-                    TextField("Сообщение", text: $app.messageText, axis: .vertical)
+                    TextField("Сообщение", text: $app.messageText,
+                              prompt: Text("Сообщение").foregroundStyle(AloTheme.muted), axis: .vertical)
                         .focused($composerFocused)
                         .accessibilityLabel("Сообщение")
                         .accessibilityIdentifier("alo.chat.composer")
                         .foregroundStyle(AloTheme.text)
                         .font(.body)
-                        .padding(.leading, 12)
+                        .padding(.leading, 16)
                         .padding(.trailing, 44)
                         .padding(.vertical, 5)
                         .lineLimit(1...5)
@@ -3297,9 +3581,9 @@ struct ConversationView: View {
                                 composerFocused = false
                                 isComposerContentPickerPresented = true
                             } label: {
-                                Image(systemName: "face.smiling")
-                                    .font(.system(size: 20, weight: .regular))
-                                    .foregroundStyle(AloTheme.muted)
+                                AloSmileyGlyph()
+                                    .foregroundStyle(AloTheme.text)
+                                    .frame(width: 23, height: 23)
                                     .frame(width: AloInputMetrics.touchHeight, height: AloInputMetrics.touchHeight)
                                     .contentShape(Rectangle())
                             }
@@ -3527,6 +3811,11 @@ struct ConversationView: View {
         } else {
             selected = selected == [optionId] ? [] : [optionId]
         }
+        // A poll of a cloud chat is counted by the server; only an old end-to-end poll is voted for with an event.
+        if state.isServerTallied {
+            app.voteInPoll(state.definition, optionIds: selected)
+            return
+        }
         guard let body = AloPollCodec.encodeVote(
             pollId: state.definition.id,
             optionIds: selected
@@ -3543,6 +3832,55 @@ struct ConversationView: View {
             return conversation.forumTopics.first(where: { $0.id == message.topicId })
         }
         return conversation.forumTopics.first(where: { $0.isGeneral })
+    }
+
+    private func showsGroupAvatars(for message: AloChatMessage) -> Bool {
+        conversation.kind == "group" && !isChannelConversation && message.senderId != app.bootstrap?.me.id
+    }
+
+    /// Whether `later` goes on the run of `earlier` (Android's aloContinuesGroupRun): the same person, as themself or
+    /// as the anonymous group, the same day and topic, with no system line, group call or service line in between.
+    private func continuesGroupRun(_ earlier: AloChatMessage, _ later: AloChatMessage, sameDay: Bool,
+                                   serviceLineBeforeLater: Bool) -> Bool {
+        func breaks(_ message: AloChatMessage) -> Bool {
+            AloChatSystemEventCodec.decode(message.body) != nil || message.chatCallLogMeta?.scope == "group"
+        }
+        return earlier.senderId == later.senderId && earlier.senderIsAnonymous == later.senderIsAnonymous
+            && earlier.topicId == later.topicId && sameDay && !serviceLineBeforeLater && !breaks(earlier) && !breaks(later)
+    }
+
+    /// What a row adds to its run's sticky avatar: its frame under the run's key (nothing outside group members' runs).
+    private func runAvatarFrame(_ item: AloChatMessage, at index: Int, in items: [AloChatMessage], frame: CGRect,
+                                sameDay: (Int, Int) -> Bool, serviceLineBefore: (Int) -> Bool) -> [Int: ChatRunAvatarFrame] {
+        guard showsGroupAvatars(for: item), AloChatSystemEventCodec.decode(item.body) == nil,
+              item.chatCallLogMeta?.scope != "group" else { return [:] }
+        let key = groupRunStartId(at: index, in: items, sameDay: sameDay, serviceLineBefore: serviceLineBefore)
+        return [key: ChatRunAvatarFrame(minY: frame.minY, maxY: frame.maxY, senderId: item.senderId,
+                                        name: item.sender?.name ?? "", avatarUrl: item.sender?.avatarUrl ?? "")]
+    }
+
+    /// The first message of the member's run that `index` belongs to: the key of the run's sticky avatar.
+    private func groupRunStartId(at index: Int, in items: [AloChatMessage], sameDay: (Int, Int) -> Bool,
+                                 serviceLineBefore: (Int) -> Bool) -> Int {
+        var start = index
+        while start > 0 && continuesGroupRun(items[start - 1], items[start], sameDay: sameDay(start - 1, start),
+                                             serviceLineBeforeLater: serviceLineBefore(items[start].id)) {
+            start -= 1
+        }
+        return items[start].id
+    }
+
+    /// The role shown at the end of a sender's name row: the admin's own title if set, otherwise «Владелец» or «Админ».
+    private func groupRoleLabel(for message: AloChatMessage) -> String {
+        if message.senderIsAnonymous { return message.senderAdminTitle }
+        let member = conversation.groupMembers.first { $0.id == message.senderId }
+        let title = message.senderAdminTitle.isEmpty ? (member?.adminTitle ?? "") : message.senderAdminTitle
+        if !title.isEmpty { return title }
+        switch member?.role {
+        case "owner": return "Владелец"
+        case "admin": return "Админ"
+        default: return ""
+        }
     }
 
     private func shouldShowTopicSeparator(at index: Int, items: [AloChatMessage]) -> Bool {
@@ -3683,44 +4021,6 @@ struct ConversationView: View {
         }
     }
 
-    private func toggleTopVoicePlayback(_ attachmentId: String) {
-        NotificationCenter.default.post(name: .aloVoicePlaybackToggleRequested, object: attachmentId)
-    }
-
-    private func cycleVoicePlaybackSpeed(_ attachmentId: String) {
-        guard let playback = activeVoicePlayback else { return }
-        let nextSpeed: Double
-        switch playback.speed {
-        case ..<1.25:
-            nextSpeed = 1.5
-        case ..<1.75:
-            nextSpeed = 2.0
-        default:
-            nextSpeed = 1.0
-        }
-        withAnimation(.spring(response: 0.22, dampingFraction: 0.86)) {
-            activeVoicePlayback = ActiveVoicePlayback(
-                attachmentId: attachmentId,
-                title: playback.title,
-                isPlaying: playback.isPlaying,
-                speed: nextSpeed
-            )
-        }
-        NotificationCenter.default.post(
-            name: .aloVoicePlaybackSpeedChanged,
-            object: attachmentId,
-            userInfo: ["speed": nextSpeed]
-        )
-        AloHaptics.selection()
-    }
-
-    private func stopTopVoicePlayback(_ attachmentId: String) {
-        NotificationCenter.default.post(name: .aloVoicePlaybackStopRequested, object: attachmentId)
-        withAnimation(.spring(response: 0.24, dampingFraction: 0.9)) {
-            activeVoicePlayback = nil
-        }
-    }
-
     private func beginForward(_ message: AloChatMessage) {
         guard message.selfDestructSeconds <= 0 else { return }
         forwardPickerMessage = message
@@ -3774,7 +4074,8 @@ struct ConversationView: View {
         if target.peerId != conversation.peerId {
             app.openConversation(target)
         }
-        app.pendingForwardDraft = AloForwardMeta(userId: message.senderId, messageId: message.id, user: nil)
+        app.pendingForwardDraft = AloForwardMeta(userId: message.senderId, messageId: message.id, user: nil,
+                                                 content: AloForwardContent(message))
         app.pendingForwardTitle = "Переслать сообщение"
     }
 
@@ -3890,7 +4191,9 @@ struct ConversationView: View {
 #endif
         switch recordingMode {
         case .voice:
-            audioRecorder.start(onReady: recordingDidStart)
+            audioRecorder.start(onReady: recordingDidStart, onLimitReached: {
+                if activeRecordingMode == .voice { finishRecording() }
+            })
         case .circle:
             circleRecorder.start(onReady: recordingDidStart, onStopped: {
                 if activeRecordingMode == .circle { finishRecording() }
@@ -4049,9 +4352,18 @@ struct AloChatWallpaper: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(alignment: .topLeading) {
                 ZStack {
-                    gradient
+                    if appearance.isWebClassic { webGradient } else { gradient }
 
-                    if appearance.patternStyle != "none", appearance.patternIntensity > 0 {
+                    if appearance.isWebClassic {
+                        Image("AloChatPatternInk")
+                            .resizable()
+                            .renderingMode(.template)
+                            .foregroundStyle(Color(red: 130 / 255, green: 175 / 255, blue: 1))
+                            .scaledToFill()
+                            .frame(width: Self.canvasSize.width, height: Self.canvasSize.height)
+                            .clipped()
+                            .opacity(0.10)
+                    } else if appearance.patternStyle != "none", appearance.patternIntensity > 0 {
                         Image(patternAssetName)
                             .resizable()
                             .renderingMode(.template)
@@ -4073,6 +4385,18 @@ struct AloChatWallpaper: View {
             .flatMap(\.windows)
             .first(where: \.isKeyWindow)?
             .bounds.size ?? UIScreen.main.bounds.size
+    }
+
+    /// The website's wallpaper: #050810 with two soft glows (blue 16 % top right, violet 10 % bottom left).
+    private var webGradient: some View {
+        let size = Self.canvasSize
+        return ZStack {
+            Color(red: 5 / 255, green: 8 / 255, blue: 16 / 255)
+            RadialGradient(colors: [Color(red: 23 / 255, green: 125 / 255, blue: 1).opacity(0.16), .clear],
+                           center: UnitPoint(x: 0.85, y: -0.1), startRadius: 0, endRadius: max(size.width, size.height) * 0.72)
+            RadialGradient(colors: [Color(red: 120 / 255, green: 90 / 255, blue: 1).opacity(0.10), .clear],
+                           center: UnitPoint(x: 0, y: 1), startRadius: 0, endRadius: max(size.width, size.height) * 0.6)
+        }
     }
 
     @ViewBuilder
@@ -4587,9 +4911,26 @@ private final class AloChatScrollMeasurements {
 
 private final class AloBubbleMeasurement { var frame: CGRect = .zero }
 
+extension ChatMessageRow: Equatable {
+    /// The actions are rebuilt with every list update but do the same for the same message. Comparing only the data
+    /// lets SwiftUI skip every bubble that did not change while the person types, scrolls or a new message arrives.
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.message == rhs.message && lhs.replyToMessage == rhs.replyToMessage && lhs.pollState == rhs.pollState
+            && lhs.appearance == rhs.appearance && lhs.isMine == rhs.isMine
+            && lhs.showsSenderAttribution == rhs.showsSenderAttribution && lhs.isPending == rhs.isPending
+            && lhs.isSelected == rhs.isSelected && lhs.selectionMode == rhs.selectionMode
+            && lhs.isContextMenuPresented == rhs.isContextMenuPresented && lhs.previewOnly == rhs.previewOnly
+            && lhs.isPrivateChat == rhs.isPrivateChat && lhs.availableWidth == rhs.availableWidth
+            && lhs.canClosePoll == rhs.canClosePoll && lhs.startsGroupRun == rhs.startsGroupRun
+            && lhs.endsGroupRun == rhs.endsGroupRun && lhs.senderRoleLabel == rhs.senderRoleLabel
+            && lhs.drawsGroupAvatarInRow == rhs.drawsGroupAvatarInRow
+    }
+}
+
 private struct ChatMessageRow: View {
     @Environment(\.aloMediaZoom) private var mediaZoom
-    @EnvironmentObject private var app: AloAppModel
+    /// Not observed: a bubble redraws when its message changes, not on every change of the app.
+    private var app: AloAppModel { .unobserved }
     @Environment(\.aloCirclePlayback) private var circlePlayback
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .body) private var pollIndicatorWidth: CGFloat = 42
@@ -4615,6 +4956,8 @@ private struct ChatMessageRow: View {
     let selectionMode: Bool
     var isContextMenuPresented = false
     var previewOnly = false
+    /// A one-to-one chat: reaction chips show who reacted (you, the other person) in place of the counter, as Telegram does.
+    var isPrivateChat = false
     /// Width proposed by the message list, after its horizontal content insets.
     let availableWidth: CGFloat
     let onTap: () -> Void
@@ -4626,6 +4969,20 @@ private struct ChatMessageRow: View {
     let onOpenDiscussion: () -> Void
     let onLongPress: (CGRect) -> Void
     var onOpenReply: (Int) -> Void = { _ in }
+    /// A group shows a run of one person's messages as Telegram does: the name over the first, the avatar beside the
+    /// last, and the person's role («Владелец», «Админ» or the admin's own title) at the end of the name row.
+    var startsGroupRun = true
+    var endsGroupRun = true
+    var senderRoleLabel = ""
+    /// The conversation list draws the run's avatar itself, sticky to the bottom (ChatStickyRunAvatars); previews draw it here.
+    var drawsGroupAvatarInRow = true
+
+    /// Telegram iOS (ChatMessageItemLayoutConstants.compact, ChatMessageBubbleItemNode): a bubble's frame starts 3 pt from
+    /// the screen, its body 7 pt further (the tail's room), so the list keeps 10 pt to the body on both sides.
+    static let screenInset: CGFloat = 10
+    /// A group member's avatar: 34 pt, 7 pt from the screen (ChatMessageAvatarHeader), the bubble frame 38 pt further.
+    static let groupAvatarSlot: CGFloat = 38
+    static let groupAvatarLeading: CGFloat = 7
 
     @ViewBuilder var body: some View {
         if previewOnly {
@@ -4641,6 +4998,19 @@ private struct ChatMessageRow: View {
             if selectionMode && !isMine {
                 selectionIndicator
             }
+            if showsSenderAttribution && !isMine {
+                Group {
+                    if endsGroupRun && drawsGroupAvatarInRow {
+                        AloAvatar(name: message.sender?.name ?? "", url: message.sender?.avatarUrl ?? "",
+                                  size: 34, colorSeed: String(message.senderId))
+                    } else {
+                        Color.clear.frame(width: 34, height: 1)
+                    }
+                }
+                .padding(.trailing, Self.groupAvatarSlot - 34 - 8)
+                .offset(x: Self.groupAvatarLeading - Self.screenInset)
+                .accessibilityHidden(true)
+            }
             bubble
                 .background(bubbleFrameReader)
                 // Selection owns a separate overlay. A no-op tap on this parent
@@ -4652,7 +5022,6 @@ private struct ChatMessageRow: View {
                 // Context activation belongs to the visible bubble, not the
                 // full-width alignment slot beside a short message.
                 .frame(maxWidth: bubbleMaxWidth, alignment: isMine ? .trailing : .leading)
-                .shadow(color: .black.opacity(0.18), radius: 2, x: 0, y: 1)
                 .allowsHitTesting(!selectionMode)
                 .accessibilityHidden(selectionMode)
             if selectionMode && isMine {
@@ -4660,7 +5029,9 @@ private struct ChatMessageRow: View {
             }
             if !isMine { Spacer(minLength: oppositeInset) }
         }
-        .padding(.vertical, 2)
+        // Telegram iOS: bubbles 2 + px apart above and below and the body 1 pt inside its frame, so 2 pt inside one
+        // person's run (mergedSpacing 0) and 2 + 2 × (2 + px) between runs.
+        .padding(.top, startsGroupRun ? (appearance.compactSpacing ? 4 : 2 + 2 * (2 + 1 / UIScreen.main.scale)) : 2)
         .background {
             // A soft, rounded wash inside the row, not a hard full-width rectangle.
             RoundedRectangle(cornerRadius: 20, style: .continuous)
@@ -4694,22 +5065,19 @@ private struct ChatMessageRow: View {
         !selectionMode && !previewOnly && circleOnly && circleAttachments.contains { $0.id == circlePlayback?.item?.id }
     }
 
-    private var oppositeInset: CGFloat { expandedCircle ? 0 : selectionMode ? 16 : 40 }
+    /// With the HStack's 8 pt this leaves Telegram's 33 pt between the widest bubble and the list's edge.
+    private var oppositeInset: CGFloat { expandedCircle ? 0 : selectionMode ? 16 : 25 }
 
     private var bubbleMaxWidth: CGFloat {
         expandedCircle ? max(1, availableWidth - 8)
             : AloChatMetrics.messageWidth(availableWidth: availableWidth, selecting: selectionMode)
     }
 
+    /// The bubble's frame for the long-press menu. onGeometryChange only runs a closure; a GeometryReader with
+    /// onChange rebuilt a view for every bubble on every frame of scrolling.
     private var bubbleFrameReader: some View {
-        GeometryReader { proxy in
-            Color.clear
-                .onAppear {
-                    updateBubbleFrame(proxy.frame(in: .named("conversationRoot")))
-                }
-                .onChange(of: proxy.frame(in: .named("conversationRoot"))) { _, newFrame in
-                    updateBubbleFrame(newFrame)
-                }
+        Color.clear.onGeometryChange(for: CGRect.self) { $0.frame(in: .named("conversationRoot")) } action: { newFrame in
+            updateBubbleFrame(newFrame)
         }
     }
 
@@ -4844,8 +5212,8 @@ private struct ChatMessageRow: View {
             .frame(width: max(1, min(312, bubbleMaxWidth) - 24), alignment: .leading)
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .background(isMine ? appearance.outgoingColor : appearance.incomingColor)
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .modifier(AloMessageBubbleSurface(color: isMine ? appearance.outgoingColor : appearance.incomingColor,
+            isMine: isMine, startsRun: startsGroupRun, endsRun: endsGroupRun))
         }
     }
 
@@ -5001,15 +5369,15 @@ private struct ChatMessageRow: View {
         .frame(width: max(1, min(270, bubbleMaxWidth) - 18), alignment: isMine ? .trailing : .leading)
         .padding(.horizontal, 9)
         .padding(.vertical, 8)
-        .background(isMine ? appearance.outgoingColor : appearance.incomingColor)
-        .clipShape(RoundedRectangle(cornerRadius: 23, style: .continuous))
+        .modifier(AloMessageBubbleSurface(color: isMine ? appearance.outgoingColor : appearance.incomingColor,
+            isMine: isMine, startsRun: startsGroupRun, endsRun: endsGroupRun))
     }
 
     private var messageTimestamp: some View { timestamp(checksBleed: 0) }
 
     /// Time, then read checks for own messages. In a text bubble Telegram reserves 13 pt for the
     /// checks and lets the second one run 5 pt into the bubble's side inset (`checksBleed`).
-    private func timestamp(checksBleed: CGFloat) -> some View {
+    private func timestamp(checksBleed: CGFloat, onMedia: Bool = false) -> some View {
         HStack(spacing: 3) {
             if !message.editedAt.isEmpty {
                 Text("изм.")
@@ -5025,7 +5393,8 @@ private struct ChatMessageRow: View {
             }
         }
         .font(.system(size: 11, weight: .regular))
-        .foregroundStyle(Color.white.opacity(0.72))
+        // Telegram's dark theme: the bubbles' secondary text, white at 50 %; solid white on a photo's capsule.
+        .foregroundStyle(Color.white.opacity(onMedia ? 1 : 0.5))
         .fixedSize()
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("alo.message.time.\(message.id)")
@@ -5086,12 +5455,19 @@ private struct ChatMessageRow: View {
                                 .modifier(AloMediaZoomSource(messageId: message.id, namespace: mediaZoom))
                         }
                         ForEach(documents) { document in
+                            if AloMusicCatalog.isMusic(document), !isPending {
+                                AloMusicAttachmentView(attachment: document, messageId: message.id, isMine: isMine,
+                                                       accent: appearance.outgoingColor,
+                                                       meta: isMusicOnly ? AnyView(messageTimestamp) : nil)
+                                    .frame(maxWidth: 290, alignment: .leading)
+                            } else {
                             AloFileAttachmentRow(attachment: document, isMine: isMine,
                                                  accent: isMine ? Color.white : appearance.outgoingColor,
                                                  uploadLocalId: isPending && !previewOnly ? message.id : nil) {
                                 openMediaAttachment(at: mediaAttachments.firstIndex(of: document) ?? 0)
                             }
                             .frame(maxWidth: 290, alignment: .leading)
+                            }
                         }
                     }
                 }
@@ -5143,21 +5519,21 @@ private struct ChatMessageRow: View {
             }
             VStack(spacing: 0) {
                 if callLogMeta == nil {
-                    inlineReactionFooter(showMeta: true)
-                    channelDiscussionFooter
+                    inlineReactionFooter(showMeta: !isMusicOnly)
+                    channelDiscussionFooter(inset: bubbleHorizontalPadding, bottom: !message.reactions.isEmpty ? 9 : (attachmentsOnly ? 4 : 10))
                 }
             }
         }
         .padding(.horizontal, callLogMeta == nil ? bubbleHorizontalPadding : 10)
         .padding(.top, callLogMeta == nil ? (attachmentsOnly ? 4 : 10) : 8)
-        .padding(.bottom, !message.reactions.isEmpty && callLogMeta == nil ? 0 : (callLogMeta == nil ? (attachmentsOnly ? 4 : 10) : 8))
-        .background(isMine ? appearance.outgoingColor : appearance.incomingColor)
-        .clipShape(RoundedRectangle(cornerRadius: messageBubbleCornerRadius, style: .continuous))
+        .padding(.bottom, !message.reactions.isEmpty && callLogMeta == nil ? 9 : (callLogMeta == nil ? (attachmentsOnly ? 4 : 10) : 8))
+        .modifier(AloMessageBubbleSurface(color: isMine ? appearance.outgoingColor : appearance.incomingColor,
+            isMine: isMine, startsRun: startsGroupRun, endsRun: endsGroupRun))
     }
 
     private var visualMediaBubble: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if message.replyToMessageId > 0 || message.forwardFrom != nil || (showsSenderAttribution && !isMine) {
+            if message.replyToMessageId > 0 || message.forwardFrom != nil || (showsSenderAttribution && !isMine && startsGroupRun) {
                 VStack(alignment: .leading, spacing: 4) {
                     senderAttribution
                     replyPreview
@@ -5190,8 +5566,9 @@ private struct ChatMessageRow: View {
             }
             .overlay(alignment: .bottomTrailing) {
                 if message.body.isEmpty && message.reactions.isEmpty {
-                    messageTimestamp.padding(.horizontal, 6).padding(.vertical, 3)
-                        .background(.black.opacity(0.42), in: Capsule()).padding(7)
+                    // Telegram's status over media: a capsule 7 pt wide of the text, 2 pt tall of it, 6 pt from the corner.
+                    timestamp(checksBleed: 0, onMedia: true).padding(.horizontal, 7).padding(.vertical, 2)
+                        .background(.black.opacity(0.42), in: Capsule()).padding(6)
                 }
             }
             if !message.body.isEmpty && message.reactions.isEmpty {
@@ -5204,7 +5581,7 @@ private struct ChatMessageRow: View {
                     }
                     messageExpiryBadge
                 }
-                .padding(.horizontal, 11).padding(.top, 6).padding(.bottom, 6)
+                .padding(.horizontal, 10).padding(.top, Self.textBubbleTopInset).padding(.bottom, textBubbleBottomInset)
             } else if !message.body.isEmpty || !message.reactions.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
                     if !message.body.isEmpty {
@@ -5214,13 +5591,13 @@ private struct ChatMessageRow: View {
                     inlineReactionFooter(showMeta: true)
                     messageExpiryBadge
                 }
-                .padding(.horizontal, 11).padding(.top, 7).padding(.bottom, message.reactions.isEmpty ? 5 : 0)
+                .padding(.horizontal, 10).padding(.top, Self.textBubbleTopInset).padding(.bottom, textBubbleBottomInset)
             }
-            channelDiscussionFooter.padding(.horizontal, 12)
+            channelDiscussionFooter(inset: 0, bottom: 0)
         }
         .frame(width: visualMediaSize.width, alignment: .leading)
-        .background(isMine ? appearance.outgoingColor : appearance.incomingColor)
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .modifier(AloMessageBubbleSurface(color: isMine ? appearance.outgoingColor : appearance.incomingColor,
+            isMine: isMine, startsRun: startsGroupRun, endsRun: endsGroupRun, showsTail: !message.body.isEmpty))
     }
 
     private var visualMediaSize: CGSize {
@@ -5245,8 +5622,10 @@ private struct ChatMessageRow: View {
     }
 
     private var textOnlyBubble: some View {
-        // Telegram's minimum bubble is 40 × 35: a one-word message is as wide as its word and time.
-        AloMessageContentLayout(minimumWidth: 40 - 22) {
+        // Telegram iOS (compact text bubbleInsets 6 + px / 11 / 6 − px / 11 inside a frame whose body is 1 pt in, the
+        // tail's 6 pt aside): 10 pt from the body's sides to the text, 5⅓ above it, 4⅔ under the last line, and a body
+        // of at least 38 × 33. Chips start 3 pt under the text (ChatMessageDateAndStatusNode `verticalReactionsInset`).
+        AloMessageContentLayout(spacing: message.reactions.isEmpty ? 2 : 3 + 2.4, minimumWidth: 38 - 20) {
             VStack(alignment: .leading, spacing: 5) {
                 senderAttribution
                 replyPreview
@@ -5262,23 +5641,22 @@ private struct ChatMessageRow: View {
             }
             VStack(spacing: 0) {
                 if !message.reactions.isEmpty { inlineReactionFooter(showMeta: true) }
-                channelDiscussionFooter
+                channelDiscussionFooter(inset: 10, bottom: textBubbleBottomInset)
             }
         }
-        // A single line is 32 pt; Telegram grows such a bubble to 35 and centres the line.
-        .frame(minHeight: 35 - 12)
-        .padding(.leading, 11)
-        .padding(.trailing, 11)
-        .padding(.top, 6)
-        .padding(.bottom, message.reactions.isEmpty ? 6 : 0)
-        .background(isMine ? appearance.outgoingColor : appearance.incomingColor)
-        .clipShape(
-            RoundedRectangle(
-                cornerRadius: messageBubbleCornerRadius,
-                style: .continuous
-            )
-        )
+        .frame(minHeight: 33 - Self.textBubbleTopInset - textBubbleBottomInset, alignment: .top)
+        .padding(.horizontal, 10)
+        .padding(.top, Self.textBubbleTopInset)
+        .padding(.bottom, textBubbleBottomInset)
+        .modifier(AloMessageBubbleSurface(color: isMine ? appearance.outgoingColor : appearance.incomingColor,
+            isMine: isMine, startsRun: startsGroupRun, endsRun: endsGroupRun))
     }
+
+    private static let textBubbleTopInset: CGFloat = 5 + 1 / 3
+    /// Telegram ends the text frame a line gap (2.4 pt) under the last line and puts 4⅔ pt under it; the time sits
+    /// 1 pt below that frame, 3⅔ pt above the body's edge (ours is placed 3 pt under the line). Under a row of chips
+    /// (the status node ends 1 pt below them) 5⅔.
+    private var textBubbleBottomInset: CGFloat { message.reactions.isEmpty ? 6 + 2 / 3 : 5 + 2 / 3 }
 
     @ViewBuilder
     private var replyPreview: some View {
@@ -5288,8 +5666,8 @@ private struct ChatMessageRow: View {
                 onOpenReply(message.replyToMessageId)
             } label: {
                 AloMessageReplyPreview(author: replySenderName, preview: replyMessagePreviewText,
-                    accent: isMine ? .white.opacity(0.9) : AloTheme.accent,
-                    foreground: isMine ? .white.opacity(0.8) : AloTheme.text.opacity(0.8))
+                    accent: isMine ? .white : AloTheme.accent,
+                    foreground: isMine ? .white : AloTheme.text)
                     .contentShape(Rectangle())
             }
             .buttonStyle(AloChatPressStyle())
@@ -5311,38 +5689,68 @@ private struct ChatMessageRow: View {
         return chatPreviewText(replyToMessage)
     }
 
+    /// «N комментариев» under a channel post = Telegram's ChatMessageCommentFooterContentNode: a 42 pt row under a hairline,
+    /// a 24 pt comments icon 15 pt from the bubble edge, the 17 pt label at 50 pt, a 24 pt disclosure arrow 9 pt from the
+    /// right edge. `inset` and `bottom` are the bubble paddings around it, so the row reaches the bubble's edges.
     @ViewBuilder
-    private var channelDiscussionFooter: some View {
+    private func channelDiscussionFooter(inset: CGFloat, bottom: CGFloat) -> some View {
         if message.channelPostId > 0, message.channelPostCommentsEnabled {
             Button(action: onOpenDiscussion) {
-                HStack(spacing: 6) {
-                    Image(systemName: "bubble.left.and.bubble.right")
-                        .font(.system(size: 12, weight: .semibold))
+                HStack(spacing: 0) {
+                    if message.channelPostRecentCommenters.isEmpty {
+                        Image(systemName: "bubble.left")
+                            .font(.system(size: 19, weight: .regular))
+                            .frame(width: 24, height: 24)
+                    } else {
+                        // Telegram: the latest commenters' avatars (30 pt, 20 pt apart, from 13 pt) in place of the icon.
+                        HStack(spacing: -10) {
+                            ForEach(Array(message.channelPostRecentCommenters.enumerated()), id: \.offset) { index, person in
+                                AloAvatar(name: person.name, url: person.avatarUrl, size: 30, colorSeed: "\(person.id)")
+                                    .overlay(Circle().stroke(isMine ? appearance.outgoingColor : appearance.incomingColor, lineWidth: 2))
+                                    .zIndex(Double(3 - index))
+                            }
+                        }
+                        .padding(.leading, -2)
+                    }
                     Text(channelDiscussionLabel)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: 17, weight: .regular))
+                        .lineLimit(1)
+                        .padding(.leading, 11)
+                    if message.channelPostHasUnreadComments {
+                        Circle()
+                            .frame(width: 6, height: 6)
+                            .padding(.leading, 6)
+                            .accessibilityLabel("Новые комментарии")
+                    }
                     Spacer(minLength: 8)
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: 14, weight: .semibold))
+                        .frame(width: 24, height: 24)
                 }
-                .foregroundStyle(isMine ? Color.white.opacity(0.88) : AloTheme.accent)
-                .padding(.top, 6)
-                .padding(.bottom, 4)
-                .frame(minHeight: 44)
+                .foregroundStyle(isMine ? Color.white : AloTheme.accent)
+                .padding(.leading, 15)
+                .padding(.trailing, 9)
+                .padding(.bottom, 2)
+                .frame(height: 42)
                 .overlay(alignment: .top) {
                     Rectangle()
-                        .fill(Color.white.opacity(0.12))
-                        .frame(height: 0.5)
+                        .fill((isMine ? Color.white : AloTheme.text).opacity(0.16))
+                        .frame(height: 1 / UIScreen.main.scale)
+                        .padding(.horizontal, 1)
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(AloChatPressStyle())
+            .padding(.top, 4)
+            .padding(.horizontal, -inset)
+            .padding(.bottom, -bottom)
             .accessibilityIdentifier("alo.message.comments.\(message.id)")
         }
     }
 
     private var channelDiscussionLabel: String {
         let count = message.channelPostCommentCount
-        guard count > 0 else { return "Обсудить" }
+        guard count > 0 else { return "Прокомментировать" }
         return "\(count) \(russianCommentWord(count))"
     }
 
@@ -5392,25 +5800,29 @@ private struct ChatMessageRow: View {
                     messageID: message.id,
                     senderName: app.voicePlaybackTitle(for: message),
                     preparePlayback: prepareExpiringMediaPlayback,
-                    isTapSuppressed: { shouldSuppressMediaOpen }
+                    isTapSuppressed: { shouldSuppressMediaOpen },
+                    isIncoming: !isMine
                 )
                     .frame(width: circleDiameter(attachment), height: circleDiameter(attachment))
                     .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 1), value: circlePlayback?.item?.id)
+                    // «Aa» beside the time on the right, the length is on the left (Telegram on iPhone).
                     .overlay(alignment: .bottomTrailing) {
-                        Text(AloFormatters.messageTime(message.createdAt))
-                            .font(.system(size: 12, weight: .bold, design: .rounded))
-                            .foregroundStyle(Color.white)
-                            .monospacedDigit()
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.black.opacity(0.46))
-                            .clipShape(Capsule())
-                            .padding(10)
+                        HStack(spacing: 6) {
+                            circleTranscribePill(attachment)
+                            Text(AloFormatters.messageTime(message.createdAt))
+                                .font(.system(size: 12, weight: .bold, design: .rounded))
+                                .foregroundStyle(Color.white)
+                                .monospacedDigit()
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.black.opacity(0.46))
+                                .clipShape(Capsule())
+                        }
+                        .padding(10)
                     }
-                    .overlay(alignment: .bottomLeading) { circleTranscribePill(attachment) }
                 circleTranscript(attachment)
                 if attachment.id == circleAttachments.last?.id, !message.reactions.isEmpty {
-                    MessageReactionStrip(reactions: message.reactions, onTap: {
+                    MessageReactionStrip(reactions: message.reactions, privateChat: isPrivateChat, groupChat: showsSenderAttribution, onTap: {
                         guard !shouldSuppressMediaOpen else { return }
                         onReact($0.emoji)
                     })
@@ -5428,7 +5840,6 @@ private struct ChatMessageRow: View {
         if attachment.id == circleAttachments.last?.id, let tools = toolsContext(transcribing: true) {
             AloTranscribeAccessory(store: tools.store, context: tools, attachment: attachment,
                                    tint: .white, fill: Color.black.opacity(0.46))
-                .padding(10)
         }
     }
 
@@ -5452,23 +5863,38 @@ private struct ChatMessageRow: View {
 
     @ViewBuilder
     private var senderAttribution: some View {
-        if showsSenderAttribution, !isMine, let senderName = message.sender?.name, !senderName.isEmpty {
-            HStack(spacing: 4) {
-                Text(senderName)
-                    .foregroundStyle(message.senderIsAnonymous ? AloTheme.accent : Color.white.opacity(0.84))
-                if !message.senderAdminTitle.isEmpty && !message.senderIsAnonymous {
-                    Text("· \(message.senderAdminTitle)")
-                        .foregroundStyle(Color.white.opacity(0.56))
+        if showsSenderAttribution, !isMine, startsGroupRun, let senderName = message.sender?.name, !senderName.isEmpty {
+            HStack(spacing: 8) {
+                if message.senderIsAnonymous {
+                    Text(senderName).foregroundStyle(AloTheme.accent).lineLimit(1)
+                } else {
+                    // Alo Премиум: the sender's colour instead of the avatar colour, and the star or emoji status.
+                    HStack(spacing: 4) {
+                        AloPremiumName(text: senderName, userId: message.senderId, font: .system(size: 14, weight: .semibold),
+                                       color: AloAvatarPalette.colors(for: String(message.senderId)).first ?? Color.white.opacity(0.84))
+                            .lineLimit(1)
+                        AloPremiumMark(userId: message.senderId, size: 13)
+                    }
+                }
+                Spacer(minLength: 0)
+                if !senderRoleLabel.isEmpty {
+                    Text(senderRoleLabel)
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundStyle(Color.white.opacity(0.5))
+                        .lineLimit(1)
                 }
             }
-            .font(.system(size: 12, weight: .bold))
+            // Telegram iOS: the author is 14 pt semibold (fontSize × 14 / 17) over the first message of a run.
+            .font(.system(size: 14, weight: .semibold))
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     @ViewBuilder
     private func inlineReactionFooter(showMeta: Bool) -> some View {
-        MessageReactionFooter(reactions: message.reactions, showMeta: showMeta, onTap: { reaction in
+        MessageReactionFooter(reactions: message.reactions, showMeta: showMeta,
+                              style: isMine ? .outgoing(bubble: appearance.outgoingColor) : .incoming(bubble: appearance.incomingColor),
+                              privateChat: isPrivateChat, groupChat: showsSenderAttribution, onTap: { reaction in
             guard !shouldSuppressMediaOpen else { return }
             onReact(reaction.emoji)
         }) {
@@ -5480,6 +5906,14 @@ private struct ChatMessageRow: View {
         message.chatCallLogMeta
     }
 
+    /// One song and nothing else: its time goes inside the track row (AloMusicAttachmentView.meta).
+    private var isMusicOnly: Bool {
+        message.body.isEmpty && message.reactions.isEmpty && message.forwardFrom == nil && callLogMeta == nil &&
+        cardAttachments.isEmpty && voiceAttachments.isEmpty && circleAttachments.isEmpty &&
+        mediaAttachments.count == 1 && mediaAttachments.first.map(AloMusicCatalog.isMusic) == true &&
+        message.id > 0
+    }
+
     private var simpleTextOnly: Bool {
         callLogMeta == nil &&
         message.forwardFrom == nil &&
@@ -5488,13 +5922,6 @@ private struct ChatMessageRow: View {
         mediaAttachments.isEmpty &&
         voiceAttachments.isEmpty &&
         circleAttachments.isEmpty
-    }
-
-    private var messageBubbleCornerRadius: CGFloat {
-        if message.body.contains("\n") || message.body.count > 34 {
-            return 16
-        }
-        return attachmentsOnly ? 18 : 22
     }
 
     private var attachments: [AloMessageAttachment] {
@@ -5579,8 +6006,8 @@ private struct ChatMessageRow: View {
 
     private var bubbleHorizontalPadding: CGFloat {
         if attachmentsOnly { return 4 }
-        if voiceOnly { return 10 }
-        return 11
+        // Telegram iOS: text sits 10 pt from the body's sides in every bubble.
+        return 10
     }
 
     private var selectionIndicator: some View {
@@ -5731,7 +6158,6 @@ struct AloRichMessageText: View {
     let text: String
     let entities: [AloMessageTextEntity]
     let fontSize: CGFloat
-    @EnvironmentObject private var app: AloAppModel
     @State private var revealsSpoilers = false
 
     init(body: String, entities: [AloMessageTextEntity], fontSize: CGFloat = 17) {
@@ -5743,7 +6169,7 @@ struct AloRichMessageText: View {
     var body: some View {
         renderedText
             .environment(\.openURL, OpenURLAction { url in
-                guard AloDeepLinkTarget(url: url) != nil else { return .systemAction }
+                guard AloDeepLinkTarget(url: url) != nil, let app = AloAppModel.current else { return .systemAction }
                 app.handleDeepLink(url)
                 return .handled
             })
@@ -5845,6 +6271,7 @@ struct AloRichMessageText: View {
                 }
             }
         }
+        .lineSpacing(lineGap)
         .font(.system(size: fontSize, weight: .regular))
         .contentShape(Rectangle())
         .onTapGesture {
@@ -5853,8 +6280,12 @@ struct AloRichMessageText: View {
         }
     }
 
+    /// Telegram's InteractiveTextNode spaces message lines by 0.12 of the font's line height: 2.4 pt at 17 pt.
+    private var lineGap: CGFloat { fontSize * 2.4 / 17 }
+
     private var messageText: some View {
         Text(attributedText)
+            .lineSpacing(lineGap)
             .font(.system(size: fontSize, weight: .regular))
             .foregroundStyle(Color.white)
             .fixedSize(horizontal: false, vertical: true)
@@ -5874,7 +6305,24 @@ struct AloRichMessageText: View {
     }
 
     /// Drawing and last-line measurement must use identical font runs.
+    /// A bubble is drawn and measured many times while the list scrolls; finding links and applying entities once per text.
+    private static let attributedCache: NSCache<NSString, NSAttributedString> = {
+        let cache = NSCache<NSString, NSAttributedString>()
+        cache.countLimit = 600
+        return cache
+    }()
+    private static let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
     static func attributedBody(_ text: String, entities: [AloMessageTextEntity], revealsSpoilers: Bool = false) -> NSAttributedString {
+        let entityKey = entities.map { "\($0.type):\($0.offset):\($0.length):\($0.url)" }.joined(separator: ",")
+        let key = "\(revealsSpoilers ? 1 : 0)|\(entityKey)|\(text)" as NSString
+        if let cached = attributedCache.object(forKey: key) { return cached }
+        let value = makeAttributedBody(text, entities: entities, revealsSpoilers: revealsSpoilers)
+        attributedCache.setObject(value, forKey: key)
+        return value
+    }
+
+    private static func makeAttributedBody(_ text: String, entities: [AloMessageTextEntity], revealsSpoilers: Bool) -> NSAttributedString {
         // Protocol events must never leak their hexadecimal payload into a
         // bubble, search result or context preview when the poll card is absent.
         if let preview = AloPollCodec.previewText(for: text) {
@@ -5891,8 +6339,7 @@ struct AloRichMessageText: View {
         )
         let fullLength = value.length
         // Server entities win; plain pasted web addresses remain usable too.
-        let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
-        for match in detector?.matches(in: text, range: NSRange(location: 0, length: fullLength)) ?? [] {
+        for match in linkDetector?.matches(in: text, range: NSRange(location: 0, length: fullLength)) ?? [] {
             guard let url = match.url, ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
                   !entities.contains(where: {
                       ($0.type == "link" || $0.type == "mention" || $0.type == "code" || $0.type == "spoiler") &&
@@ -6004,30 +6451,35 @@ private struct ChatCallLogAttachment: View {
                 .background(iconColor.opacity(isMine ? 0.18 : 0.12))
                 .clipShape(Circle())
 
-            VStack(alignment: .leading, spacing: 1) {
+            // The title gets the whole first line («Исходящий видеозвонок» no longer ends in «…»); the duration
+            // and the time with the read checks share the second line, like Telegram's call bubble.
+            VStack(alignment: .leading, spacing: 2) {
                 Text(meta.menuTitle(isMine: isMine))
                     .font(.system(size: 14, weight: .bold, design: .rounded))
                     .foregroundStyle(Color.white)
                     .lineLimit(1)
-                Text(secondaryText)
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Color.white.opacity(0.72))
-                    .monospacedDigit()
-            }
-
-            Spacer(minLength: 10)
-
-            HStack(spacing: 3) {
-                Text(AloFormatters.messageTime(createdAt))
-                if isMine {
-                    MessageReadStatusChecks(isRead: isRead)
+                    .minimumScaleFactor(0.85)
+                    .accessibilityIdentifier("alo.call.log.title")
+                HStack(spacing: 0) {
+                    if let durationText {
+                        Text(durationText)
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                    }
+                    Spacer(minLength: 12)
+                    HStack(spacing: 3) {
+                        Text(AloFormatters.messageTime(createdAt))
+                        if isMine {
+                            MessageReadStatusChecks(isRead: isRead)
+                        }
+                    }
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
                 }
+                .foregroundStyle(Color.white.opacity(0.72))
             }
-            .font(.system(size: 11, weight: .bold, design: .rounded))
-            .foregroundStyle(Color.white.opacity(0.72))
-            .offset(y: 9)
+            .frame(minWidth: 150, alignment: .leading)
         }
-        .frame(width: 210, alignment: .leading)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var iconColor: Color {
@@ -6039,13 +6491,14 @@ private struct ChatCallLogAttachment: View {
         }
     }
 
-    private var secondaryText: String {
-        if meta.durationSec > 0 {
-            let minutes = meta.durationSec / 60
-            let seconds = meta.durationSec % 60
-            return String(format: "%d:%02d", minutes, seconds)
-        }
-        return AloFormatters.messageTime(createdAt)
+    private var durationText: String? {
+        guard meta.durationSec > 0 else { return nil }
+        let hours = meta.durationSec / 3_600
+        let minutes = (meta.durationSec % 3_600) / 60
+        let seconds = meta.durationSec % 60
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, seconds)
+            : String(format: "%d:%02d", minutes, seconds)
     }
 }
 
@@ -6062,84 +6515,229 @@ private struct AloForwardAttribution: View {
     }
 }
 
+/// Which chips a message has: on its own bubble, on someone else's, or loose on the wallpaper (under a video circle).
+enum AloReactionChipStyle: Equatable {
+    case incoming(bubble: Color)
+    case outgoing(bubble: Color)
+    case floating
+}
+
+/// Telegram's rule for the avatars in place of the counter (`ReactionsLayoutInBubble`): a private chat always shows the people who
+/// reacted (you, the other person or both); a group shows them while at most three people reacted in all; a channel shows counters.
+enum AloReactionVoters {
+    static func shown(_ reaction: AloMessageReaction, in reactions: [AloMessageReaction], privateChat: Bool, groupChat: Bool) -> Bool {
+        guard !reaction.users.isEmpty, reaction.users.count == reaction.count, reaction.count <= 3 else { return false }
+        if privateChat { return true }
+        return groupChat && reactions.reduce(0) { $0 + $1.count } <= 3
+    }
+}
+
+/// The chips of a message and, with [showMeta], the time on the last row of chips at the bubble's right edge when it fits,
+/// otherwise on a line of its own below (Telegram's `lastLineX + timeWidth` check in `ChatMessageCell.calcBackgroundWidth`).
 private struct MessageReactionFooter<Metadata: View>: View {
     let reactions: [AloMessageReaction]
     let showMeta: Bool
+    var style: AloReactionChipStyle = .floating
+    var privateChat = false
+    var groupChat = false
     let onTap: (AloMessageReaction) -> Void
     @ViewBuilder let metadata: () -> Metadata
 
     var body: some View {
-        Group {
-            if reactions.isEmpty {
-                if showMeta { metadata().frame(maxWidth: .infinity, alignment: .trailing) }
-            } else if !showMeta {
-                strip.frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                AloWrappingRowLayout(spacing: 6, rowSpacing: -8, trailingLastSubview: true) {
-                    ForEach(reactions) { reaction in
-                        MessageReactionChip(reaction: reaction, onTap: onTap)
-                    }
-                    metadata().fixedSize()
+        if reactions.isEmpty {
+            if showMeta { metadata().frame(maxWidth: .infinity, alignment: .trailing) }
+        } else {
+            AloReactionFlowLayout(carriesMeta: showMeta) {
+                ForEach(reactions) { reaction in
+                    MessageReactionChip(
+                        reaction: reaction,
+                        style: style,
+                        showsVoters: AloReactionVoters.shown(reaction, in: reactions, privateChat: privateChat, groupChat: groupChat),
+                        showsCount: groupChat || reaction.count > 1,
+                        onTap: onTap
+                    )
                 }
+                if showMeta { metadata().fixedSize() }
             }
         }
     }
-
-    private var strip: some View { MessageReactionStrip(reactions: reactions, onTap: onTap) }
 }
 
 private struct MessageReactionStrip: View {
     let reactions: [AloMessageReaction]
+    var style: AloReactionChipStyle = .floating
+    var privateChat = false
+    var groupChat = false
     let onTap: (AloMessageReaction) -> Void
 
     var body: some View {
-        AloWrappingRowLayout(spacing: 6, rowSpacing: -8) {
-            ForEach(reactions) { reaction in
-                MessageReactionChip(reaction: reaction, onTap: onTap)
-            }
-        }
+        MessageReactionFooter(reactions: reactions, showMeta: false, style: style,
+                              privateChat: privateChat, groupChat: groupChat, onTap: onTap) { EmptyView() }
     }
 }
 
+/// Chips 6 pt apart in rows 6 pt apart (Telegram iOS ChatMessageDateAndStatusNode); with [carriesMeta] the last subview
+/// is the time (see MessageReactionFooter). Its ideal width is one row of chips plus the time, so a bubble can grow to fit
+/// them, as Telegram's does.
+struct AloReactionFlowLayout: Layout {
+    var carriesMeta = false
+    static let gap: CGFloat = 6
+    /// Room the time keeps from the last chip on their shared row (the status node's 5 pt leading inset).
+    static let metaMargin: CGFloat = 5
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let result = arrange(subviews, width: proposal.width)
+        // A bubble that proposes its width gets it back, so the time sits at the bubble's right edge.
+        return CGSize(width: proposal.width ?? result.size.width, height: result.size.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let result = arrange(subviews, width: bounds.width)
+        for (index, view) in subviews.enumerated() {
+            var origin = result.origins[index]
+            if carriesMeta, index == subviews.count - 1 { origin.x = bounds.width - result.sizes[index].width }
+            view.place(at: CGPoint(x: bounds.minX + origin.x, y: bounds.minY + origin.y),
+                       anchor: .topLeading, proposal: ProposedViewSize(result.sizes[index]))
+        }
+    }
+
+    private func arrange(_ subviews: Subviews, width: CGFloat?) -> (size: CGSize, origins: [CGPoint], sizes: [CGSize]) {
+        let available = width ?? .greatestFiniteMagnitude
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        let chipCount = carriesMeta ? max(0, sizes.count - 1) : sizes.count
+        var origins = [CGPoint]()
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var widest: CGFloat = 0
+        for size in sizes.prefix(chipCount) {
+            if x > 0, x + size.width > available + 0.5 {
+                widest = max(widest, x - Self.gap)
+                x = 0
+                y += rowHeight + Self.gap
+                rowHeight = 0
+            }
+            origins.append(CGPoint(x: x, y: y))
+            x += size.width + Self.gap
+            rowHeight = max(rowHeight, size.height)
+        }
+        let lastLineEnd = chipCount > 0 ? x - Self.gap : 0
+        widest = max(widest, lastLineEnd)
+        var height = y + rowHeight
+        var widthNeeded = widest
+        if carriesMeta, let meta = sizes.last {
+            if lastLineEnd + Self.metaMargin + meta.width <= available {
+                // On the chips' row, its bottom on theirs.
+                origins.append(CGPoint(x: lastLineEnd + Self.metaMargin, y: y + rowHeight - meta.height))
+                widthNeeded = max(widest, lastLineEnd + Self.metaMargin + meta.width)
+            } else {
+                origins.append(CGPoint(x: 0, y: height + 1))
+                height += 1 + meta.height
+                widthNeeded = max(widest, meta.width)
+            }
+        }
+        return (CGSize(width: widthNeeded, height: height), origins, sizes)
+    }
+}
+
+/// Telegram iOS's reaction button (ReactionButtonListComponent `Layout.calculate`): a 30 pt capsule, the emoji in a 20 pt
+/// box 11 pt from the left, then the counter (11 pt medium, 2 pt after it, 11 pt to the end) or the people who reacted
+/// (24 pt avatars 12 pt apart, 4 pt after it); a lone emoji makes a 41 pt capsule. Colours of the dark theme with an
+/// accent: an incoming chip is white at 7 %, the one we chose the accent; an outgoing one white at 12 %, ours solid
+/// white with its content in the bubble's colour.
 private struct MessageReactionChip: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let reaction: AloMessageReaction
+    let style: AloReactionChipStyle
+    let showsVoters: Bool
+    let showsCount: Bool
     let onTap: (AloMessageReaction) -> Void
 
+    private var chosen: Bool { reaction.reactedByMe }
+
     var body: some View {
-                Button {
-                    AloHaptics.selection()
-                    onTap(reaction)
-                } label: {
-                    // Telegram's regular reaction: 30 pt tall, 20 pt emoji box, 11 pt side inset,
-                    // 2 pt to the 11 pt medium counter.
-                    HStack(spacing: 2) {
-                        Text(reaction.emoji)
-                            .font(.system(size: 16))
-                            .frame(width: 20, height: 20)
-                        if reaction.count > 1 {
-                            Text(AloCompactCount.string(reaction.count))
-                                .font(.system(size: 11, weight: .medium))
-                                .monospacedDigit()
-                                .lineLimit(1)
-                                .fixedSize()
-                                .contentTransition(reduceMotion ? .identity : .numericText())
-                        }
-                    }
-                    .foregroundStyle(reaction.reactedByMe ? Color.white : Color.white.opacity(0.85))
-                    .padding(.horizontal, 11)
-                    .frame(height: 30)
-                    .background(reaction.reactedByMe ? AloTheme.accent.opacity(0.8) : Color.white.opacity(0.09))
-                    .clipShape(Capsule())
-                    .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85), value: reaction.reactedByMe)
-                    .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85), value: reaction.count)
-                    .frame(minWidth: 44, minHeight: 44)
-                    .contentShape(Rectangle())
+        Button {
+            AloHaptics.selection()
+            onTap(reaction)
+        } label: {
+            HStack(spacing: 0) {
+                Text(reaction.emoji)
+                    .font(.system(size: 17))
+                    .frame(width: 20, height: 20)
+                if showsVoters {
+                    voters.padding(.leading, 4)
+                } else if showsCount {
+                    Text(AloCompactCount.string(reaction.count))
+                        .font(.system(size: 11, weight: .medium))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .fixedSize()
+                        .contentTransition(reduceMotion ? .identity : .numericText())
+                        .padding(.leading, 2)
                 }
-                .buttonStyle(AloChatPressStyle())
-                .accessibilityLabel("\(reaction.emoji), \(reaction.count)")
-                .accessibilityAddTraits(reaction.reactedByMe ? .isSelected : [])
-                .transition(.opacity)
+            }
+            .padding(.leading, 11)
+            .padding(.trailing, showsVoters ? (reaction.users.count > 1 ? 11 : 9) : (showsCount ? 11 : 10))
+            .frame(height: 30)
+            .foregroundStyle(chosen ? chosenText : restText)
+            .background(chosen ? chosenFill : restFill, in: Capsule())
+            .contentShape(Capsule())
+            .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85), value: reaction.reactedByMe)
+            .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85), value: reaction.count)
+        }
+        .buttonStyle(AloChatPressStyle())
+        .accessibilityLabel("\(reaction.emoji), \(reaction.count)")
+        .accessibilityAddTraits(reaction.reactedByMe ? .isSelected : [])
+        .transition(.opacity)
+    }
+
+    /// Each avatar sits in a 1 pt ring of the chip's own colour, which cuts it out of the one under it (Telegram's `AvatarsDrawable`).
+    private var voters: some View {
+        HStack(spacing: -12) {
+            ForEach(reaction.users) { user in
+                AloAvatar(name: user.name, url: user.avatarUrl, size: 24, colorSeed: String(user.id))
+                    .background(Circle().fill(ringColor).padding(-1))
+            }
+        }
+    }
+
+    private var tint: Color {
+        switch style {
+        case .incoming: AloTheme.accent
+        case .outgoing: .white
+        case .floating: .white
+        }
+    }
+
+    private var restFill: Color {
+        switch style {
+        case .incoming: Color.white.opacity(0.07)
+        case .outgoing: Color.white.opacity(0.12)
+        case .floating: Color.black.opacity(0.34)
+        }
+    }
+
+    private var chosenFill: Color {
+        if case .floating = style { return Color.white.opacity(0.92) }
+        return tint
+    }
+
+    private var restText: Color { .white }
+
+    private var chosenText: Color {
+        switch style {
+        case .incoming: .white
+        case .outgoing(let bubble): bubble
+        case .floating: Color(red: 0x1B / 255, green: 0x1B / 255, blue: 0x1D / 255)
+        }
+    }
+
+    private var ringColor: Color {
+        switch style {
+        case .incoming(let bubble): chosen ? AloTheme.accent : bubble
+        case .outgoing(let bubble): chosen ? .white : bubble
+        case .floating: chosen ? .white : Color(red: 0x1E / 255, green: 0x1E / 255, blue: 0x20 / 255)
+        }
     }
 }
 
@@ -6293,8 +6891,10 @@ private struct MessageExpiryBadge: View {
     }
 }
 
-private struct VoiceMessageAttachmentView: View {
-    @EnvironmentObject private var app: AloAppModel
+// Shared with the secret chat screen (AloSecretChatView), like the recording pieces below.
+struct VoiceMessageAttachmentView: View {
+    /// Not observed: a bubble redraws when its message changes, not on every change of the app.
+    private var app: AloAppModel { .unobserved }
     let attachment: AloMessageAttachment
     var senderName = "Голосовое сообщение"
     let isMine: Bool
@@ -6311,16 +6911,11 @@ private struct VoiceMessageAttachmentView: View {
     /// Set when the server can turn this sound into text: adds Telegram's «Aa» pill and the text under the waveform.
     var tools: AloContentToolsContext?
 
-    @State private var player: AVPlayer?
-    @State private var timeObserver: Any?
-    @State private var isPlaying = false
-    @State private var currentTime: Double = 0
+    /// The clip plays in the app-wide player (AloVoicePlayback.swift), so it goes on when the chat closes.
+    @ObservedObject private var playback = AloVoicePlayback.shared
     @State private var duration: Double = 0
     @State private var durationUnavailable = false
-    @State private var endObserver: NSObjectProtocol?
-    @State private var isSeeking = false
     @State private var hasStartedScrubbing = false
-    @State private var playbackSpeed: Double = 1
     @State private var hasPreparedPlayback = false
     @State private var isPreparingPlayback = false
 
@@ -6337,21 +6932,22 @@ private struct VoiceMessageAttachmentView: View {
         HStack(alignment: .center, spacing: 9) {
             Button(action: requestPlaybackToggle) {
                 ZStack {
-                    Circle().fill(Color.white.opacity(0.95))
+                    // The website's .vm-play: white on one's own bubble, blue on someone else's.
+                    Circle().fill(isMine ? Color.white.opacity(0.92) : AloTheme.accent)
                     if isPreparingPlayback {
-                        AloMediaLoadingRing(color: accentColor, diameter: 22)
+                        AloMediaLoadingRing(color: isMine ? accentColor : .white, diameter: 22)
                     } else {
                         // The icon morphs between play and pause instead of swapping.
                         Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundStyle(accentColor)
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundStyle(isMine ? accentColor : Color.white)
                             .contentTransition(.symbolEffect(.replace.downUp))
                             .offset(x: isPlaying ? 0 : 1)
                     }
                 }
-                .frame(width: 40, height: 40)
-                .animation(.spring(response: 0.26, dampingFraction: 0.8), value: isPlaying)
                 .frame(width: 44, height: 44)
+                .animation(.spring(response: 0.26, dampingFraction: 0.8), value: isPlaying)
+                .contentShape(Circle())
                 .contentShape(Rectangle())
             }
             .buttonStyle(AloChatPressStyle())
@@ -6363,6 +6959,7 @@ private struct VoiceMessageAttachmentView: View {
                     VoiceScrubberWaveform(
                         progress: progress,
                         levels: attachment.waveform,
+                        seed: attachment.url,
                         activeColor: Color.white,
                         inactiveColor: Color.white.opacity(0.34)
                     )
@@ -6370,7 +6967,7 @@ private struct VoiceMessageAttachmentView: View {
                         .gesture(scrubGesture(width: proxy.size.width))
                         .aloChatSwipeControl()
                 }
-                .frame(height: 20)
+                .frame(height: 24)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Перемотка голосового")
                 .accessibilityIdentifier("alo.voice.scrubber")
@@ -6378,8 +6975,8 @@ private struct VoiceMessageAttachmentView: View {
                 HStack(alignment: .center, spacing: 6) {
                     Text(voiceTimeLabel)
                         .accessibilityIdentifier("alo.voice.duration")
-                        .font(.system(size: 10.5, weight: .bold, design: .rounded))
-                        .foregroundStyle(Color.white.opacity(0.76))
+                        .font(.system(size: 12.5, weight: .regular))
+                        .foregroundStyle(Color.white.opacity(0.75))
                         .monospacedDigit()
                     Spacer(minLength: 8)
                     if showMessageMeta {
@@ -6397,12 +6994,12 @@ private struct VoiceMessageAttachmentView: View {
                                     .scaleEffect(0.86, anchor: .center)
                             }
                         }
-                        .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                        .font(.system(size: 11, weight: .regular))
                         .foregroundStyle(Color.white.opacity(0.72))
                         .monospacedDigit()
                     }
                 }
-                .frame(height: 12, alignment: .center)
+                .frame(height: 15, alignment: .center)
             }
             if let tools {
                 AloTranscribeAccessory(store: tools.store, context: tools, attachment: attachment)
@@ -6421,47 +7018,22 @@ private struct VoiceMessageAttachmentView: View {
             if let seconds = preview.duration { duration = seconds }
             else { durationUnavailable = true }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .aloMediaPlaybackDidStart)) { notification in
-            guard (notification.object as? String) != attachment.id else { return }
-            stopPlayback()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .aloVoicePlaybackDidStart)) { notification in
-            guard let playingAttachmentId = notification.object as? String,
-                  playingAttachmentId != attachment.id,
-                  isPlaying else {
-                return
-            }
-            player?.pause()
-            isPlaying = false
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .aloVoicePlaybackToggleRequested)) { notification in
-            guard (notification.object as? String) == attachment.id else { return }
-            requestPlaybackToggle()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .aloVoicePlaybackStopRequested)) { notification in
-            guard (notification.object as? String) == attachment.id else { return }
-            stopPlayback()
-            NotificationCenter.default.post(name: .aloVoicePlaybackDidStop, object: attachment.id)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .aloVoicePlaybackSpeedChanged)) { notification in
-            guard (notification.object as? String) == attachment.id,
-                  let speed = notification.userInfo?["speed"] as? Double else { return }
-            playbackSpeed = speed
-            if isPlaying {
-                player?.rate = Float(speed)
-            }
-        }
-        .onDisappear(perform: stopPlayback)
     }
 
+    private var isActive: Bool { playback.isCurrent(attachment.id) }
+    private var isPlaying: Bool { isActive && playback.isPlaying }
+    private var currentTime: Double { isActive ? playback.currentTime : 0 }
+    private var totalDuration: Double { isActive && playback.duration > 0 ? playback.duration : duration }
+    private var playableURL: URL? { app.api.absoluteURL(attachment.url) }
+
     private var progress: Double {
-        guard duration > 0 else { return 0 }
-        return max(0, min(1, currentTime / duration))
+        guard totalDuration > 0 else { return 0 }
+        return max(0, min(1, currentTime / totalDuration))
     }
 
     private var voiceTimeLabel: String {
-        if duration == 0 { return durationUnavailable ? "Недоступно" : "…" }
-        return isPlaying || currentTime > 0 ? formatTime(currentTime) : formatTime(duration)
+        if totalDuration == 0 { return durationUnavailable ? "Недоступно" : "…" }
+        return isPlaying || currentTime > 0 ? formatTime(currentTime) : formatTime(totalDuration)
     }
 
     private func requestPlaybackToggle() {
@@ -6483,36 +7055,8 @@ private struct VoiceMessageAttachmentView: View {
     }
 
     private func togglePlayback() {
-        if player == nil {
-            preparePlayer()
-        }
-        guard let player else { return }
-        if isPlaying {
-            player.pause()
-            isPlaying = false
-            NotificationCenter.default.post(
-                name: .aloVoicePlaybackDidStart,
-                object: attachment.id,
-                userInfo: [
-                    "title": senderName,
-                    "speed": playbackSpeed,
-                    "isPlaying": false
-                ]
-            )
-        } else {
-            NotificationCenter.default.post(name: .aloMediaPlaybackDidStart, object: attachment.id)
-            NotificationCenter.default.post(
-                name: .aloVoicePlaybackDidStart,
-                object: attachment.id,
-                userInfo: [
-                    "title": senderName,
-                    "speed": playbackSpeed,
-                    "isPlaying": true
-                ]
-            )
-            player.rate = Float(playbackSpeed)
-            isPlaying = true
-        }
+        guard let url = playableURL else { return }
+        playback.toggle(id: attachment.id, url: url, title: senderName, duration: duration)
     }
 
     private func scrubGesture(width: CGFloat) -> some Gesture {
@@ -6524,80 +7068,14 @@ private struct VoiceMessageAttachmentView: View {
                     return
                 }
                 hasStartedScrubbing = true
-                isSeeking = true
                 let location = max(0, min(width, value.startLocation.x + value.translation.width))
                 let normalized = min(1, max(0, location / max(1, width)))
-                seek(to: normalized * duration, playAfterSeek: isPlaying)
+                guard let url = playableURL else { return }
+                playback.seek(id: attachment.id, url: url, title: senderName, duration: duration, to: normalized * totalDuration)
             }
             .onEnded { _ in
                 hasStartedScrubbing = false
-                isSeeking = false
             }
-    }
-
-    private func seek(to seconds: Double, playAfterSeek: Bool) {
-        if player == nil {
-            preparePlayer()
-        }
-        let target = max(0, min(duration, seconds))
-        currentTime = target
-        player?.seek(to: CMTime(seconds: target, preferredTimescale: 600)) { _ in
-            if playAfterSeek {
-                player?.rate = Float(playbackSpeed)
-            }
-        }
-    }
-
-    private func preparePlayer() {
-        guard let url = app.api.absoluteURL(attachment.url) else { return }
-        let player = AloSecureMediaStore.shared.makePlayer(url: url)
-        self.player = player
-        if let item = player.currentItem {
-            Task {
-                let loadedDuration = try? await item.asset.load(.duration)
-                if let seconds = loadedDuration?.seconds,
-                   seconds.isFinite,
-                   seconds > 0 {
-                    await MainActor.run { duration = seconds }
-                }
-            }
-        }
-        timeObserver = player.addPeriodicTimeObserver(
-            forInterval: CMTime(seconds: 0.12, preferredTimescale: 600),
-            queue: .main
-        ) { time in
-            if !isSeeking {
-                currentTime = time.seconds.isFinite ? time.seconds : 0
-            }
-        }
-        endObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime,
-            object: player.currentItem,
-            queue: .main
-        ) { _ in
-            isPlaying = false
-            currentTime = 0
-            player.seek(to: .zero)
-            NotificationCenter.default.post(name: .aloVoicePlaybackDidStop, object: attachment.id)
-        }
-    }
-
-    private func stopPlayback() {
-        let wasPlaying = isPlaying
-        player?.pause()
-        if let timeObserver {
-            player?.removeTimeObserver(timeObserver)
-        }
-        if let endObserver {
-            NotificationCenter.default.removeObserver(endObserver)
-        }
-        endObserver = nil
-        timeObserver = nil
-        player = nil
-        isPlaying = false
-        if wasPlaying {
-            NotificationCenter.default.post(name: .aloVoicePlaybackDidStop, object: attachment.id)
-        }
     }
 
     private func formatTime(_ value: Double) -> String {
@@ -6609,12 +7087,13 @@ private struct VoiceMessageAttachmentView: View {
 private struct VoiceScrubberWaveform: View {
     let progress: Double
     var levels: [CGFloat] = []
+    var seed = ""
     var activeColor: Color = .white
     var inactiveColor: Color = Color.white.opacity(0.34)
 
     var body: some View {
         GeometryReader { geometry in
-            let samples = AloVoiceWaveform.samples(levels, width: geometry.size.width)
+            let samples = AloVoiceWaveform.samples(levels, width: geometry.size.width, seed: seed)
             HStack(alignment: .center, spacing: 2) {
                 ForEach(Array(samples.enumerated()), id: \.offset) { index, level in
                     Capsule()
@@ -6629,8 +7108,9 @@ private struct VoiceScrubberWaveform: View {
     }
 }
 
-private struct CircleMessageAttachmentView: View {
-    @EnvironmentObject private var app: AloAppModel
+struct CircleMessageAttachmentView: View {
+    /// Not observed: a bubble redraws when its message changes, not on every change of the app.
+    private var app: AloAppModel { .unobserved }
     @Environment(\.aloCirclePlayback) private var sharedPlayback
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let attachment: AloMessageAttachment
@@ -6639,7 +7119,11 @@ private struct CircleMessageAttachmentView: View {
     var senderName = "Видеосообщение"
     var preparePlayback: (() async -> Bool)?
     var isTapSuppressed: () -> Bool = { false }
+    /// Someone else's circle: a dot after its length until it is played here (Telegram's «unseen»).
+    var isIncoming = false
 
+    /// Circles played on this device, one address per line (the newest 300).
+    @AppStorage("alo.circles.seen") private var seenCircles = ""
     @State private var localPlayback = AloCirclePlayback()
     @State private var poster: UIImage?
     @State private var hasPreparedPlayback = false
@@ -6672,9 +7156,24 @@ private struct CircleMessageAttachmentView: View {
                         .transition(reduceMotion ? .opacity : .scale(scale: 0.88).combined(with: .opacity))
                 }
                 if isPreparingPlayback { ProgressView().tint(.white) }
+                // As Telegram on iPhone (the owner's choice, 2026-10-29): a crossed-out speaker in a small dark circle
+                // at the top middle while the circle is not playing with sound.
+                if !(active && playback.isPlaying) {
+                    Image(systemName: "speaker.slash.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 30, height: 30)
+                        .background(.black.opacity(0.42), in: Circle())
+                        .frame(maxHeight: .infinity, alignment: .top)
+                        .padding(.top, 12)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
             }
             .clipShape(Circle())
             .contentShape(Circle())
+            // Its length under it on the left, the right edge 56pt left of the centre, «00:03» (Telegram on iPhone).
+            .overlay(alignment: .bottomLeading) { durationLabel(width: proxy.size.width) }
             .onTapGesture { requestPlaybackToggle() }
             .simultaneousGesture(playbackGesture(size: proxy.size))
             .aloChatSwipeControl(ring: true, enabled: active)
@@ -6701,6 +7200,10 @@ private struct CircleMessageAttachmentView: View {
         .task(id: attachment.url) {
             guard preparePlayback == nil, let url = app.api.absoluteURL(attachment.url) else { return }
             do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
+            // The frame is read from the file within 3 seconds, and that used to include downloading it: on a slow
+            // network a circle stayed a black disc. The file comes first (same auto-download rules), then the frame.
+            await AloSecureMediaStore.prefetchForPreview(url)
+            guard !Task.isCancelled else { return }
             let preview = await AloMediaPreviewCache.shared.preview(url: url, video: true)
             guard !Task.isCancelled else { return }
             poster = preview.image.map(AloSquareImage.centerCrop)
@@ -6724,8 +7227,39 @@ private struct CircleMessageAttachmentView: View {
         }
     }
 
+    private var isSeen: Bool {
+        seenCircles.split(separator: "\n").contains(Substring(attachment.url))
+    }
+
+    @ViewBuilder
+    private func durationLabel(width: CGFloat) -> some View {
+        if let total = attachment.durationSeconds {
+            let shown = active ? playback.progress * total : total
+            HStack(spacing: 5) {
+                Text(String(format: "%02d:%02d", Int(shown) / 60, Int(shown) % 60))
+                if isIncoming && !isSeen { Circle().frame(width: 6, height: 6) }
+            }
+            .font(.system(size: 12, weight: .regular).monospacedDigit())
+            .foregroundStyle(AloTheme.text.opacity(0.9))
+            .shadow(color: .black.opacity(0.3), radius: 1, y: 1)
+            .lineLimit(1)
+            .fixedSize()
+            .frame(width: max(0, width / 2 - 56), alignment: .trailing)
+            .padding(.bottom, 2)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+    }
+
+    private func markSeen() {
+        guard isIncoming, !isSeen else { return }
+        let list = seenCircles.split(separator: "\n").map(String.init) + [attachment.url]
+        seenCircles = list.suffix(300).joined(separator: "\n")
+    }
+
     private func toggle() {
         guard let url = app.api.absoluteURL(attachment.url) else { return }
+        markSeen()
         playback.toggle(
             AloCircleQueueItem(id: attachment.id, messageID: messageID, url: url, title: senderName),
             startsInline: true
@@ -6751,7 +7285,8 @@ private struct CircleMessageAttachmentView: View {
 }
 
 private struct RemoteAttachmentCell: View {
-    @EnvironmentObject private var app: AloAppModel
+    /// Not observed: a bubble redraws when its message changes, not on every change of the app.
+    private var app: AloAppModel { .unobserved }
     let attachment: AloMessageAttachment
     var extraCount = 0
 
@@ -6782,7 +7317,9 @@ private struct RemoteAttachmentCell: View {
                     }
                 }
             } else if isVideo {
-                RemoteVideoPosterFallback(title: attachment.name.ifBlank("Видео"))
+                // No poster from the sender: the first frame of the video itself, as Telegram shows it.
+                RemoteVideoFirstFrame(attachment: attachment)
+                    .frame(width: geometry.size.width, height: geometry.size.height)
             } else {
                 VStack(spacing: 8) {
                     Image(systemName: isVideo ? "play.rectangle.fill" : "doc.fill")
@@ -6802,6 +7339,19 @@ private struct RemoteAttachmentCell: View {
                     .frame(width: 50, height: 50)
                     .background(Color.black.opacity(0.46))
                     .clipShape(Circle())
+                // «0:15 · 1,2 МБ» in the corner, as Telegram shows a video before it is opened.
+                if let badge = videoBadge {
+                    Text(badge)
+                        .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(Color.white)
+                        .padding(.horizontal, 7)
+                        .frame(height: 20)
+                        .background(Color.black.opacity(0.45), in: Capsule())
+                        .padding(8)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .allowsHitTesting(false)
+                        .accessibilityIdentifier("alo.video.badge")
+                }
             }
 
             if extraCount > 0 {
@@ -6822,6 +7372,15 @@ private struct RemoteAttachmentCell: View {
 
     private var isVideo: Bool {
         attachment.type == "video" || attachment.url.lowercased().hasVideoExtension
+    }
+
+    private var videoBadge: String? {
+        let seconds = Double(attachment.metadata["durationSeconds"] ?? "") ?? 0
+        let bytes = AloChunkedMediaCrypto.Metadata(attachment.mediaEncryption.reduce(into: [String: Any]()) { $0[$1.key] = $1.value })?
+            .plaintextSize ?? attachment.metadata["size"].flatMap(Int64.init)
+        let parts = [seconds > 0 ? AloMusicCatalog.clock(seconds) : nil,
+                     bytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private var previewURL: URL? {
@@ -6889,6 +7448,35 @@ private struct AloMediaLoadingRing: View {
                 .stroke(color.opacity(0.92), style: StrokeStyle(lineWidth: 2.4, lineCap: .round))
                 .frame(width: diameter, height: diameter)
                 .rotationEffect(.degrees(angle))
+        }
+    }
+}
+
+/// The first frame of a video message that came without a poster. It is read from the file once the file may be
+/// downloaded automatically (the same rule as for circles); until then the plain placeholder with the name stays.
+private struct RemoteVideoFirstFrame: View {
+    /// Not observed: a bubble redraws when its message changes, not on every change of the app.
+    private var app: AloAppModel { .unobserved }
+    let attachment: AloMessageAttachment
+    @State private var frame: UIImage?
+
+    var body: some View {
+        ZStack {
+            if let frame {
+                Image(uiImage: frame).resizable().scaledToFill().accessibilityHidden(true)
+            } else {
+                RemoteVideoPosterFallback(title: attachment.name.ifBlank("Видео"))
+            }
+        }
+        .clipped()
+        .task(id: attachment.url) {
+            guard frame == nil, let url = app.api.absoluteURL(attachment.url) else { return }
+            do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
+            await AloSecureMediaStore.prefetchForPreview(url)
+            guard !Task.isCancelled else { return }
+            let preview = await AloMediaPreviewCache.shared.preview(url: url, video: true)
+            guard !Task.isCancelled, let image = preview.image else { return }
+            frame = image
         }
     }
 }
@@ -7044,7 +7632,9 @@ private struct ChatMediaViewer: View {
 
                 Spacer()
 
-                if let caption = currentItem?.caption, !caption.isEmpty, !chromeHidden {
+                // Here the caption is the file's name: over a video it would lie on the player's own bar.
+                if let caption = currentItem?.caption, !caption.isEmpty, !chromeHidden,
+                   currentItem?.type.lowercased().contains("video") != true {
                     Text(caption)
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(Color.white.opacity(0.92))
@@ -7154,13 +7744,15 @@ private struct ChatMediaVideoPlayer: View {
     @State private var player: AVPlayer?
 
     var body: some View {
-        Group {
+        // One stable container: on a Group the lifecycle modifiers below go to each branch, so the spinner leaving
+        // released the new player, the spinner came back and made another one, for ever.
+        ZStack {
+            Color.black.ignoresSafeArea()
             if let player {
                 AloVideoPlayerView(player: player, dismiss: dismiss)
                     .ignoresSafeArea()
             } else {
-                ProgressView()
-                    .tint(AloTheme.accent)
+                AloVideoSpinner()
             }
         }
         .onAppear {
@@ -7240,7 +7832,8 @@ private struct LocalDraftVideoPlayer: View {
     @State private var temporaryURL: URL?
 
     var body: some View {
-        Group {
+        ZStack {
+            Color.clear
             if let player {
                 AloVideoPlayerView(player: player, autoplay: false)
                     .ignoresSafeArea()
@@ -7552,7 +8145,7 @@ private struct LocalVideoAttachmentPreview: View {
     }
 }
 
-private enum ChatRecordingMode: Equatable {
+enum ChatRecordingMode: Equatable {
     case voice
     case circle
 
@@ -7664,7 +8257,7 @@ enum ChatKeyboardFollowPolicy {
     }
 }
 
-private struct ChatRecordSendButton: View {
+struct ChatRecordSendButton: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let mode: ChatRecordingMode
     let canSend: Bool
@@ -7694,8 +8287,8 @@ private struct ChatRecordSendButton: View {
     var body: some View {
         ZStack {
             Image(systemName: canSend ? (isEditing ? "checkmark" : "arrow.right") : mode.systemImage)
-                .font(.system(size: canSend ? 19 : 20, weight: .medium))
-                .foregroundStyle(canSend ? Color.white : AloTheme.muted)
+                .font(.system(size: canSend ? 19 : 21, weight: canSend ? .medium : .regular))
+                .foregroundStyle(canSend ? Color.white : AloTheme.text)
         }
         .frame(width: ChatComposerMetrics.visualSize, height: ChatComposerMetrics.visualSize)
         .background {
@@ -8194,7 +8787,7 @@ private struct ChatScheduledMessagesSheet: View {
     }
 }
 
-private struct RecordingComposerPanel: View {
+struct RecordingComposerPanel: View {
     let mode: ChatRecordingMode
     let startedAt: Date
     let ready: Bool
@@ -8257,7 +8850,7 @@ private struct RecordingComposerPanel: View {
     }
 }
 
-private struct CircleRecordingOverlay: View {
+struct CircleRecordingOverlay: View {
     let startedAt: Date
     let ready: Bool
     @ObservedObject var recorder: ChatCircleRecorder
@@ -8368,10 +8961,14 @@ private struct CircleIconButton: View {
 
 private struct VoicePlaybackTopBar: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    let playback: ActiveVoicePlayback
-    let onToggle: () -> Void
-    let onSpeed: () -> Void
-    let onClose: () -> Void
+    @ObservedObject var playback: AloVoicePlayback
+
+    private func onToggle() { playback.isPlaying ? playback.pause() : playback.resume() }
+    private func onSpeed() {
+        playback.cycleSpeed()
+        AloHaptics.selection()
+    }
+    private func onClose() { playback.stop() }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -8396,9 +8993,10 @@ private struct VoicePlaybackTopBar: View {
                     .foregroundStyle(AloTheme.text)
                     .lineLimit(1)
                     .accessibilityIdentifier("alo.voice.sender-title")
-                Text("Голосовое сообщение")
+                Text(subtitle)
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
                     .foregroundStyle(AloTheme.muted)
+                    .monospacedDigit()
             }
 
             Spacer(minLength: 8)
@@ -8434,6 +9032,14 @@ private struct VoicePlaybackTopBar: View {
     private var speedTitle: String {
         playback.speed == 1 ? "1x" : String(format: "%.1fx", playback.speed)
     }
+
+    /// «Голосовое · 0:04 / 0:12», as on the website.
+    private var subtitle: String {
+        let clock = { (value: Double) in AloMusicCatalog.clock(value) }
+        return playback.duration > 0
+            ? "Голосовое · \(clock(playback.currentTime)) / \(clock(playback.duration))"
+            : "Голосовое сообщение"
+    }
 }
 
 private struct VoiceWaveform: View {
@@ -8463,8 +9069,8 @@ private struct ChatComposerButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 20, weight: .regular))
-                .foregroundStyle(AloTheme.muted)
+                .font(.system(size: 21, weight: .regular))
+                .foregroundStyle(AloTheme.text)
                 .frame(width: ChatComposerMetrics.visualSize, height: ChatComposerMetrics.visualSize)
                 .modifier(AloChatGlass())
                 .frame(width: ChatComposerMetrics.controlSize, height: ChatComposerMetrics.controlSize)
@@ -8507,7 +9113,7 @@ private struct LocalAttachmentThumb: View {
     }
 }
 
-private struct RecordedDraftComposerPanel: View {
+struct RecordedDraftComposerPanel: View {
     let attachment: AloLocalAttachment
     let duration: TimeInterval
     let levels: [CGFloat]
@@ -8746,8 +9352,9 @@ private struct AloMessageCheckmark: Shape {
     }
 }
 
-private let aloMessageReactionEmojis = [
-    "❤️", "🔥", "😂", "😮", "👏", "👍", "👎", "🥰",
+/// The reactions the server accepts (it refuses 😮); the settings pick the favorite from the same list.
+let aloMessageReactionEmojis = [
+    "❤️", "🔥", "😂", "👏", "👍", "👎", "🥰",
     "😁", "🤩", "🤔", "🤯", "😱", "😢", "😭", "😡", "🎉",
     "💯", "🤝", "🙏", "👌", "😎", "👀", "🤗", "🫡",
     "🤪", "😴", "🤓", "👻", "🎃", "💔", "⚡", "🏆"
@@ -9983,7 +10590,9 @@ private struct ChatComposerContentPicker: View {
             Text("GIF из файлов")
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(AloTheme.text)
-            Text("Можно отправить свой GIF до 20 МБ. Он попадёт во вложения сообщения и будет зашифрован так же, как фото.")
+            Text(app.activeConversation.map(app.usesCloudMessages) == true
+                 ? "Можно отправить свой GIF до 20 МБ. Он попадёт во вложения сообщения как обычный файл."
+                 : "Можно отправить свой GIF до 20 МБ. Он попадёт во вложения сообщения и будет зашифрован так же, как фото.")
                 .font(.system(size: 13.5))
                 .foregroundStyle(AloTheme.muted)
                 .fixedSize(horizontal: false, vertical: true)
@@ -11329,6 +11938,8 @@ private struct ChatPeerInfoPanel: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     let conversation: AloConversationDetail
     let messages: [AloChatMessage]
+    /// Opened by the search button under a channel: the search field is shown at once.
+    var startsWithSearch = false
     let onClose: () -> Void
     let onOpenProfile: () -> Void
     let onAudioCall: () async -> Void
@@ -11423,6 +12034,11 @@ private struct ChatPeerInfoPanel: View {
                 .coordinateSpace(name: "peer-scroll")
                 .accessibilityIdentifier("alo.peer.scroll")
                 .scrollDismissesKeyboard(.interactively)
+                .onAppear {
+                    guard startsWithSearch, !isSearchPresented else { return }
+                    isSearchPresented = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { searchFocused = true }
+                }
                 .onChange(of: isSearchPresented) { _, shown in
                     guard shown else { return }
                     withAnimation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 1)) {
@@ -11808,8 +12424,17 @@ private struct ChatPeerInfoPanel: View {
             Button("Оформление чата", systemImage: "paintbrush") { onOpenAppearance() }
             Button("Медиа", systemImage: "photo.on.rectangle") { scrollToMedia() }
             if conversation.kind == "direct", conversation.entityType != "saved" {
+                // Telegram puts it here too: a separate chat with a lock, only between this device and one of theirs.
+                if app.secretChats.available, !isBlockedDirectPeer {
+                    Button("Начать секретный чат", systemImage: "lock.fill") {
+                        Task { if let problem = await app.secretChats.start(userId: conversation.peerId) { app.notice = problem } }
+                    }
+                }
                 Button("Профиль в Alo", systemImage: "person.crop.circle") { onOpenProfile() }
-                Button("Проверить шифрование", systemImage: "lock.shield") { openSafetyNumber() }
+                // A cloud chat is not end-to-end encrypted: there are no keys to compare in it.
+                if !AloAPIClient.shared.knownMessagingPolicy.plaintextDirectAllowed {
+                    Button("Проверить шифрование", systemImage: "lock.shield") { openSafetyNumber() }
+                }
             }
             if conversation.canManageGroup {
                 Button("Управление", systemImage: "slider.horizontal.3") { isGroupManagementPresented = true }
@@ -14294,14 +14919,14 @@ private struct CallControlButton: View {
     }
 }
 
-private struct AloRecordingLevelsView<Content: View>: View {
+struct AloRecordingLevelsView<Content: View>: View {
     @ObservedObject var recorder: ChatAudioRecorder
     @ViewBuilder let content: ([CGFloat]) -> Content
 
     var body: some View { content(recorder.levels) }
 }
 
-private final class ChatAudioRecorder: NSObject, ObservableObject {
+final class ChatAudioRecorder: NSObject, ObservableObject {
     let objectWillChange = ObservableObjectPublisher()
     private(set) var levels: [CGFloat] = []
 
@@ -14309,8 +14934,13 @@ private final class ChatAudioRecorder: NSObject, ObservableObject {
     private var outputURL: URL?
     private var meterTimer: Timer?
     private var requestID = UUID()
+    private var onLimitReached: (() -> Void)?
 
-    func start(onReady: @escaping (String?) -> Void) {
+    /// The longest voice message: 100 minutes, as Telegram Desktop.
+    private static let maximumDuration: TimeInterval = 100 * 60
+
+    func start(onReady: @escaping (String?) -> Void, onLimitReached: @escaping () -> Void) {
+        self.onLimitReached = onLimitReached
         let id = UUID()
         requestID = id
         Task { @MainActor in
@@ -14401,6 +15031,9 @@ private final class ChatAudioRecorder: NSObject, ObservableObject {
             let normalized = pow(10, power / 34)
             let level = CGFloat(max(0.10, min(1, normalized)))
             self.updateLevels(Array((self.levels + [level]).suffix(28)))
+            if recorder.currentTime >= Self.maximumDuration {
+                self.onLimitReached?()
+            }
         }
         meterTimer = timer
         RunLoop.main.add(timer, forMode: .common)
@@ -14528,11 +15161,6 @@ struct CircleVideoPlayerView: UIViewRepresentable {
 
 private extension Notification.Name {
     static let aloMediaPlaybackDidStart = Notification.Name("aloMediaPlaybackDidStart")
-    static let aloVoicePlaybackDidStart = Notification.Name("aloVoicePlaybackDidStart")
-    static let aloVoicePlaybackDidStop = Notification.Name("aloVoicePlaybackDidStop")
-    static let aloVoicePlaybackToggleRequested = Notification.Name("aloVoicePlaybackToggleRequested")
-    static let aloVoicePlaybackStopRequested = Notification.Name("aloVoicePlaybackStopRequested")
-    static let aloVoicePlaybackSpeedChanged = Notification.Name("aloVoicePlaybackSpeedChanged")
 }
 
 @MainActor enum AloHaptics {
@@ -14654,6 +15282,52 @@ private extension AloMessageAttachment {
             posterUrl: posterUrl,
             caption: name
         )
+    }
+}
+
+/// A group member's run of messages on screen, keyed by its first message: the rows' frames joined, and whose it is.
+private struct ChatRunAvatarFrame: Equatable {
+    var minY: CGFloat
+    var maxY: CGFloat
+    let senderId: Int
+    let name: String
+    let avatarUrl: String
+}
+
+private struct ChatRunAvatarFramesKey: PreferenceKey {
+    static var defaultValue = [Int: ChatRunAvatarFrame]()
+
+    static func reduce(value: inout [Int: ChatRunAvatarFrame], nextValue: () -> [Int: ChatRunAvatarFrame]) {
+        value.merge(nextValue()) { current, next in
+            var joined = current
+            joined.minY = min(current.minY, next.minY)
+            joined.maxY = max(current.maxY, next.maxY)
+            return joined
+        }
+    }
+}
+
+/// One avatar per run, drawn over the list as in Telegram on iPhone (the owner's choice, 2026-10-29): it stays by the
+/// bottom of the visible messages while the run goes on below them and rides up with the run's last message.
+private struct ChatStickyRunAvatars: View {
+    let runs: [Int: ChatRunAvatarFrame]
+    let visibleBottom: CGFloat
+    let leading: CGFloat
+    private let size: CGFloat = 34
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(runs.keys.sorted(), id: \.self) { key in
+                if let run = runs[key] {
+                    let bottom = min(run.maxY, max(run.minY + size, visibleBottom))
+                    AloAvatar(name: run.name, url: run.avatarUrl, size: size, colorSeed: String(run.senderId))
+                        .position(x: leading + size / 2, y: bottom - size / 2)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 
@@ -14830,5 +15504,73 @@ struct AloFileAttachmentRow: View {
         .accessibilityLabel(paused ? "Продолжить загрузку" : "Приостановить загрузку")
         .accessibilityValue(app.outgoingUploadProgress[localId].map { "\(Int($0.fraction * 100)) процентов" } ?? "")
         .accessibilityIdentifier("alo.upload.\(localId)")
+    }
+}
+
+/// The post on top of its comments, as Telegram shows it: the channel's bubble, then «Начало обсуждения».
+private struct CommentsThreadPostHeader: View {
+    @Environment(\.aloAPIClient) private var api
+    let post: AloPost
+    let hasComments: Bool
+    let bubbleColor: Color
+
+    private var photoURL: URL? {
+        guard let item = post.media.first(where: { $0.type == "image" || $0.type == "video" }) else { return nil }
+        let path = item.type == "video" ? item.posterUrl : item.url
+        return path.isEmpty ? nil : api?.absoluteURL(path)
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack(alignment: .bottom, spacing: 8) {
+                AloAvatar(name: post.author.name, url: post.author.avatarUrl, size: 34, colorSeed: "\(post.author.id)")
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(post.author.name)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(AloTheme.accent)
+                        .lineLimit(1)
+                    if let photoURL {
+                        AloAsyncImage(url: photoURL) { phase in
+                            switch phase {
+                            case .success(let image):
+                                image.resizable().scaledToFill()
+                            default:
+                                Color.white.opacity(0.06)
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 200)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                    if !post.body.isEmpty {
+                        Text(post.body)
+                            .font(.system(size: 17))
+                            .foregroundStyle(AloTheme.text)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Text(Self.time(post.createdAt))
+                        .font(.system(size: 12))
+                        .foregroundStyle(AloTheme.muted)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .padding(.horizontal, 11)
+                .padding(.vertical, 8)
+                .modifier(AloMessageBubbleSurface(color: bubbleColor, isMine: false, startsRun: true, endsRun: true))
+                .frame(maxWidth: 320, alignment: .leading)
+                Spacer(minLength: 24)
+            }
+            .padding(.horizontal, 8)
+            ChatDatePill(label: hasComments ? "Начало обсуждения" : "Комментариев пока нет")
+                .padding(.vertical, 6)
+        }
+        .padding(.bottom, 4)
+        .accessibilityIdentifier("alo.comments.post")
+    }
+
+    private static func time(_ iso: String) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let date = formatter.date(from: iso) ?? ISO8601DateFormatter().date(from: iso) else { return "" }
+        return date.formatted(.dateTime.hour().minute())
     }
 }

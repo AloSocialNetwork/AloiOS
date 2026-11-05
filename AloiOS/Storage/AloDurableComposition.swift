@@ -62,6 +62,13 @@ struct AloChatDraft: Equatable {
 
     var isEmpty: Bool { text.isEmpty && reply == nil && forward == nil && attachments.isEmpty && !missingAttachments }
 
+    /// The draft with its text left out: equal for two drafts that differ only in what was typed.
+    var withoutText: AloChatDraft {
+        var copy = self
+        copy.text = ""
+        return copy
+    }
+
     func record(key: String) -> [String: Any] {
         var value: [String: Any] = ["key": key, "text": text, "forwardTitle": forwardTitle,
             "attachments": attachments.map { AloDurableAttachment.record($0, prefix: "draft") },

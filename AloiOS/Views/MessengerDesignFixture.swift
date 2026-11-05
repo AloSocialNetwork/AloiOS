@@ -190,6 +190,38 @@ extension AloAppModel {
                         "metadata": ["id": "stress-\(index)", "durationSeconds": "3"]
                     ]]])
                 }
+            case "telegram-chat":
+                // A long direct chat for comparing with Telegram and timing the scroll: runs of each person
+                // (a minute apart, a new run after a 15-minute pause), a reply, reactions with avatars, a captioned photo.
+                let mine: [String: Any] = ["senderId": 990001, "recipientId": 990002, "readAt": "2026-09-05T23:00:00Z"]
+                let me = ["id": 990001, "name": "Тест интерфейса"] as [String: Any]
+                let peer = ["id": 990002, "name": "Александр"] as [String: Any]
+                let lines = ["Привет!", "Ты уже посмотрел фотографии с поездки?",
+                             "Давай на выходных выберемся ещё раз. Можно взять велосипеды и поехать по набережной до самого маяка.",
+                             "Да, отличная идея", "В субботу после обеда я свободен 👍",
+                             "Тогда в два у парка?", "Ок", "Договорились. Возьму кофе с собой ☕️"]
+                var built = [[String: Any]]()
+                var minute = 0
+                for block in 0..<14 {
+                    minute += 15
+                    for (index, line) in lines.enumerated() {
+                        let id = 990500 + block * 10 + index
+                        let outgoing = index >= 3 && index <= 4 || index == 7
+                        var extra: [String: Any] = outgoing ? mine : [:]
+                        extra["createdAt"] = String(format: "2026-09-05T%02d:%02d:00Z", 8 + minute / 60, minute % 60)
+                        if index == 3 { extra["replyToMessageId"] = id - 2 }
+                        if index == 2 { extra["reactions"] = [["emoji": "❤️", "count": 1, "reactedByMe": true, "users": [me]]] }
+                        if index == 4 { extra["reactions"] = [["emoji": "🔥", "count": 2, "users": [me, peer], "reactedByMe": true],
+                                                              ["emoji": "👍", "count": 1, "users": [peer]]] }
+                        if index == 5, block.isMultiple(of: 3) {
+                            extra["attachments"] = [["type": "image", "url": sample.imageURI, "posterUrl": sample.imageURI,
+                                                     "name": "photo.jpg", "metadata": ["width": "1440", "height": "1080"]]]
+                        }
+                        built.append(message(id, body: line, extra: extra))
+                        minute += index == 2 || index == 4 ? 12 : 1
+                    }
+                }
+                items = built
             case "channel-media":
                 items = [message(990200, body: "Медиа, подпись и реакции — один пост. Комментарии находятся под отдельным разделителем.", extra: [
                     "channelPostId": 990400, "channelPostCommentsEnabled": true, "channelPostCommentCount": 22,
@@ -397,6 +429,9 @@ extension AloAppModel {
         }
         if UserDefaults.standard.bool(forKey: "ALO_UI_GROUP_CALL_PREVIEW") {
             calls.groupCall.installDebugPreview(meId: 990001)
+        }
+        if let secret = UserDefaults.standard.string(forKey: "ALO_UI_SECRET_PREVIEW"), !secret.isEmpty {
+            secretChats.installDebugPreview(mode: secret, meId: 990001)
         }
         activeTab = content == "notifications" ? .alerts : (["feed-surface", "feed-timeline", "feed-video", "feed-albums", "social-overview"].contains(content) ? .feed : (content == "own-profile" ? .profile : .messages))
         activeConversation = activeTab == .messages && content != "chat-list"

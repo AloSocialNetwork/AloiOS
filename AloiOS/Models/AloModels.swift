@@ -22,7 +22,7 @@ enum AloAppTab: String, CaseIterable, Identifiable {
 
     var systemImage: String {
         switch self {
-        case .feed: return "house.fill"
+        case .feed: return "house"
         case .search: return "magnifyingglass"
         case .messages: return "message"
         case .alerts: return "bell"
@@ -34,6 +34,8 @@ enum AloAppTab: String, CaseIterable, Identifiable {
 enum AloFeedMode: String, CaseIterable {
     case popular
     case subscriptions
+    /// «Популярное»: the posts people liked and shared most over the last month (/api/feed/popular), as on the website.
+    case top
 }
 
 struct AloEntitySummary: Identifiable, Equatable {
@@ -86,6 +88,8 @@ struct AloCurrentUser: Identifiable, Equatable {
     let registeredLabel: String
     let coverStyle: String
     let coverImageUrl: String
+    /// The reaction a double tap on a message sends, the same on every device of the account.
+    let favoriteReaction: String
     /// What this account may do in the moderation panel: "reports", "moderation", "stats"…
     let adminCan: Set<String>
     /// Where the account stands on the moderation ladder (owner, admin, lead moderator…).
@@ -106,6 +110,18 @@ struct AloCurrentUser: Identifiable, Equatable {
         registeredLabel = json.string("registeredLabel")
         coverStyle = json.string("coverStyle").ifBlank("violet")
         coverImageUrl = json.string("coverImageUrl")
+        favoriteReaction = json.string("favoriteReaction").ifBlank("❤️")
+    }
+
+    /// The same person with another favorite reaction.
+    func withFavoriteReaction(_ emoji: String) -> AloCurrentUser {
+        AloCurrentUser([
+            "id": id, "name": name, "username": username, "email": email, "bio": bio, "avatarUrl": avatarUrl,
+            "verified": verified, "online": online, "registeredLabel": registeredLabel,
+            "coverStyle": coverStyle, "coverImageUrl": coverImageUrl, "favoriteReaction": emoji,
+            "adminScope": ["can": Dictionary(uniqueKeysWithValues: adminCan.map { ($0, true) }),
+                           "hierarchy": staffHierarchy.rawValue]
+        ])
     }
 
     /// The same person with another banner.
@@ -113,7 +129,7 @@ struct AloCurrentUser: Identifiable, Equatable {
         AloCurrentUser([
             "id": id, "name": name, "username": username, "email": email, "bio": bio, "avatarUrl": avatarUrl,
             "verified": verified, "online": online, "registeredLabel": registeredLabel,
-            "coverStyle": style, "coverImageUrl": imageURL,
+            "coverStyle": style, "coverImageUrl": imageURL, "favoriteReaction": favoriteReaction,
             "adminScope": ["can": Dictionary(uniqueKeysWithValues: adminCan.map { ($0, true) }),
                            "hierarchy": staffHierarchy.rawValue]
         ])
@@ -795,7 +811,11 @@ struct AloLocalAttachment: Identifiable, Equatable {
 
     var durationMetadata: [String: String] {
         var metadata = mediaDimensions?.metadata ?? [:]
-        if let durationSeconds { metadata["durationSeconds"] = String(durationSeconds) }
+        // "4" rather than "4.0", and "61.25" stays exact: every app reads the length as a decimal number.
+        if let durationSeconds {
+            metadata["durationSeconds"] = durationSeconds == durationSeconds.rounded()
+                ? String(Int(durationSeconds)) : String(durationSeconds)
+        }
         return metadata
     }
 
@@ -947,6 +967,8 @@ struct AloPollViewState: Equatable {
     let correctOptionIds: Set<String>
     let publicVoters: [AloPollPublicVoter]
     let closesAt: String
+    /// The poll was created in a cloud chat: the server counts the votes, whoever voted anonymously or not.
+    var isServerTallied = false
 }
 
 struct AloPollPublicVoter: Equatable {
@@ -977,6 +999,30 @@ struct AloCanonicalPollState: Equatable {
     let publicVoters: [AloPollPublicVoter]
     let closesAt: String
     let closedAt: String
+
+    /// What the poll looks like at once when this person changes their answer; the server's reply replaces it.
+    func voting(_ optionIds: Set<String>) -> AloCanonicalPollState {
+        var counts = voteCounts
+        selectedOptionIds.forEach { counts[$0] = max(0, (counts[$0] ?? 0) - 1) }
+        optionIds.forEach { counts[$0, default: 0] += 1 }
+        var voters = totalVoters
+        if selectedOptionIds.isEmpty, !optionIds.isEmpty { voters += 1 }
+        if !selectedOptionIds.isEmpty, optionIds.isEmpty { voters = max(0, voters - 1) }
+        return AloCanonicalPollState(
+            id: id, messageId: messageId, voteCounts: counts, selectedOptionIds: optionIds, totalVoters: voters,
+            isClosed: isClosed, allowsRevoting: allowsRevoting, correctOptionIds: correctOptionIds,
+            publicVoters: publicVoters, closesAt: closesAt, closedAt: closedAt
+        )
+    }
+
+    private init(id: String, messageId: Int, voteCounts: [String: Int], selectedOptionIds: Set<String>, totalVoters: Int,
+                 isClosed: Bool, allowsRevoting: Bool, correctOptionIds: Set<String>, publicVoters: [AloPollPublicVoter],
+                 closesAt: String, closedAt: String) {
+        self.id = id; self.messageId = messageId; self.voteCounts = voteCounts; self.selectedOptionIds = selectedOptionIds
+        self.totalVoters = totalVoters; self.isClosed = isClosed; self.allowsRevoting = allowsRevoting
+        self.correctOptionIds = correctOptionIds; self.publicVoters = publicVoters; self.closesAt = closesAt
+        self.closedAt = closedAt
+    }
 
     init(_ json: [String: Any]) {
         id = json.string("id")
@@ -1257,12 +1303,14 @@ enum AloChatSystemEventCodec {
 enum AloPollProjection {
     static func states(messages: [AloChatMessage], currentUserId: Int) -> [String: AloPollViewState] {
         var definitions = [String: (definition: AloPollDefinition, creatorId: Int)]()
+        var cloudPolls = Set<String>()
         var latestVotes = [String: [Int: Set<String>]]()
         var verifiedReveals = [String: Set<String>]()
         for message in messages {
             switch AloPollCodec.decode(message.body) {
             case let .create(definition):
                 definitions[definition.id] = (definition, message.senderId)
+                if message.isCloud { cloudPolls.insert(definition.id) }
             case let .vote(pollId, optionIds):
                 latestVotes[pollId, default: [:]][message.senderId] = optionIds
             case let .reveal(pollId, correctOptionIds, salt):
@@ -1298,7 +1346,8 @@ enum AloPollProjection {
                 allowsRevoting: true,
                 correctOptionIds: verifiedReveals[definition.id] ?? definition.correctOptionIds,
                 publicVoters: [],
-                closesAt: definition.closesAt
+                closesAt: definition.closesAt,
+                isServerTallied: cloudPolls.contains(definition.id)
             )
         }
     }
@@ -1309,7 +1358,7 @@ enum AloPollProjection {
     ) -> [String: AloPollViewState] {
         projected.mapValues { state in
             guard let server = canonical[state.definition.id] else { return state }
-            if state.definition.isAnonymous {
+            if state.definition.isAnonymous && !state.isServerTallied {
                 // Vote counts and the selected options are reconstructed only
                 // from authenticated E2EE vote messages.  The server still
                 // supplies lifecycle state after a poll is closed, but it never
@@ -1326,6 +1375,7 @@ enum AloPollProjection {
                     closesAt: server.closesAt.isEmpty ? state.closesAt : server.closesAt
                 )
             }
+            // A cloud poll: the server counts. For an anonymous one it sends no voters, only the totals and your own choice.
             return AloPollViewState(
                 definition: state.definition,
                 voteCounts: server.voteCounts,
@@ -1335,7 +1385,8 @@ enum AloPollProjection {
                 allowsRevoting: server.allowsRevoting,
                 correctOptionIds: server.isClosed ? state.correctOptionIds : [],
                 publicVoters: server.publicVoters,
-                closesAt: server.closesAt
+                closesAt: server.closesAt,
+                isServerTallied: state.isServerTallied
             )
         }
     }
@@ -1579,18 +1630,22 @@ struct AloForwardMeta: Equatable {
     let userId: Int
     let messageId: Int
     let user: AloEntitySummary?
+    /// What the forwarded message said on this device. A cloud chat resends it as a new message.
+    let content: AloForwardContent?
 
     init?(_ json: [String: Any]) {
         userId = json.int("userId")
         messageId = json.int("messageId")
         user = json.optionalObject("user").map(AloEntitySummary.init)
+        content = nil
         if userId <= 0 || messageId <= 0 { return nil }
     }
 
-    init(userId: Int, messageId: Int, user: AloEntitySummary?) {
+    init(userId: Int, messageId: Int, user: AloEntitySummary?, content: AloForwardContent? = nil) {
         self.userId = userId
         self.messageId = messageId
         self.user = user
+        self.content = content
     }
 }
 
@@ -1598,6 +1653,8 @@ struct AloMessageReaction: Identifiable, Equatable {
     let emoji: String
     let count: Int
     let reactedByMe: Bool
+    /// The first people who reacted (up to three); the chip shows their avatars in place of the counter, as Telegram does.
+    let users: [AloConversationPeer]
 
     var id: String { emoji }
 
@@ -1605,12 +1662,14 @@ struct AloMessageReaction: Identifiable, Equatable {
         emoji = json.string("emoji")
         count = max(0, json.int("count"))
         reactedByMe = json.bool("reactedByMe")
+        users = json.array("users").map(AloConversationPeer.init)
     }
 
-    init(emoji: String, count: Int, reactedByMe: Bool) {
+    init(emoji: String, count: Int, reactedByMe: Bool, users: [AloConversationPeer] = []) {
         self.emoji = emoji
         self.count = max(0, count)
         self.reactedByMe = reactedByMe
+        self.users = users
     }
 }
 
@@ -1636,9 +1695,12 @@ struct AloPost: Identifiable, Equatable {
     let feedReason: AloFeedReason?
     /// When the author last changed it; empty for a post never edited.
     let editedAt: String
+    /// The random code of the public link https://ало.online/p/<code>; empty from an older server.
+    let shareCode: String
 
     init(_ json: [String: Any]) {
         id = json.int("id")
+        shareCode = json.string("shareCode")
         feedReason = AloFeedReason(rawValue: json.string("feedReason"))
         editedAt = json.string("editedAt")
         creatorId = json.int("creatorId").ifZero(json.int("creator_id"))
@@ -1683,7 +1745,7 @@ struct AloPost: Identifiable, Equatable {
         discussionRoomId = post.discussionRoomId; discussionTopicId = post.discussionTopicId
         messengerRoomId = post.messengerRoomId; viewCount = post.viewCount
         createdAt = post.createdAt; author = post.author; feedReason = post.feedReason
-        editedAt = post.editedAt
+        editedAt = post.editedAt; shareCode = post.shareCode
         self.likeCount = max(0, likeCount); self.viewerLiked = viewerLiked
         self.repostCount = max(0, repostCount); self.viewerReposted = viewerReposted
         self.commentCount = max(0, commentCount)
@@ -2291,14 +2353,23 @@ struct AloChatMessage: Identifiable, Equatable {
     let senderIsAnonymous: Bool
     let senderAdminTitle: String
     let channelPostId: Int
-    let channelPostCommentCount: Int
+    var channelPostCommentCount: Int
     let channelPostCommentsEnabled: Bool
+    /// Telegram's comments row: the latest people who commented (newest first, up to three) and the unread dot.
+    var channelPostRecentCommenters: [AloConversationPeer] = []
+    var channelPostHasUnreadComments = false
     let scheduledMessageId: Int
     let scheduledAt: String
     let silent: Bool
     let sendWhenOnline: Bool
     let deliveryState: String
     let deliveryError: String
+    /// "" for a cloud message (plain text on the server), the scheme of an end-to-end message, nil while the server has
+    /// not said (a message that is still being sent, or an old payload without the field).
+    let encryptionScheme: String?
+
+    var isEncrypted: Bool { !(encryptionScheme ?? "").isEmpty }
+    var isCloud: Bool { encryptionScheme == "" }
 
     var isScheduled: Bool {
         scheduledMessageId > 0 || sendWhenOnline || deliveryState == "scheduled"
@@ -2310,7 +2381,12 @@ struct AloChatMessage: Identifiable, Equatable {
         recipientId = json.int("recipientId").ifZero(json.int("recipient_id"))
         let rawBody = json.string("body")
         let explicitEntities = json.array("entities").compactMap(AloMessageTextEntity.init)
-        let markup = explicitEntities.isEmpty ? AloMessageMarkup.parse(rawBody) : nil
+        let scheme = json["encryptionScheme"] as? String
+        // A cloud message keeps its text and its formatting apart: the body is shown as it is, never read for markers.
+        let isStructuredCloudMessage = scheme == "" && json["encryptedPayload"] as? [String: Any] == nil
+            && json["entities"] is [Any]
+        encryptionScheme = scheme
+        let markup = explicitEntities.isEmpty && !isStructuredCloudMessage ? AloMessageMarkup.parse(rawBody) : nil
         body = markup?.body ?? rawBody
         attachmentUrl = json.string("attachmentUrl")
         attachmentType = json.string("attachmentType")
@@ -2336,6 +2412,8 @@ struct AloChatMessage: Identifiable, Equatable {
         channelPostId = max(0, json.int("channelPostId"))
         channelPostCommentCount = max(0, json.int("channelPostCommentCount"))
         channelPostCommentsEnabled = json.bool("channelPostCommentsEnabled")
+        channelPostRecentCommenters = Array(json.array("channelPostRecentCommenters").map(AloConversationPeer.init).prefix(3))
+        channelPostHasUnreadComments = json.bool("channelPostHasUnreadComments")
         scheduledMessageId = max(0, json.int("scheduledMessageId"))
         scheduledAt = json.string("scheduledAt")
         silent = json.bool("silent")
@@ -2393,6 +2471,7 @@ struct AloChatMessage: Identifiable, Equatable {
         self.sendWhenOnline = sendWhenOnline
         deliveryState = scheduledAt.isEmpty && !sendWhenOnline ? "" : "scheduled"
         deliveryError = ""
+        encryptionScheme = nil
     }
 
     private init(
@@ -2426,7 +2505,8 @@ struct AloChatMessage: Identifiable, Equatable {
         silent: Bool = false,
         sendWhenOnline: Bool = false,
         deliveryState: String = "",
-        deliveryError: String = ""
+        deliveryError: String = "",
+        encryptionScheme: String? = nil
     ) {
         self.id = id
         self.senderId = senderId
@@ -2459,6 +2539,7 @@ struct AloChatMessage: Identifiable, Equatable {
         self.sendWhenOnline = sendWhenOnline
         self.deliveryState = deliveryState
         self.deliveryError = deliveryError
+        self.encryptionScheme = encryptionScheme
     }
 
     func replacingReactions(_ reactions: [AloMessageReaction]) -> AloChatMessage {
@@ -2493,7 +2574,8 @@ struct AloChatMessage: Identifiable, Equatable {
             silent: silent,
             sendWhenOnline: sendWhenOnline,
             deliveryState: deliveryState,
-            deliveryError: deliveryError
+            deliveryError: deliveryError,
+            encryptionScheme: encryptionScheme
         )
     }
 
@@ -2530,7 +2612,8 @@ struct AloChatMessage: Identifiable, Equatable {
             silent: silent,
             sendWhenOnline: sendWhenOnline,
             deliveryState: deliveryState,
-            deliveryError: deliveryError
+            deliveryError: deliveryError,
+            encryptionScheme: encryptionScheme
         )
     }
 
@@ -2566,7 +2649,8 @@ struct AloChatMessage: Identifiable, Equatable {
             silent: silent,
             sendWhenOnline: sendWhenOnline,
             deliveryState: deliveryState,
-            deliveryError: deliveryError
+            deliveryError: deliveryError,
+            encryptionScheme: encryptionScheme
         )
     }
 
@@ -2602,7 +2686,8 @@ struct AloChatMessage: Identifiable, Equatable {
             silent: silent ?? self.silent,
             sendWhenOnline: false,
             deliveryState: deliveryState,
-            deliveryError: deliveryError
+            deliveryError: deliveryError,
+            encryptionScheme: encryptionScheme
         )
     }
 
@@ -2642,7 +2727,8 @@ struct AloChatMessage: Identifiable, Equatable {
             silent: silent,
             sendWhenOnline: sendWhenOnline,
             deliveryState: deliveryState,
-            deliveryError: deliveryError
+            deliveryError: deliveryError,
+            encryptionScheme: encryptionScheme
         )
     }
 
@@ -2682,7 +2768,8 @@ struct AloChatMessage: Identifiable, Equatable {
             silent: silent,
             sendWhenOnline: sendWhenOnline,
             deliveryState: deliveryState,
-            deliveryError: deliveryError
+            deliveryError: deliveryError,
+            encryptionScheme: encryptionScheme
         )
     }
 }
@@ -2714,6 +2801,10 @@ extension AloChatMessage {
 }
 
 struct AloConversationDetail {
+    /// A channel opened before subscribing (Telegram's preview): read-only, «Подписаться» at the bottom.
+    var isMember = true
+    /// The community behind a channel's chat (`/api/channels/<id>/subscribe`).
+    var feedChannelId = 0
     let peerId: Int
     let kind: String
     let roomId: Int
@@ -2861,6 +2952,8 @@ struct AloConversationDetail {
         avatarUrl = room.string("avatarEmoji").ifBlank(peer.avatarUrl)
         canManageGroup = room.bool("canManage")
         groupMemberRole = room.string("memberRole")
+        isMember = room["isMember"] as? Bool ?? true
+        feedChannelId = max(0, room.int("feedChannelId"))
         groupMembers = room.array("members").map(AloGroupMember.init)
         groupPolicy = parsedPolicy
         // A channel cannot expose forum state. Discard stale data from cached
@@ -2880,7 +2973,7 @@ struct AloConversationDetail {
     }
 
     func replacingItems(_ items: [AloChatMessage]) -> AloConversationDetail {
-        AloConversationDetail(
+        var next = AloConversationDetail(
             peerId: peerId,
             kind: kind,
             roomId: roomId,
@@ -2904,10 +2997,45 @@ struct AloConversationDetail {
             typingAction: typingAction,
             items: items
         )
+        // A channel preview stays a preview (and keeps its community) across every change of the chat.
+        next.isMember = isMember
+        next.feedChannelId = feedChannelId
+        return next
+    }
+
+    func replacingCanonicalPolls(_ polls: [String: AloCanonicalPollState]) -> AloConversationDetail {
+        var next = AloConversationDetail(
+            peerId: peerId,
+            kind: kind,
+            roomId: roomId,
+            entityType: entityType,
+            title: title,
+            subtitle: subtitle,
+            username: username,
+            profileDescription: profileDescription,
+            avatarUrl: avatarUrl,
+            canManageGroup: canManageGroup,
+            groupMemberRole: groupMemberRole,
+            groupMembers: groupMembers,
+            groupPolicy: groupPolicy,
+            forumTopics: forumTopics,
+            forumTopicStates: forumTopicStates,
+            pinnedMessageIds: pinnedMessageIds,
+            canonicalPolls: polls,
+            online: online,
+            lastSeenAt: lastSeenAt,
+            isTyping: isTyping,
+            typingAction: typingAction,
+            items: items
+        )
+        // A channel preview stays a preview (and keeps its community) across every change of the chat.
+        next.isMember = isMember
+        next.feedChannelId = feedChannelId
+        return next
     }
 
     func replacingMessage(_ message: AloChatMessage) -> AloConversationDetail {
-        AloConversationDetail(
+        var next = AloConversationDetail(
             peerId: peerId,
             kind: kind,
             roomId: roomId,
@@ -2931,10 +3059,14 @@ struct AloConversationDetail {
             typingAction: typingAction,
             items: items.map { $0.id == message.id ? message : $0 }
         )
+        // A channel preview stays a preview (and keeps its community) across every change of the chat.
+        next.isMember = isMember
+        next.feedChannelId = feedChannelId
+        return next
     }
 
     func replacingPinnedMessageIds(_ pinnedMessageIds: [Int]) -> AloConversationDetail {
-        AloConversationDetail(
+        var next = AloConversationDetail(
             peerId: peerId,
             kind: kind,
             roomId: roomId,
@@ -2958,6 +3090,10 @@ struct AloConversationDetail {
             typingAction: typingAction,
             items: items
         )
+        // A channel preview stays a preview (and keeps its community) across every change of the chat.
+        next.isMember = isMember
+        next.feedChannelId = feedChannelId
+        return next
     }
 
     func replacingGroupState(
@@ -2965,7 +3101,7 @@ struct AloConversationDetail {
         members: [AloGroupMember]? = nil
     ) -> AloConversationDetail {
         let resolvedMembers = members ?? groupMembers
-        return AloConversationDetail(
+        var next = AloConversationDetail(
             peerId: peerId,
             kind: kind,
             roomId: roomId,
@@ -2994,10 +3130,14 @@ struct AloConversationDetail {
             typingAction: typingAction,
             items: items
         )
+        // A channel preview stays a preview (and keeps its community) across every change of the chat.
+        next.isMember = isMember
+        next.feedChannelId = feedChannelId
+        return next
     }
 
     func replacingGroupMemberCount(_ memberCount: Int) -> AloConversationDetail {
-        AloConversationDetail(
+        var next = AloConversationDetail(
             peerId: peerId,
             kind: kind,
             roomId: roomId,
@@ -3026,13 +3166,17 @@ struct AloConversationDetail {
             typingAction: typingAction,
             items: items
         )
+        // A channel preview stays a preview (and keeps its community) across every change of the chat.
+        next.isMember = isMember
+        next.feedChannelId = feedChannelId
+        return next
     }
 
     func replacingForumTopicState(_ state: AloForumTopicState) -> AloConversationDetail {
         var states = forumTopicStates.filter { $0.topicId != state.topicId }
         states.append(state)
         states.sort { $0.topicId < $1.topicId }
-        return AloConversationDetail(
+        var next = AloConversationDetail(
             peerId: peerId,
             kind: kind,
             roomId: roomId,
@@ -3056,6 +3200,10 @@ struct AloConversationDetail {
             typingAction: typingAction,
             items: items
         )
+        // A channel preview stays a preview (and keeps its community) across every change of the chat.
+        next.isMember = isMember
+        next.feedChannelId = feedChannelId
+        return next
     }
 }
 
@@ -3080,6 +3228,9 @@ struct AloProfileRelation: Equatable {
     let friendStatus: String
     let incomingRequestId: Int
     let outgoingRequestId: Int
+    /// Whether the person takes friend requests (people lists carry it; a profile has it in its permissions).
+    /// nil from an older server: the button then offers a request.
+    let canSendFriendRequest: Bool?
 
     init(_ json: [String: Any]) {
         following = json.bool("following")
@@ -3088,6 +3239,7 @@ struct AloProfileRelation: Equatable {
         friendStatus = json.string("friendStatus").ifBlank(isFriend ? "friends" : "none")
         incomingRequestId = json.int("incomingRequestId")
         outgoingRequestId = json.int("outgoingRequestId")
+        canSendFriendRequest = json["canSendFriendRequest"] as? Bool
     }
 }
 
@@ -3551,6 +3703,10 @@ struct AloChannelProfile: Identifiable, Equatable {
     let signMessages: Bool
     let showAuthorProfiles: Bool
     let discussionRoomId: Int?
+    /// Whether the viewer follows the channel («Подписаться» / «Вы подписаны», as on the website).
+    let subscribed: Bool
+    /// The channel's chat, for the website's «Чат» button.
+    let messengerRoomId: Int?
 
     init(_ json: [String: Any]) {
         let profile = json.object("profile")
@@ -3575,6 +3731,9 @@ struct AloChannelProfile: Identifiable, Equatable {
         showAuthorProfiles = channel.bool("showAuthorProfiles")
         let rawDiscussionRoomId = channel.int("discussionRoomId")
         discussionRoomId = rawDiscussionRoomId > 0 ? rawDiscussionRoomId : nil
+        subscribed = channel.bool("subscribed")
+        let rawMessengerRoomId = channel.int("messengerRoomId")
+        messengerRoomId = rawMessengerRoomId > 0 ? rawMessengerRoomId : nil
     }
 
     init(
@@ -3593,7 +3752,9 @@ struct AloChannelProfile: Identifiable, Equatable {
         commentsEnabled: Bool,
         signMessages: Bool,
         showAuthorProfiles: Bool,
-        discussionRoomId: Int?
+        discussionRoomId: Int?,
+        subscribed: Bool = false,
+        messengerRoomId: Int? = nil
     ) {
         self.id = id
         self.name = name
@@ -3611,6 +3772,8 @@ struct AloChannelProfile: Identifiable, Equatable {
         self.signMessages = signMessages
         self.showAuthorProfiles = showAuthorProfiles
         self.discussionRoomId = discussionRoomId
+        self.subscribed = subscribed
+        self.messengerRoomId = messengerRoomId
     }
 }
 
@@ -3681,9 +3844,55 @@ struct AloBootstrapData {
     }
 }
 
+/// Display-side twin of the server's text-guard (web/js/text-tame.js on the site). The server cleans everything it can
+/// read, but it never sees the text of encrypted messages: at most 3 combining marks on one visible character, and no
+/// direction overrides. A Swift `Character` is a grapheme, so «letter + ZWNJ + marks + ZWNJ + marks…» counts as one.
+/// Emoji keep their variation selectors and keycaps; ordinary text in any language is left as it is.
+enum AloTextTame {
+    private static func isBidi(_ scalar: Unicode.Scalar) -> Bool {
+        (0x202A...0x202E).contains(scalar.value) || (0x2066...0x2069).contains(scalar.value)
+    }
+
+    private static func countsAsMark(_ scalar: Unicode.Scalar) -> Bool {
+        let value = scalar.value
+        if (0xFE00...0xFE0F).contains(value) || value == 0x20E3 || (0xE0100...0xE01EF).contains(value) { return false }
+        switch scalar.properties.generalCategory {
+        case .nonspacingMark, .spacingMark, .enclosingMark: return true
+        default: return false
+        }
+    }
+
+    static func text(_ value: String, maxMarks: Int = 3) -> String {
+        if value.utf8.allSatisfy({ $0 < 0x80 }) { return value }
+        var scalars = value.unicodeScalars
+        guard scalars.contains(where: { isBidi($0) || countsAsMark($0) }) else { return value }
+        scalars.removeAll(where: isBidi)
+        var out = ""
+        out.reserveCapacity(value.utf8.count)
+        for grapheme in String(scalars) {
+            guard grapheme.unicodeScalars.filter(countsAsMark).count > maxMarks else {
+                out.append(grapheme)
+                continue
+            }
+            var kept = 0
+            for scalar in grapheme.unicodeScalars {
+                if countsAsMark(scalar) {
+                    if kept < maxMarks {
+                        out.unicodeScalars.append(scalar)
+                        kept += 1
+                    }
+                } else if scalar.value != 0x200C && scalar.value != 0x200D {
+                    out.unicodeScalars.append(scalar)
+                }
+            }
+        }
+        return out
+    }
+}
+
 extension Dictionary where Key == String, Value == Any {
     func string(_ key: String) -> String {
-        if let value = self[key] as? String { return value }
+        if let value = self[key] as? String { return AloTextTame.text(value) }
         if let value = self[key] { return String(describing: value) }
         return ""
     }
@@ -3792,6 +4001,9 @@ enum AloFormatters {
         }
         return messageDayKeyFormatter.string(from: date)
     }
+
+    /// The moment a server timestamp names (cached), nil for an unreadable one.
+    static func messageInstant(_ raw: String) -> Date? { parseIsoDate(raw) }
 
     private static func parseIsoDate(_ raw: String) -> Date? {
         if let cached = parsedDateCache.object(forKey: raw as NSString) { return cached as Date }

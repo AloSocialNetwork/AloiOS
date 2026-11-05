@@ -8,6 +8,8 @@ final class AloChatHistorySnapshot {
     let ids: [Int]
     let byID: [Int: AloChatMessage]
     let dayKeys: [String]
+    /// Seconds since 1970 of each message, 0 when unreadable.
+    let timestamps: [TimeInterval]
     let dateLabels: [Int: String]
     let dateHeaderIDs: [Int: Int]
     let dateHeaderLabels: [Int: String]
@@ -27,6 +29,7 @@ final class AloChatHistorySnapshot {
             keysByTimestamp[message.createdAt] = key
             return key
         }
+        timestamps = messages.map { AloFormatters.messageInstant($0.createdAt)?.timeIntervalSince1970 ?? 0 }
         // "Сегодня / вчера / 9 октября" is a DAY label, not a per-message
         // calculation. Calendar/DateFormatter work once per distinct day.
         var labelsByDay = [String: String]()
@@ -114,5 +117,15 @@ final class AloChatHistoryProjectionCache {
         value = result
         rebuildCount += 1
         return result
+    }
+}
+
+extension AloChatHistorySnapshot {
+    /// Telegram joins two messages of one person into a run only while they are under ten minutes apart
+    /// (ChatMessageItemImpl `messagesShouldBeMerged`); this adds that to the same-day check.
+    func sameRunWindow(_ earlier: Int, _ later: Int) -> Bool {
+        guard dayKeys.indices.contains(earlier), dayKeys.indices.contains(later), dayKeys[earlier] == dayKeys[later] else { return false }
+        let a = timestamps[earlier], b = timestamps[later]
+        return a == 0 || b == 0 || abs(b - a) < 10 * 60
     }
 }

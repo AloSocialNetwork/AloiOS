@@ -159,7 +159,7 @@ final class AloAppModel: ObservableObject {
     @Published var bootstrap: AloBootstrapData? {
         didSet {
             if oldValue?.me.id != bootstrap?.me.id {
-                accountGeneration = UUID(); likedPosts = []
+                accountGeneration = UUID(); likedPosts = []; feedTopPosts = []; feedTopLoaded = false
                 contentTools.accountChanged(bootstrap?.me.id)
             }
             if let owner = bootstrap?.me.id, owner > 0 {
@@ -170,6 +170,8 @@ final class AloAppModel: ObservableObject {
     }
     @Published var activeTab: AloAppTab = .feed
     @Published var feedMode: AloFeedMode = .popular
+    @Published private(set) var feedTopPosts: [AloPost] = []
+    @Published private(set) var feedTopLoaded = false
     @Published var composeText = ""
     @Published private(set) var isCreatingPost = false
     @Published private(set) var postPublishingError = ""
@@ -230,6 +232,8 @@ final class AloAppModel: ObservableObject {
     /// A story opened from a link, shown over everything; or a note that it has expired.
     @Published var linkedStory: AloStoryGroup?
     @Published var expiredStory: AloExpiredStoryNotice?
+    /// A sign-in QR opened from the system camera or a link: RootView asks «Войти на устройстве …?».
+    @Published var qrLoginApproval: AloQRCodeLoginPayload?
 #if DEBUG
     /// Who "saw" the fixture's own story, for the viewers list without a server.
     var previewStoryViewers = [AloStoryViewerEntry]()
@@ -321,14 +325,38 @@ final class AloAppModel: ObservableObject {
     @Published private(set) var groupManagementRevisions = [Int: Int]()
     @Published private(set) var groupManagementDeltas = [Int: AloGroupManagementDelta]()
     @Published private(set) var requestedForumTopicRoomId = 0
+    /// A channel post's comments, open as their own screen (Telegram): the post on top, «N комментариев» in the header.
+    @Published private(set) var commentsThread: AloCommentsThread?
+    /// The channel the comments were opened from: «назад» from the comments returns to it, as in Telegram.
+    private var commentsReturnConversation: AloConversationDetail?
     @Published private(set) var requestedForumTopicId = 0
     @Published private(set) var blockedUserIds = Set<Int>()
     @Published private(set) var blockingUserIds = Set<Int>()
     @Published private(set) var storedAccounts = AloAccountSessionStore.shared.accounts
+    /// Unread messages of the other accounts saved on this phone, by user id (Telegram's account switcher).
+    @Published private(set) var accountUnread: [Int: Int] = [:]
+    private var accountSummaryTask: Task<Void, Never>?
 
     let api: AloAPIClient
+    /// Whether ordinary chats are cloud chats (plain on the server, readable on every device), from `GET /api/config`.
+    @Published private(set) var messagingPolicy = AloMessagingPolicy.encryptedOnly
     /// Translations and transcripts of the messages this person asked for, and the consent that lets them ask.
     let contentTools: AloContentToolsStore
+    /// Secret chats of this device (docs/cloud-and-secret-chats.md, stage 2). Only the list-level changes (the chats,
+    /// whether one is open) reach this model; the open chat watches the store itself.
+    lazy var secretChats: AloSecretChatStore = {
+        let store = AloSecretChatStore(transport: api, currentUserId: { [weak self] in self?.bootstrap?.me.id ?? 0 })
+        store.onWillOpen = { [weak self] in
+            guard let self else { return }
+            if self.activeConversation != nil { self.closeConversation() }
+            self.selectedProfile = nil
+            self.activeTab = .messages
+        }
+        store.onSessionExpired = { [weak self] in self?.phase = .auth }
+        secretChatsSubscription = store.listDidChange.sink { [weak self] in self?.objectWillChange.send() }
+        return store
+    }()
+    private var secretChatsSubscription: AnyCancellable?
     private let startupCacheLoader: (() -> Data?)?
     init(api: AloAPIClient = .shared, startupCacheLoader: (() -> Data?)? = nil) {
         self.api = api
@@ -338,6 +366,16 @@ final class AloAppModel: ObservableObject {
             try await AloContentAudio.load(attachment, api: api, maxBytes: maxBytes)
         }
         contentTools = tools
+        messagingPolicy = api.knownMessagingPolicy
+        Self.current = self
+    }
+    /// The app's model without observing it. A message bubble only calls it (opens a link, reads a name); as an
+    /// EnvironmentObject every visible bubble redrew on each change the model publishes, each letter typed included.
+    private(set) static weak var current: AloAppModel?
+    /// `current` for views that exist only inside the running app (the chat's bubbles).
+    static var unobserved: AloAppModel {
+        guard let current else { preconditionFailure("AloAppModel has not been created") }
+        return current
     }
     lazy var calls = AloCallCoordinator(api: api, app: self)
     private var challengeToken = ""
@@ -401,6 +439,14 @@ final class AloAppModel: ObservableObject {
             calls.installDebugPreviewCall()
             return
         }
+        // Cross-client checks (tools/cross-client-check): a session of a test person on a throwaway server, given at launch
+        // together with `-ALO_DEBUG_API_BASE_URL`. Only for a clean simulator, never the one with a real account.
+        if let token = UserDefaults.standard.string(forKey: "ALO_DEBUG_SESSION_TOKEN"), !token.isEmpty,
+           UserDefaults.standard.string(forKey: "ALO_DEBUG_API_BASE_URL") != nil,
+           let base = AloServerConfiguration.baseURLs.first, let host = base.host,
+           let cookie = HTTPCookie(properties: [.name: "alo_session", .value: token, .domain: host, .path: "/"]) {
+            HTTPCookieStorage.shared.setCookie(cookie)
+        }
 #endif
         AloSecureOutboxStore.shared.discardLegacyUnscopedData()
         AloDraftAttachmentStore.cleanupExpiredDrafts()
@@ -418,15 +464,29 @@ final class AloAppModel: ObservableObject {
     }
 
     func applicationDidEnterBackground(at date: Date = Date()) {
+        flushPendingChatDraft()
         // Do not restart the interval on duplicate lifecycle notifications.
         if chatBackgroundedAt == nil { chatBackgroundedAt = date }
+        // In the background the chat is not being read: its pushes come back.
+        if conversationRefreshTask != nil {
+            conversationRefreshTask?.cancel()
+            conversationRefreshTask = nil
+            Task { try? await api.updateChatPresence(activePeerId: 0) }
+        }
     }
 
     func applicationDidBecomeActive(at date: Date = Date()) {
         AloMediaDiskCache.shared.scheduleMaintenance()
+        if phase == .app, conversationRefreshTask == nil, let conversation = activeConversation {
+            conversationRefreshTask = Task { [weak self] in
+                await self?.repeatChatPresence(for: conversation)
+            }
+        }
         if phase == .app {
             publications.resume()
             Task { await processPendingPushOpens() }
+            // A request or a message of a secret chat may have come while the app was away; the open one is marked read.
+            Task { await secretChats.refreshAll() }
         }
         defer { chatBackgroundedAt = nil }
         guard let backgroundedAt = chatBackgroundedAt,
@@ -487,7 +547,10 @@ final class AloAppModel: ObservableObject {
             scheduleBlockedUsersRefresh(ownerUserId: data.me.id)
             lastBootstrapRefreshAt = Date()
             activatePendingChatOutbox(ownerUserId: data.me.id)
-            if let e2eeWarning = api.latestE2EEWarning {
+            syncChatPins(owner: data.me.id)
+            // In cloud chats nobody needs to compare keys: the warning about changed keys belongs to end-to-end chats.
+            let policy = await refreshMessagingPolicy()
+            if let e2eeWarning = api.latestE2EEWarning, !policy.isCloudEverywhere {
                 notice = e2eeWarning
             }
             if peerId > 0, let summary = data.conversations.first(where: { $0.peerId == peerId }) {
@@ -497,6 +560,7 @@ final class AloAppModel: ObservableObject {
             }
             scheduleLocalSearchIndexBackfill(conversations: data.conversations, ownerUserId: data.me.id)
             Task { await contentTools.refreshCapabilities() }
+            Task { await secretChats.refreshAll() }
             phase = .app
             startChatRealtime(ownerUserId: data.me.id)
             AloPushCoordinator.shared.sync(api: api)
@@ -544,6 +608,9 @@ final class AloAppModel: ObservableObject {
         defer { isProcessingDeepLink = false }
         do {
             switch target {
+            case .qrLogin(let payload):
+                UserDefaults.standard.removeObject(forKey: pendingDeepLinkKey)
+                qrLoginApproval = payload
             case .invite(let token):
                 let result = try await api.joinGroupInvite(token: token)
                 try await finishCommunityDeepLink(result)
@@ -552,6 +619,11 @@ final class AloAppModel: ObservableObject {
                 try await finishCommunityDeepLink(result)
             case .post(let postId):
                 let post = try await api.loadPost(postId: postId)
+                UserDefaults.standard.removeObject(forKey: pendingDeepLinkKey)
+                activeTab = .feed
+                openComments(for: post)
+            case .postCode(let code):
+                let post = try await api.loadPost(shareCode: code)
                 UserDefaults.standard.removeObject(forKey: pendingDeepLinkKey)
                 activeTab = .feed
                 openComments(for: post)
@@ -780,6 +852,7 @@ final class AloAppModel: ObservableObject {
             clearBlockedUserState()
             bootstrap = nil
             activeConversation = nil
+            secretChats.accountChanged(to: 0)
             selectedProfile = nil
             closeComments()
             composeText = ""
@@ -795,6 +868,11 @@ final class AloAppModel: ObservableObject {
             authMode = .login
             phase = .auth
             isBusy = false
+            accountUnread = [:]
+            // As in Telegram: the next account saved on this phone opens instead of the sign-in screen.
+            if let next = storedAccounts.first {
+                await performStoredAccountSwitch(to: next)
+            }
         }
     }
 
@@ -803,6 +881,10 @@ final class AloAppModel: ObservableObject {
     /// `/logout`: logging in to a second account must not revoke the first one.
     func addAnotherAccount() {
         guard !isBusy, let user = bootstrap?.me else { return }
+        guard canAddAccount else {
+            errorMessage = "На одном устройстве можно держать до \(AloAccountSessionStore.maxAccounts) аккаунтов. Выйдите из одного, чтобы добавить новый."
+            return
+        }
         do {
             try AloAccountSessionStore.shared.save(user: user, cookies: api.sessionCookies())
             refreshStoredAccounts()
@@ -811,6 +893,57 @@ final class AloAppModel: ObservableObject {
             return
         }
         moveToAccountLogin()
+    }
+
+    /// The other accounts saved on this phone, newest first (the current one is the profile itself).
+    var otherStoredAccounts: [AloStoredAccount] {
+        storedAccounts.filter { $0.userId != bootstrap?.me.id }
+    }
+
+    var canAddAccount: Bool {
+        otherStoredAccounts.count + 1 < AloAccountSessionStore.maxAccounts
+    }
+
+    var otherAccountsUnread: Int {
+        otherStoredAccounts.reduce(0) { $0 + (accountUnread[$1.userId] ?? 0) }
+    }
+
+    /// Asks the server, with each saved session, how many messages wait in the other accounts.
+    func refreshAccountSummaries() {
+        guard let me = bootstrap?.me.id else { return }
+        let others = otherStoredAccounts
+        guard !others.isEmpty else {
+            accountUnread = [:]
+            return
+        }
+        accountSummaryTask?.cancel()
+        accountSummaryTask = Task { [weak self] in
+            guard let self else { return }
+            var unread: [Int: Int] = [:]
+            var ended: [Int] = []
+            for account in others {
+                guard let cookies = try? AloAccountSessionStore.shared.cookies(for: account) else {
+                    ended.append(account.userId)
+                    continue
+                }
+                do {
+                    if let summary = try await self.api.accountSummary(cookies: cookies) {
+                        unread[account.userId] = summary.unreadMessages
+                    } else {
+                        // That session is over (signed out elsewhere, expired): it leaves the switcher.
+                        ended.append(account.userId)
+                    }
+                } catch {
+                    continue // offline: keep the account, try again later
+                }
+            }
+            guard !Task.isCancelled, self.bootstrap?.me.id == me else { return }
+            if !ended.isEmpty {
+                ended.forEach { AloAccountSessionStore.shared.remove(userId: $0) }
+                self.storedAccounts = AloAccountSessionStore.shared.accounts
+            }
+            self.accountUnread = unread
+        }
     }
 
     func switchToStoredAccount(_ account: AloStoredAccount) {
@@ -1034,6 +1167,7 @@ final class AloAppModel: ObservableObject {
 
     private func refreshStoredAccounts() {
         storedAccounts = AloAccountSessionStore.shared.accounts
+        refreshAccountSummaries()
     }
 
     private func accountSecurityMessage(for error: AloAPIError) -> String {
@@ -1509,6 +1643,7 @@ final class AloAppModel: ObservableObject {
 
     private func visiblePost(id: Int) -> AloPost? {
         if let post = commentsPost, post.id == id { return post }
+        if let post = feedTopPosts.first(where: { $0.id == id }) { return post }
         return bootstrap?.feedPopular.first { $0.id == id }
             ?? bootstrap?.feedSubscriptions.first { $0.id == id }
             ?? bootstrap?.profilePosts.first { $0.id == id }
@@ -1883,6 +2018,23 @@ final class AloAppModel: ObservableObject {
         try await api.saveAdCampaign(id: id, fields: fields)
     }
 
+    func loadFeedTop(force: Bool = false) async {
+        guard force || !feedTopLoaded else { return }
+#if DEBUG
+        if UserDefaults.standard.bool(forKey: "ALO_UI_MESSENGER_PREVIEW") {
+            feedTopPosts = (bootstrap?.feedPopular ?? []).sorted { $0.likeCount > $1.likeCount }
+            feedTopLoaded = true
+            return
+        }
+#endif
+        do {
+            feedTopPosts = try await api.loadTopPosts().items
+            feedTopLoaded = true
+        } catch {
+            if feedTopPosts.isEmpty { notice = "Не удалось загрузить «Популярное»." }
+        }
+    }
+
     func loadFeedAds() async {
 #if DEBUG
         if UserDefaults.standard.bool(forKey: "ALO_UI_MESSENGER_PREVIEW") {
@@ -2033,10 +2185,68 @@ final class AloAppModel: ObservableObject {
         return try await api.mentionSuggestions(query: query)
     }
 
-    // MARK: Pinned and archived chats (on this device)
+    // MARK: Pinned chats (kept by the server for the account) and archived chats (on this device)
 
     let chatPrefs = AloChatListPrefs()
     @Published private(set) var chatPrefsRevision = 0
+    private var chatPinsUploadTask: Task<Void, Never>?
+
+    private var chatPinsOffline: Bool {
+#if DEBUG
+        return UserDefaults.standard.bool(forKey: "ALO_UI_MESSENGER_PREVIEW")
+#else
+        return false
+#endif
+    }
+
+    private func applyChatPins(owner: Int, pinned: [String]) {
+        guard owner > 0, bootstrap?.me.id == owner, chatPrefs.state(owner: owner).pinned != pinned else { return }
+        chatPrefs.replacePinned(owner: owner, pinned: pinned)
+        chatPrefsRevision += 1
+    }
+
+    /// At start and after a gap in the updates. The first time, pins this device kept by itself join the account's list.
+    func syncChatPins(owner: Int) {
+        guard owner > 0, !chatPinsOffline else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let pinned: [String]
+                if !self.chatPrefs.pinsImported(owner: owner) {
+                    let local = self.chatPrefs.state(owner: owner).pinned
+                    pinned = local.isEmpty ? try await self.api.chatPins() : try await self.api.importChatPins(local)
+                    self.chatPrefs.markPinsImported(owner: owner)
+                } else {
+                    pinned = try await self.api.chatPins()
+                }
+                if self.chatPinsUploadTask == nil { self.applyChatPins(owner: owner, pinned: pinned) }
+            } catch {
+                // Offline: the device's copy is what shows.
+            }
+        }
+    }
+
+    /// Sends this device's list after a pin, an unpin or a deleted chat; a refusal brings back the account's list.
+    private func uploadChatPins(owner: Int) {
+        guard !chatPinsOffline else { return }
+        chatPinsUploadTask?.cancel()
+        let keys = chatPrefs.state(owner: owner).pinned
+        chatPinsUploadTask = Task { [weak self] in
+            guard let self else { return }
+            var saved: [String]?
+            do {
+                saved = try await self.api.saveChatPins(keys)
+            } catch let error as AloAPIError {
+                self.notice = error.message
+                saved = try? await self.api.chatPins()
+            } catch {
+                saved = nil
+            }
+            guard !Task.isCancelled else { return }
+            self.chatPinsUploadTask = nil
+            if let saved { self.applyChatPins(owner: owner, pinned: saved) }
+        }
+    }
 
     func isChatPinned(_ conversation: AloConversationSummary) -> Bool {
         guard let owner = bootstrap?.me.id else { return false }
@@ -2058,7 +2268,8 @@ final class AloAppModel: ObservableObject {
         let visible = all.filter { !state.archived.contains(AloChatListPrefs.key(for: $0)) }
         let pinned = state.pinned.compactMap { key in visible.first { AloChatListPrefs.key(for: $0) == key } }
         let pinnedKeys = Set(pinned.map(AloChatListPrefs.key(for:)))
-        return pinned + visible.filter { !pinnedKeys.contains(AloChatListPrefs.key(for: $0)) }
+        let arranged = pinned + visible.filter { !pinnedKeys.contains(AloChatListPrefs.key(for: $0)) }
+        return secretChats.rows(merging: arranged, isPinned: { pinnedKeys.contains(AloChatListPrefs.key(for: $0)) })
     }
 
     func setChatsPinned(_ conversations: [AloConversationSummary], pinned: Bool) {
@@ -2066,6 +2277,7 @@ final class AloAppModel: ObservableObject {
         let ok = chatPrefs.setPinned(owner: owner, keys: conversations.map(AloChatListPrefs.key(for:)), pinned: pinned)
         if !ok { notice = "Можно закрепить не больше \(AloChatListPrefs.maximumPinned) чатов." }
         chatPrefsRevision += 1
+        if ok { uploadChatPins(owner: owner) }
         AloHaptics.impact(.light)
     }
 
@@ -2090,7 +2302,8 @@ final class AloAppModel: ObservableObject {
 #endif
         Task {
             do {
-                let detail = try await api.loadConversation(peerId: conversation.peerId)
+                // Muting from the list does not open the chat, so it must not read it either.
+                let detail = try await api.loadConversation(peerId: conversation.peerId, markRead: false)
                 let muted = try await api.chatMuteState(conversation: detail)
                 let now = try await api.setChatMuted(!muted, conversation: detail)
                 notice = now ? "Уведомления чата выключены." : "Уведомления чата включены."
@@ -2132,8 +2345,10 @@ final class AloAppModel: ObservableObject {
         guard !targets.isEmpty else { return }
         let removed = Set(targets.map(AloChatListPrefs.key(for:)))
         bootstrap = replacingConversations(in: data, with: data.conversations.filter { !removed.contains(AloChatListPrefs.key(for: $0)) })
+        let wasPinned = chatPrefs.state(owner: data.me.id).pinned.contains { removed.contains($0) }
         chatPrefs.setPinned(owner: data.me.id, keys: Array(removed), pinned: false)
         chatPrefs.setArchived(owner: data.me.id, keys: Array(removed), archived: false)
+        if wasPinned { uploadChatPins(owner: data.me.id) }
         chatPrefsRevision += 1
         notice = targets.count == 1 ? "Чат удалён." : "Чаты удалены."
 #if DEBUG
@@ -2226,7 +2441,91 @@ final class AloAppModel: ObservableObject {
     }
 
     func closeConversation() {
+        if let thread = commentsThread, let open = activeConversation, open.roomId == thread.roomId {
+            // Leaving a post's comments: mark them read (the dot under the post goes away) and go back to the channel.
+            let latest = open.items.filter { $0.topicId == thread.topicId && $0.id > 0 }.map(\.id).max() ?? 0
+            if latest > 0 {
+                Task { _ = try? await api.updateGroupTopicState(roomId: thread.roomId, topicId: thread.topicId, readThroughMessageId: latest) }
+            }
+            commentsThread = nil
+            if let back = commentsReturnConversation {
+                commentsReturnConversation = nil
+                AloChatMediaSession.reset()
+                stopConversationLive()
+                activeConversation = back
+                startConversationLive(back)
+                Task {
+                    guard let fresh = try? await api.loadConversation(peerId: back.peerId, markRead: false),
+                          activeConversation?.peerId == back.peerId else { return }
+                    activeConversation = mergePendingLocalMessages(into: fresh)
+                }
+                return
+            }
+        }
+        commentsThread = nil
+        commentsReturnConversation = nil
         dismissConversation(markRead: true)
+    }
+
+    /// «Подписаться» under a channel opened before subscribing (Telegram's preview).
+    func joinPreviewedChannel() {
+        guard let conversation = activeConversation, !conversation.isMember, conversation.feedChannelId > 0 else { return }
+        Task {
+            do {
+                _ = try await api.toggleChannelSubscription(channelId: conversation.feedChannelId)
+                let fresh = try await api.loadConversation(peerId: conversation.peerId)
+                if activeConversation?.peerId == conversation.peerId {
+                    activeConversation = mergePendingLocalMessages(into: fresh)
+                    startConversationLive(fresh)
+                }
+                notice = "Вы подписались на канал."
+                await loadBootstrap()
+            } catch let error as AloAPIError {
+                errorMessage = error.message
+            } catch {
+                errorMessage = "Не удалось подписаться."
+            }
+        }
+    }
+
+    /// A channel's chat from its page, also before subscribing (read-only, «Подписаться» at the bottom).
+    func openChannelChat(_ channel: AloChannelProfile) {
+        if let summary = channelConversation(channel) {
+            selectedChannelProfile = nil
+            openConversation(summary)
+            return
+        }
+        guard let roomId = channel.messengerRoomId, roomId > 0 else { return }
+        Task {
+            do {
+                let detail = try await api.loadConversation(peerId: 1_000_000_000 + roomId, markRead: false)
+                // The channel's page is drawn over the tabs: it has to go, or the chat opens unseen under it.
+                selectedChannelProfile = nil
+                activeTab = .messages
+                activeConversation = detail
+            } catch let error as AloAPIError {
+                errorMessage = error.message
+            } catch {
+                errorMessage = "Не удалось открыть канал."
+            }
+        }
+    }
+
+    /// Someone commented under a channel post: «N комментариев», the avatars and the dot change at once (Telegram).
+    private func applyChannelPostComments(_ data: [String: Any]) {
+        let peerId = data.int("peerId")
+        let postId = data.int("postId")
+        guard peerId > 0, postId > 0 else { return }
+        func updated(_ conversation: AloConversationDetail?) -> AloConversationDetail? {
+            guard let conversation, conversation.peerId == peerId,
+                  var item = conversation.items.first(where: { $0.channelPostId == postId }) else { return nil }
+            item.channelPostCommentCount = max(0, data.int("commentCount"))
+            item.channelPostRecentCommenters = Array(data.array("recentCommenters").map(AloConversationPeer.init).prefix(3))
+            item.channelPostHasUnreadComments = data.bool("hasUnread")
+            return conversation.replacingMessage(item)
+        }
+        if let next = updated(activeConversation) { activeConversation = next }
+        if let next = updated(commentsReturnConversation) { commentsReturnConversation = next }
     }
 
     private func dismissConversation(markRead: Bool) {
@@ -2453,6 +2752,8 @@ final class AloAppModel: ObservableObject {
                 }
                 guard blockedUserStateOwnerUserId == ownerUserId,
                       bootstrap?.me.id == ownerUserId else {
+                    // Never leave the person marked «in flight»: that disabled «Разблокировать» until a restart.
+                    blockingUserIds.remove(userId)
                     return
                 }
                 blockingUserIds.remove(userId)
@@ -2466,6 +2767,8 @@ final class AloAppModel: ObservableObject {
             } catch let error as AloAPIError {
                 guard blockedUserStateOwnerUserId == ownerUserId,
                       bootstrap?.me.id == ownerUserId else {
+                    // Never leave the person marked «in flight»: that disabled «Разблокировать» until a restart.
+                    blockingUserIds.remove(userId)
                     return
                 }
                 blockingUserIds.remove(userId)
@@ -2474,6 +2777,8 @@ final class AloAppModel: ObservableObject {
             } catch {
                 guard blockedUserStateOwnerUserId == ownerUserId,
                       bootstrap?.me.id == ownerUserId else {
+                    // Never leave the person marked «in flight»: that disabled «Разблокировать» until a restart.
+                    blockingUserIds.remove(userId)
                     return
                 }
                 blockingUserIds.remove(userId)
@@ -2522,6 +2827,18 @@ final class AloAppModel: ObservableObject {
                 // Keep the locally opened conversation visible while connection is unavailable.
             }
         }
+    }
+
+    /// Asks the server (at most every few minutes) which chats are cloud chats.
+    @discardableResult func refreshMessagingPolicy() async -> AloMessagingPolicy {
+        let policy = await api.messagingPolicy()
+        if policy != messagingPolicy { messagingPolicy = policy }
+        return policy
+    }
+
+    /// A chat whose messages are plain on the server: nothing about keys of other devices applies to it.
+    func usesCloudMessages(_ conversation: AloConversationDetail) -> Bool {
+        messagingPolicy.allowsCloud(kind: conversation.kind, roomId: conversation.roomId)
     }
 
     @discardableResult func sendMessage(
@@ -2578,8 +2895,9 @@ final class AloAppModel: ObservableObject {
             defer { if accountGeneration == generation { isBusy = false } }
             do {
                 var uploadedAttachments = [AloMessageAttachment]()
+                let cloud = await api.usesCloudMessages(kind: conversation.kind, roomId: conversation.roomId)
                 for attachment in localAttachments {
-                    uploadedAttachments.append(try await api.uploadE2EEAttachment(attachment))
+                    uploadedAttachments.append(try await api.uploadMessageAttachment(attachment, cloud: cloud))
                     guard accountGeneration == generation, bootstrap?.me.id == owner else { return }
                 }
                 try await api.sendMessage(
@@ -2890,6 +3208,32 @@ final class AloAppModel: ObservableObject {
         }
     }
 
+    /// A vote in a cloud chat goes to the server only (`PUT /api/polls/:id/vote`), in an anonymous poll too: the server
+    /// counts the votes and never shows the others who voted how. No vote event is sent as a chat message.
+    func voteInPoll(_ definition: AloPollDefinition, optionIds: Set<String>) {
+        guard let conversation = activeConversation, !isDirectPeerBlocked(conversation) else { return }
+        let target = pendingTarget(for: conversation)
+        let previous = conversation.canonicalPolls[definition.id]
+        func store(_ state: AloCanonicalPollState?) {
+            guard let current = activeConversation, pendingTarget(for: current) == target else { return }
+            var polls = current.canonicalPolls
+            polls[definition.id] = state
+            activeConversation = current.replacingCanonicalPolls(polls)
+        }
+        if let previous { store(previous.voting(optionIds)) }
+        Task {
+            do {
+                store(try await api.votePoll(pollId: definition.id, optionIds: optionIds))
+            } catch let error as AloAPIError {
+                store(previous)
+                errorMessage = error.message
+            } catch {
+                store(previous)
+                errorMessage = "Не удалось отправить голос."
+            }
+        }
+    }
+
     func sendPoll(
         _ definition: AloPollDefinition,
         topicId: Int = 0,
@@ -3003,7 +3347,7 @@ final class AloAppModel: ObservableObject {
 #endif
         stopConversationLive(sendPresenceLeave: false)
         conversationRefreshTask = Task { [weak self] in
-            await self?.sendChatPresence(for: conversation)
+            await self?.repeatChatPresence(for: conversation)
         }
         if let ownerUserId = bootstrap?.me.id {
             startChatRealtime(ownerUserId: ownerUserId)
@@ -3193,9 +3537,18 @@ final class AloAppModel: ObservableObject {
         Task { try? await api.sendTyping(conversation: conversation, action: action) }
     }
 
-    private func sendChatPresence(for conversation: AloConversationDetail) async {
-        let activePeerId = conversation.kind == "direct" ? conversation.peerId : 0
-        try? await api.updateChatPresence(activePeerId: activePeerId)
+    /// The chat on screen, told to the server: a message to it sends no push to any device (as in Telegram), and a
+    /// private chat shows «в чате» to the other side. A group counts too (only its pushes are silenced). Repeated
+    /// every 25 s while the chat stays open (the server forgets it after a minute); the background clears it.
+    private func repeatChatPresence(for conversation: AloConversationDetail) async {
+        // A group is named as the server names it in chat lists: 1_000_000_000 + its room id.
+        let activePeerId = conversation.kind == "group" && conversation.roomId > 0
+            ? 1_000_000_000 + conversation.roomId
+            : conversation.peerId
+        while !Task.isCancelled {
+            try? await api.updateChatPresence(activePeerId: activePeerId)
+            try? await Task.sleep(for: .seconds(25))
+        }
     }
 
     private func refreshActiveConversation(peerId: Int, roomId: Int, kind: String) async {
@@ -3375,6 +3728,10 @@ final class AloAppModel: ObservableObject {
                 handleSettingsUpdate(event.payload, ownerUserId: ownerUserId)
             } else if domain == "notifications" {
                 handleNotificationUpdate(event.payload, ownerUserId: ownerUserId)
+            } else if domain == "secret_chats" {
+                let type = event.payload.string("type")
+                let secretChatId = event.payload.object("data").int("secretChatId")
+                Task { await secretChats.handleUpdate(type: type, secretChatId: secretChatId) }
             } else if ["channels", "feed", "groups", "users"].contains(domain) {
                 handleResourceUpdate(
                     event.payload,
@@ -3392,6 +3749,14 @@ final class AloAppModel: ObservableObject {
     private func handleSettingsUpdate(_ payload: [String: Any], ownerUserId: Int) {
         let type = payload.string("type")
         if type == "chat_mute_changed" {
+            return
+        }
+        if type == "chat_pins_updated" {
+            if let pinned = AloChatListPrefs.pins(from: payload.object("data")), chatPinsUploadTask == nil {
+                applyChatPins(owner: ownerUserId, pinned: pinned)
+            } else {
+                syncChatPins(owner: ownerUserId)
+            }
             return
         }
         guard type == "notification_settings_changed" else {
@@ -3484,6 +3849,10 @@ final class AloAppModel: ObservableObject {
         domain: String,
         ownerUserId: Int
     ) {
+        if payload.string("type") == "channel_post_comments" {
+            applyChannelPostComments(payload.object("data"))
+            return
+        }
         if domain == "users" {
             scheduleBlockedUsersRefresh(ownerUserId: ownerUserId, after: 250_000_000)
         }
@@ -3831,6 +4200,7 @@ final class AloAppModel: ObservableObject {
     }
 
     private func patchVisiblePost(_ post: AloPost, prepend: Bool) {
+        feedTopPosts = feedTopPosts.map { $0.id == post.id ? post : $0 }
         if let profile = selectedProfile {
             if prepend && profile.id == post.creatorId {
                 selectedProfile = AloUserProfilePatch.prepend(post, to: profile)
@@ -3871,6 +4241,7 @@ final class AloAppModel: ObservableObject {
                 self.scheduleBlockedUsersRefresh(ownerUserId: ownerUserId)
                 self.lastBootstrapRefreshAt = Date()
                 self.activatePendingChatOutbox(ownerUserId: ownerUserId)
+                self.syncChatPins(owner: ownerUserId)
             } catch {
                 // The existing cached state stays usable until the stream reconnects.
             }
@@ -4147,11 +4518,79 @@ final class AloAppModel: ObservableObject {
                 await loadBootstrap()
                 if selectedProfile?.id == userId {
                     selectedProfile = try? await api.loadUserProfile(userId: userId)
+                    // A follow back makes friends on the server.
+                    if following, selectedProfile?.relation.friendStatus == "friends" {
+                        notice = "Вы подписались друг на друга — теперь вы друзья."
+                    }
                 }
             } catch let error as AloAPIError {
                 errorMessage = error.message
             } catch {
                 errorMessage = "Не удалось изменить подписку."
+            }
+        }
+    }
+
+    /// The website's «Подписаться» / «Вы подписаны» on a channel page.
+    func toggleChannelSubscription() {
+        guard let channel = selectedChannelProfile else { return }
+#if DEBUG
+        if UserDefaults.standard.bool(forKey: "ALO_UI_MESSENGER_PREVIEW") {
+            selectedChannelProfile = AloChannelProfilePatch.subscribers(
+                channel.subscribersCount + (channel.subscribed ? -1 : 1), subscribed: !channel.subscribed, in: channel)
+            return
+        }
+#endif
+        Task {
+            do {
+                let result = try await api.toggleChannelSubscription(channelId: channel.id)
+                if let current = selectedChannelProfile, current.id == channel.id {
+                    selectedChannelProfile = AloChannelProfilePatch.subscribers(
+                        result.subscribersCount, subscribed: result.subscribed, in: current)
+                }
+                notice = result.subscribed ? "Вы подписались на сообщество." : "Подписка отменена."
+                await loadBootstrap()
+            } catch let error as AloAPIError {
+                errorMessage = error.message
+            } catch {
+                errorMessage = "Не удалось изменить подписку."
+            }
+        }
+    }
+
+    /// The channel's chat from its page (the website's «Чат»), when the chat list already has it.
+    func channelConversation(_ channel: AloChannelProfile) -> AloConversationSummary? {
+        guard let roomId = channel.messengerRoomId else { return nil }
+        return bootstrap?.conversations.first { $0.roomId == roomId }
+    }
+
+    func cancelFriendRequest(requestId: Int, userId: Int) {
+        guard requestId > 0 else { return }
+        Task {
+            do {
+                try await api.cancelFriendRequest(requestId: requestId)
+                notice = "Заявка отменена."
+                await loadBootstrap()
+                if selectedProfile?.id == userId { selectedProfile = try? await api.loadUserProfile(userId: userId) }
+            } catch let error as AloAPIError {
+                errorMessage = error.message
+            } catch {
+                errorMessage = "Не удалось отменить заявку."
+            }
+        }
+    }
+
+    func removeFriend(userId: Int) {
+        Task {
+            do {
+                try await api.removeFriend(userId: userId)
+                notice = "Удалено из друзей."
+                await loadBootstrap()
+                if selectedProfile?.id == userId { selectedProfile = try? await api.loadUserProfile(userId: userId) }
+            } catch let error as AloAPIError {
+                errorMessage = error.message
+            } catch {
+                errorMessage = "Не удалось удалить из друзей."
             }
         }
     }
@@ -4299,6 +4738,26 @@ final class AloAppModel: ObservableObject {
                 errorMessage = error.message
             } catch {
                 errorMessage = "Не удалось обновить заявку."
+            }
+        }
+    }
+
+    /// The reaction a double tap sends: shown at once, kept on the server for every device, put back if it is refused.
+    func setFavoriteReaction(_ emoji: String) {
+        guard let data = bootstrap, emoji != data.me.favoriteReaction else { return }
+        let previous = data.me.favoriteReaction
+        bootstrap = AloBootstrapDataPatch.replaceMe(data.me.withFavoriteReaction(emoji), in: data)
+        Task {
+            do {
+                let saved = try await api.setFavoriteReaction(emoji)
+                if let current = bootstrap {
+                    bootstrap = AloBootstrapDataPatch.replaceMe(current.me.withFavoriteReaction(saved), in: current)
+                }
+            } catch {
+                if let current = bootstrap {
+                    bootstrap = AloBootstrapDataPatch.replaceMe(current.me.withFavoriteReaction(previous), in: current)
+                }
+                errorMessage = (error as? AloAPIError)?.message ?? "Не удалось сохранить любимую реакцию."
             }
         }
     }
@@ -4509,6 +4968,23 @@ final class AloAppModel: ObservableObject {
             let discussion = try await api.openPostDiscussion(postId: post.id)
             let detail = try await api.loadConversation(peerId: discussion.peerId)
             closeComments()
+            if let current = activeConversation, current.roomId != discussion.roomId {
+                // Back from the comments goes to the channel; its row under the post loses the dot at once.
+                commentsReturnConversation = current.items
+                    .first(where: { $0.channelPostId == post.id })
+                    .map { item in
+                        var seen = item
+                        seen.channelPostHasUnreadComments = false
+                        return current.replacingMessage(seen)
+                    } ?? current
+            }
+            commentsThread = AloCommentsThread(
+                roomId: discussion.roomId,
+                topicId: discussion.topicId,
+                postId: post.id,
+                post: discussion.post ?? post,
+                count: discussion.commentCount
+            )
             requestedForumTopicRoomId = discussion.roomId
             requestedForumTopicId = discussion.topicId
             activeTab = .messages
@@ -4745,6 +5221,7 @@ final class AloAppModel: ObservableObject {
     }
 
     private func removePost(id postId: Int) {
+        feedTopPosts.removeAll { $0.id == postId }
         if let data = bootstrap {
             bootstrap = AloBootstrapDataPatch.remove(postId, from: data)
         }
@@ -4818,6 +5295,8 @@ final class AloAppModel: ObservableObject {
     private func shouldKeepPending(_ error: AloAPIError) -> Bool {
         if shouldQueueForConnectivity(error) { return true }
         return [
+            // The operator turned end-to-end messages on again: the next try asks for the flags and encrypts.
+            "e2ee_required",
             "E2EE_KEYS_MISSING",
             "E2EE_REQUESTER_DEVICE_NOT_REGISTERED",
             "LIBSIGNAL_KEYS_MISSING",
@@ -4850,7 +5329,8 @@ final class AloAppModel: ObservableObject {
         )
         let reactionItems = AloPendingChatProjection.applyingDesiredReactions(
             to: editedItems,
-            desiredEmojiByMessageId: pendingDesiredReactions(for: target)
+            desiredEmojiByMessageId: pendingDesiredReactions(for: target),
+            me: reactionVoterSelf
         )
         let projected = refreshed.replacingItems(reactionItems)
         let pending = pendingLocalMessages(for: target)
@@ -5299,11 +5779,19 @@ final class AloAppModel: ObservableObject {
         }
     }
 
+    /// The local user as one of the people on a reaction chip (see AloPendingChatProjection).
+    private var reactionVoterSelf: AloConversationPeer? {
+        guard let me = bootstrap?.me else { return nil }
+        return AloConversationPeer(id: me.id, name: me.name, username: me.username, avatarUrl: me.avatarUrl,
+                                   verified: me.verified, online: true, lastSeenAt: "", isTyping: false, entityType: "user")
+    }
+
     private func applyOptimisticReaction(messageId: Int, desiredEmoji: String) {
         guard let activeConversation else { return }
         let projectedItems = AloPendingChatProjection.applyingDesiredReactions(
             to: activeConversation.items,
-            desiredEmojiByMessageId: [messageId: desiredEmoji]
+            desiredEmojiByMessageId: [messageId: desiredEmoji],
+            me: reactionVoterSelf
         )
         self.activeConversation = activeConversation.replacingItems(projectedItems)
     }
@@ -5362,8 +5850,13 @@ final class AloAppModel: ObservableObject {
                     scheduledAt,
                     sendWhenOnline
                 ):
+                    // A cloud chat: the text goes to the server as it is (with its formatting beside it), nothing to encrypt.
+                    var cloud = encryptedPayload == nil
+                    if cloud { cloud = await api.usesCloudMessages(kind: target.kind, roomId: target.roomId) }
                     let preparedPayload: [String: Any]
-                    if let encryptedPayload, !isSavedTarget(target) {
+                    if cloud {
+                        preparedPayload = [:]
+                    } else if let encryptedPayload, !isSavedTarget(target) {
                         preparedPayload = encryptedPayload
                     } else {
                         preparedPayload = try await api.prepareEncryptedMessagePayload(
@@ -5401,20 +5894,38 @@ final class AloAppModel: ObservableObject {
                     try await pendingOutboxWrite?.value
                     guard ownerUserId == pendingChatOperationsOwnerUserId, !Task.isCancelled else { return }
                     let mentioned = await mentionedMemberIds(in: body, target: target)
-                    let acknowledgement = try await api.sendPreparedMessage(
-                        peerId: target.peerId,
-                        roomId: target.roomId,
-                        kind: target.kind,
-                        encryptedPayload: preparedPayload,
-                        replyToMessageId: replyToMessageId,
-                        topicId: topicId,
-                        silent: silent,
-                        scheduledAt: scheduledAt,
-                        sendWhenOnline: sendWhenOnline,
-                        scheduledPoll: scheduledPollDefinition,
-                        clientMessageId: clientMessageId,
-                        mentionedUserIds: mentioned
-                    )
+                    let acknowledgement: AloMessageSendAcknowledgement
+                    if cloud {
+                        acknowledgement = try await api.sendCloudMessage(AloCloudSendRequest(
+                            peerId: target.peerId,
+                            roomId: target.roomId,
+                            kind: target.kind,
+                            body: body,
+                            replyToMessageId: replyToMessageId,
+                            topicId: topicId,
+                            silent: silent,
+                            scheduledAt: scheduledAt,
+                            sendWhenOnline: sendWhenOnline,
+                            scheduledPoll: scheduledPollDefinition.map { api.pollRegistrationPayload($0) },
+                            clientMessageId: clientMessageId,
+                            mentionedUserIds: mentioned
+                        ))
+                    } else {
+                        acknowledgement = try await api.sendPreparedMessage(
+                            peerId: target.peerId,
+                            roomId: target.roomId,
+                            kind: target.kind,
+                            encryptedPayload: preparedPayload,
+                            replyToMessageId: replyToMessageId,
+                            topicId: topicId,
+                            silent: silent,
+                            scheduledAt: scheduledAt,
+                            sendWhenOnline: sendWhenOnline,
+                            scheduledPoll: scheduledPollDefinition,
+                            clientMessageId: clientMessageId,
+                            mentionedUserIds: mentioned
+                        )
+                    }
                     guard ownerUserId == pendingChatOperationsOwnerUserId,
                           pendingChatOperations.first?.outgoingLocalId == localId else { return }
                     switch AloPollCodec.decode(body) {
@@ -5466,6 +5977,10 @@ final class AloAppModel: ObservableObject {
                     sendWhenOnline
                 ):
                     var uploadedAttachments = existingUploadedAttachments
+                    // Cloud chat: files go up as they are. A file already uploaded as ciphertext keeps the message encrypted.
+                    var cloud = encryptedPayload == nil && existingUploadedAttachments.allSatisfy { $0.mediaEncryption.isEmpty }
+                    if cloud { cloud = await api.usesCloudMessages(kind: target.kind, roomId: target.roomId) }
+                    let uploadsPlain = cloud
                     if uploadedAttachments.count < attachments.count {
                         for index in uploadedAttachments.count..<attachments.count {
                             let attachmentId = "\(clientMessageId)-\(index)"
@@ -5483,8 +5998,9 @@ final class AloAppModel: ObservableObject {
                                     sent: checkpoint.offset, total: checkpoint.total, index: index, count: count)
                             }
                             let uploadTask = Task { [api] in
-                                try await api.uploadE2EEAttachment(
+                                try await api.uploadMessageAttachment(
                                     attachment,
+                                    cloud: uploadsPlain,
                                     resumeCheckpoint: checkpoint,
                                     onCheckpoint: { checkpoint in
                                         Task { @MainActor [weak self] in
@@ -5537,7 +6053,9 @@ final class AloAppModel: ObservableObject {
                         }
                     }
                     let preparedPayload: [String: Any]
-                    if let encryptedPayload, !isSavedTarget(target) {
+                    if cloud {
+                        preparedPayload = [:]
+                    } else if let encryptedPayload, !isSavedTarget(target) {
                         preparedPayload = encryptedPayload
                     } else {
                         preparedPayload = try await api.prepareEncryptedMessagePayload(
@@ -5571,21 +6089,43 @@ final class AloAppModel: ObservableObject {
                     try await pendingOutboxWrite?.value
                     guard ownerUserId == pendingChatOperationsOwnerUserId, !Task.isCancelled else { return }
                     let mentioned = await mentionedMemberIds(in: body, target: target)
-                    let acknowledgement = try await api.sendPreparedMessage(
-                        peerId: target.peerId,
-                        roomId: target.roomId,
-                        kind: target.kind,
-                        encryptedPayload: preparedPayload,
-                        attachments: uploadedAttachments,
-                        forwardFrom: forwardFrom,
-                        replyToMessageId: replyToMessageId,
-                        topicId: topicId,
-                        silent: silent,
-                        scheduledAt: scheduledAt,
-                        sendWhenOnline: sendWhenOnline,
-                        clientMessageId: clientMessageId,
-                        mentionedUserIds: mentioned
-                    )
+                    let acknowledgement: AloMessageSendAcknowledgement
+                    if cloud {
+                        // A forward is sent again from the copy this device holds, so it works for an old encrypted message too.
+                        let parts = try await cloudForwardParts(body: body, uploaded: uploadedAttachments, forwardFrom: forwardFrom)
+                        guard ownerUserId == pendingChatOperationsOwnerUserId, !Task.isCancelled else { return }
+                        acknowledgement = try await api.sendCloudMessage(AloCloudSendRequest(
+                            peerId: target.peerId,
+                            roomId: target.roomId,
+                            kind: target.kind,
+                            body: parts.body,
+                            attachments: parts.attachments,
+                            forwardFrom: forwardFrom,
+                            replyToMessageId: replyToMessageId,
+                            topicId: topicId,
+                            silent: silent,
+                            scheduledAt: scheduledAt,
+                            sendWhenOnline: sendWhenOnline,
+                            clientMessageId: clientMessageId,
+                            mentionedUserIds: mentioned
+                        ))
+                    } else {
+                        acknowledgement = try await api.sendPreparedMessage(
+                            peerId: target.peerId,
+                            roomId: target.roomId,
+                            kind: target.kind,
+                            encryptedPayload: preparedPayload,
+                            attachments: uploadedAttachments,
+                            forwardFrom: forwardFrom,
+                            replyToMessageId: replyToMessageId,
+                            topicId: topicId,
+                            silent: silent,
+                            scheduledAt: scheduledAt,
+                            sendWhenOnline: sendWhenOnline,
+                            clientMessageId: clientMessageId,
+                            mentionedUserIds: mentioned
+                        )
+                    }
                     guard ownerUserId == pendingChatOperationsOwnerUserId,
                           pendingChatOperations.first?.outgoingLocalId == localId else { return }
                     pendingChatOperations.removeFirst()
@@ -5633,8 +6173,14 @@ final class AloAppModel: ObservableObject {
                     encryptedPayload,
                     operationId
                 ):
+                    // An old end-to-end message can only be edited end-to-end; anything else is edited as plain text.
+                    let editsEncryptedMessage = conversation(for: target).items.first { $0.id == messageId }?.isEncrypted ?? false
+                    var cloud = encryptedPayload == nil && !editsEncryptedMessage
+                    if cloud { cloud = await api.usesCloudMessages(kind: target.kind, roomId: target.roomId) }
                     let preparedPayload: [String: Any]
-                    if let encryptedPayload {
+                    if cloud {
+                        preparedPayload = [:]
+                    } else if let encryptedPayload {
                         preparedPayload = encryptedPayload
                     } else {
                         preparedPayload = try await api.prepareEncryptedMessagePayload(
@@ -5657,13 +6203,23 @@ final class AloAppModel: ObservableObject {
                         )
                         persistPendingChatOperations()
                     }
-                    let result = try await api.sendPreparedMessageEdit(
-                        conversation: conversation(for: target),
-                        messageId: messageId,
-                        body: body,
-                        encryptedPayload: preparedPayload,
-                        operationId: operationId
-                    )
+                    let result: (body: String, editedAt: String)
+                    if cloud {
+                        result = try await api.sendCloudMessageEdit(
+                            conversation: conversation(for: target),
+                            messageId: messageId,
+                            body: body,
+                            operationId: operationId
+                        )
+                    } else {
+                        result = try await api.sendPreparedMessageEdit(
+                            conversation: conversation(for: target),
+                            messageId: messageId,
+                            body: body,
+                            encryptedPayload: preparedPayload,
+                            operationId: operationId
+                        )
+                    }
                     pendingChatOperations.removeFirst()
                     persistPendingChatOperations()
                     settlePendingMessageIndicator(for: target, messageId: messageId)
@@ -5830,6 +6386,27 @@ final class AloAppModel: ObservableObject {
         return members
     }
 
+    /// The text and files of a cloud message that forwards another one. The typed text comes first, the forwarded
+    /// text after it; files of an old encrypted message are uploaded again as plain files (the server only holds ciphertext).
+    private func cloudForwardParts(
+        body: String,
+        uploaded: [AloMessageAttachment],
+        forwardFrom: AloForwardMeta?
+    ) async throws -> (body: String, attachments: [AloMessageAttachment]) {
+        guard let content = forwardFrom?.content else { return (body, uploaded) }
+        let typed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        let combined = typed.isEmpty ? content.body : (content.body.isEmpty ? typed : typed + "\n\n" + content.body)
+        var attachments = uploaded
+        for attachment in content.attachments where attachments.count < 10 {
+            if attachment.mediaEncryption.isEmpty {
+                attachments.append(attachment)
+            } else {
+                attachments.append(try await api.reuploadDecryptedAttachment(attachment))
+            }
+        }
+        return (combined, attachments)
+    }
+
     /// Who an outgoing group message names with "@handle".
     private func mentionedMemberIds(in body: String, target: PendingChatTarget) async -> [Int] {
         guard target.kind == "group", target.roomId > 0, body.contains("@") else { return [] }
@@ -5976,9 +6553,34 @@ final class AloAppModel: ObservableObject {
     private func saveCurrentChatDraft() {
         guard !restoringChatDraft, !editingComposer, chatDraftOwner > 0, let key = chatDraftKey else { return }
         let draft = currentChatDraft()
+        let previousDraft = chatDrafts[key]
         changedDraftKeys.insert(key)
         chatDrafts[key] = draft.isEmpty ? nil : draft
-        if chatDraftsLoaded { persistChatDrafts() }
+        guard chatDraftsLoaded else { return }
+        chatDraftPersistTask?.cancel()
+        chatDraftPersistTask = nil
+        // Typing changes the draft on every letter; encrypting all drafts to disk once a pause is enough.
+        // Anything else (a cleared composer, a reply, an attachment) is written at once, so a sent message's
+        // draft cannot come back if the app is closed right after.
+        guard !draft.isEmpty, draft.withoutText == previousDraft?.withoutText else {
+            persistChatDrafts()
+            return
+        }
+        chatDraftPersistTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled, let self else { return }
+            chatDraftPersistTask = nil
+            persistChatDrafts()
+        }
+    }
+    private var chatDraftPersistTask: Task<Void, Never>?
+
+    /// Writes a draft still waiting for a pause in typing (the app is going to the background).
+    func flushPendingChatDraft() {
+        guard let task = chatDraftPersistTask else { return }
+        task.cancel()
+        chatDraftPersistTask = nil
+        persistChatDrafts()
     }
 
     private func currentChatDraft() -> AloChatDraft {
@@ -6219,6 +6821,9 @@ final class AloAppModel: ObservableObject {
             ]
             if let forwardFrom {
                 record["forwardFrom"] = ["userId": forwardFrom.userId, "messageId": forwardFrom.messageId]
+                if let content = forwardFrom.content {
+                    record["forwardContent"] = ["body": content.body, "attachments": content.attachments.map(messageAttachmentRecord)]
+                }
             }
             if let encryptedPayload { record["encryptedPayload"] = encryptedPayload }
             return record
@@ -6370,8 +6975,11 @@ final class AloAppModel: ObservableObject {
             }
             guard attachments.count == record.array("attachments").count else { return nil }
             let uploaded = record.array("uploadedAttachments").map(AloMessageAttachment.init)
-            let forwardFrom = record.optionalObject("forwardFrom").flatMap {
-                AloForwardMeta(userId: $0.int("userId"), messageId: $0.int("messageId"), user: nil)
+            let forwardFrom = record.optionalObject("forwardFrom").flatMap { forward -> AloForwardMeta? in
+                let content = record.optionalObject("forwardContent").map {
+                    AloForwardContent(body: $0.string("body"), attachments: $0.array("attachments").map(AloMessageAttachment.init))
+                }
+                return AloForwardMeta(userId: forward.int("userId"), messageId: forward.int("messageId"), user: nil, content: content)
             }
             return .sendDraft(
                 localId: localId,
@@ -6526,6 +7134,7 @@ final class AloAppModel: ObservableObject {
             "waveform": attachment.waveform.map(Double.init),
             "mediaEncryption": attachment.mediaEncryption
         ]
+        if !attachment.posterUrl.isEmpty { record["posterUrl"] = attachment.posterUrl }
         if !attachment.metadata.isEmpty {
             record["metadata"] = attachment.metadata
         }
@@ -6575,7 +7184,9 @@ final class AloAppModel: ObservableObject {
                 configureBlockedUserState(ownerUserId: data.me.id)
                 scheduleBlockedUsersRefresh(ownerUserId: data.me.id)
                 activatePendingChatOutbox(ownerUserId: data.me.id)
-                if let e2eeWarning = api.latestE2EEWarning {
+                syncChatPins(owner: data.me.id)
+                let policy = await refreshMessagingPolicy()
+                if let e2eeWarning = api.latestE2EEWarning, !policy.isCloudEverywhere {
                     notice = e2eeWarning
                 }
                 phase = .app
@@ -6821,7 +7432,7 @@ private enum AloChannelProfilePatch {
         )
     }
 
-    static func subscribers(_ count: Int, in profile: AloChannelProfile) -> AloChannelProfile {
+    static func subscribers(_ count: Int, subscribed: Bool? = nil, in profile: AloChannelProfile) -> AloChannelProfile {
         AloChannelProfile(
             id: profile.id,
             name: profile.name,
@@ -6838,7 +7449,9 @@ private enum AloChannelProfilePatch {
             commentsEnabled: profile.commentsEnabled,
             signMessages: profile.signMessages,
             showAuthorProfiles: profile.showAuthorProfiles,
-            discussionRoomId: profile.discussionRoomId
+            discussionRoomId: profile.discussionRoomId,
+            subscribed: subscribed ?? profile.subscribed,
+            messengerRoomId: profile.messengerRoomId
         )
     }
 
@@ -6866,7 +7479,9 @@ private enum AloChannelProfilePatch {
             showAuthorProfiles: settings?.showAuthorProfiles ?? profile.showAuthorProfiles,
             discussionRoomId: settings == nil
                 ? profile.discussionRoomId
-                : settings?.discussionRoomId
+                : settings?.discussionRoomId,
+            subscribed: profile.subscribed,
+            messengerRoomId: profile.messengerRoomId
         )
     }
 
@@ -6891,7 +7506,9 @@ private enum AloChannelProfilePatch {
             commentsEnabled: profile.commentsEnabled,
             signMessages: profile.signMessages,
             showAuthorProfiles: profile.showAuthorProfiles,
-            discussionRoomId: profile.discussionRoomId
+            discussionRoomId: profile.discussionRoomId,
+            subscribed: profile.subscribed,
+            messengerRoomId: profile.messengerRoomId
         )
     }
 }
@@ -7135,4 +7752,13 @@ private enum AloBootstrapDataPatch {
             activeMessages: data.activeMessages
         )
     }
+}
+
+/// A channel post's comments opened as their own screen (see `AloAppModel.commentsThread`).
+struct AloCommentsThread: Equatable {
+    let roomId: Int
+    let topicId: Int
+    let postId: Int
+    let post: AloPost?
+    var count: Int
 }

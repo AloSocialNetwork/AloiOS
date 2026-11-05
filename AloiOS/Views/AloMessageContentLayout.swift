@@ -1,8 +1,9 @@
 import SwiftUI
 import UIKit
 
-/// The message establishes its width. Reactions may add rows, never resize or
-/// rewrap the text/media above them. Keep the two subviews stable across updates.
+/// The message establishes its width; the footer (reactions and the time) may widen it up to the proposed width, as
+/// Telegram's bubble grows to fit a row of chips plus the time, but never rewraps the text/media above them (a wider
+/// box keeps every line). Keep the two subviews stable across updates.
 struct AloMessageContentLayout: Layout {
     var spacing: CGFloat = 2
     /// Narrowest content width. Cards and media keep 84; a text bubble uses Telegram's 40 pt bubble.
@@ -13,9 +14,14 @@ struct AloMessageContentLayout: Layout {
         let ideal = content.sizeThatFits(.unspecified)
         let limit = min(proposal.width ?? ideal.width, max(minimumWidth, ideal.width))
         let fitted = content.sizeThatFits(ProposedViewSize(width: limit, height: nil))
-        let width = min(limit, max(minimumWidth, fitted.width))
+        var width = min(limit, max(minimumWidth, fitted.width))
+        let footerView = subviews.dropFirst().first
+        if let footerView {
+            let wanted = footerView.sizeThatFits(.unspecified).width
+            width = max(width, min(proposal.width ?? wanted, wanted))
+        }
         let primary = content.sizeThatFits(ProposedViewSize(width: width, height: nil))
-        let footer = subviews.dropFirst().first?.sizeThatFits(ProposedViewSize(width: width, height: nil)) ?? .zero
+        let footer = footerView?.sizeThatFits(ProposedViewSize(width: width, height: nil)) ?? .zero
         return CGSize(width: width, height: primary.height + footer.height + (footer.height > 0 ? spacing : 0))
     }
 
@@ -56,7 +62,8 @@ struct AloTextStatusLayout: Layout {
     private func measure(_ proposal: ProposedViewSize, _ views: Subviews) -> (size: CGSize, textWidth: CGFloat) {
         guard views.count == 2 else { return (.zero, 0) }
         let ideal = views[0].sizeThatFits(.unspecified)
-        let meta = views[1].sizeThatFits(.unspecified)
+        // A hidden time (the reactions row carries it) takes no room beside the text.
+        let meta = showsStatus ? views[1].sizeThatFits(.unspecified) : .zero
         let limit = max(meta.width, proposal.width ?? (ideal.width + spacing + meta.width))
         if ideal.width + spacing + meta.width <= limit {
             return (CGSize(width: ideal.width + spacing + meta.width, height: max(ideal.height, meta.height)), ideal.width)
@@ -67,9 +74,25 @@ struct AloTextStatusLayout: Layout {
         let width = limit
         let text = views[0].sizeThatFits(ProposedViewSize(width: width, height: nil))
         let fitsLastLine = attributedText.map {
-            Self.lastLineWidth(NSAttributedString($0), width: width) + spacing + meta.width + 1 <= width
+            Self.cachedLastLineWidth($0, width: width) + spacing + meta.width + 1 <= width
         } ?? false
         return (CGSize(width: width, height: text.height + (showsStatus && !fitsLastLine ? meta.height : 0)), width)
+    }
+
+    /// SwiftUI asks for a bubble's size several times per pass and again whenever a row comes back on screen;
+    /// laying the text out with TextKit each time made scrolling stutter.
+    private static let lastLineCache: NSCache<NSString, NSNumber> = {
+        let cache = NSCache<NSString, NSNumber>()
+        cache.countLimit = 2000
+        return cache
+    }()
+
+    static func cachedLastLineWidth(_ text: AttributedString, width: CGFloat) -> CGFloat {
+        let key = "\(text.hashValue)|\(Int((width * 4).rounded()))|\(text.characters.count)" as NSString
+        if let cached = lastLineCache.object(forKey: key) { return CGFloat(cached.doubleValue) }
+        let value = lastLineWidth(NSAttributedString(text), width: width)
+        lastLineCache.setObject(NSNumber(value: Double(value)), forKey: key)
+        return value
     }
 
     static func lastLineWidth(_ text: NSAttributedString, width: CGFloat) -> CGFloat {
