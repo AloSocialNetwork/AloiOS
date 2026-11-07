@@ -50,6 +50,13 @@ final class AloPushCoordinator {
                 deviceId: deviceId,
                 appVersion: version
             )
+            // The other accounts saved on this phone get their pushes too, each with its own session (Telegram).
+            let current = (try? await api.request("GET", "/api/auth/me"))?["user"] as? [String: Any]
+            let currentId = current?.int("id") ?? 0
+            for account in AloAccountSessionStore.shared.accounts where account.userId != currentId {
+                guard let cookies = try? AloAccountSessionStore.shared.cookies(for: account) else { continue }
+                try? await api.registerPushToken(as: cookies, platform: "ios", token: token, deviceId: deviceId, appVersion: version)
+            }
         }
     }
 

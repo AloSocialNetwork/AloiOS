@@ -1,7 +1,5 @@
 import Foundation
 
-/// Written by the notification delegate, not by a view subscriber. In
-/// particular, a cold-launch tap must outlive authentication/bootstrap.
 final class AloPushOpenStore {
     static let shared = AloPushOpenStore()
     struct Entry: Codable, Equatable {

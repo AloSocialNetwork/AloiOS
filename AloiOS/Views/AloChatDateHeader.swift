@@ -1,12 +1,12 @@
 import SwiftUI
 import Combine
 
-/// Telegram's service date: 34 pt section, 22 pt capsule, 13 pt medium text.
+/// The website's date chip: 26 pt glass oval, 12 pt side insets, 13 pt text, in Telegram's 34 pt section.
 /// Keep this separate from the interactive glass used by the composer/header.
 enum AloChatDateMetrics {
     static let sectionHeight: CGFloat = 34
-    static let capsuleHeight: CGFloat = 22
-    static let horizontalInset: CGFloat = 6
+    static let capsuleHeight: CGFloat = 26
+    static let horizontalInset: CGFloat = 12
     static let idleDelay: Duration = .milliseconds(300)
     static let appearDuration = 0.3
     static let disappearDuration = 0.4
@@ -106,7 +106,6 @@ struct AloChatDatePill: View {
     let label: String
     var isFloating = false
     @ScaledMetric(relativeTo: .caption) private var fontSize: CGFloat = 13
-    private var accessibility = AloVisualAccessibility()
 
     init(label: String, isFloating: Bool = false) {
         self.label = label
@@ -115,20 +114,13 @@ struct AloChatDatePill: View {
 
     var body: some View {
         Text(label)
-            .font(.system(size: min(18, fontSize), weight: .medium))
-            .foregroundStyle(.white.opacity(0.94))
+            .font(.system(size: min(18, fontSize), weight: .semibold))
+            .foregroundStyle(AloTheme.text)
             .lineLimit(1).truncationMode(.tail)
             .padding(.horizontal, AloChatDateMetrics.horizontalInset)
             .frame(minHeight: AloChatDateMetrics.capsuleHeight)
-            .background {
-                if isFloating && !accessibility.reduceTransparency && !accessibility.increasedContrast {
-                    Capsule().fill(.ultraThinMaterial)
-                    Capsule().fill(.black.opacity(0.4))
-                } else {
-                    Capsule().fill(accessibility.reduceTransparency || accessibility.increasedContrast
-                        ? AloTheme.surface : .black.opacity(0.55))
-                }
-            }
+            // The website's date chip: a small oval of the same glass as the header.
+            .modifier(AloChatGlass(interactive: false, role: .chrome))
             .accessibilityAddTraits(.isHeader)
     }
 }

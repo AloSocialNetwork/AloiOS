@@ -4,11 +4,15 @@ enum AloDeepLinkTarget: Equatable {
     case invite(String)
     case community(String)
     case post(Int)
+    /// A public post link https://ало.online/p/<random code>; the post is looked up by its code.
+    case postCode(String)
     case user(Int)
     case channel(Int)
     case forumTopic(roomId: Int, topicId: Int)
     case handle(String)
     case story(String)
+    /// The website's sign-in QR opened by the system camera: ask «Войти на устройстве …?».
+    case qrLogin(AloQRCodeLoginPayload)
 
     init?(url: URL) {
         self.init(url: url, configuredWebHost: Self.configuredWebLinkHost)
@@ -17,6 +21,11 @@ enum AloDeepLinkTarget: Equatable {
     init?(url: URL, configuredWebHost: String) {
         let scheme = (url.scheme ?? "").lowercased()
         guard scheme == "alo" || scheme == "https" else { return nil }
+        // https://<site>/qr#<id>.<secret> (also from the test server, not only the app-link host) or alo://login/qr/<id>/<secret>.
+        if let payload = AloQRCodeLoginPayload(rawPayload: url.absoluteString), payload.isFromTrustedHost {
+            self = .qrLogin(payload)
+            return
+        }
         if scheme == "https" {
             let expectedHost = configuredWebHost.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             guard !expectedHost.isEmpty,
@@ -62,8 +71,13 @@ enum AloDeepLinkTarget: Equatable {
             }
             self = .community(username)
         case "p", "post", "posts":
-            guard let postId = Int(value), postId > 0 else { return nil }
-            self = .post(postId)
+            if let postId = Int(value), postId > 0 {
+                self = .post(postId)
+            } else if Self.isPostCode(value) {
+                self = .postCode(value)
+            } else {
+                return nil
+            }
         case "u", "user", "users":
             guard let userId = Int(value), userId > 0 else { return nil }
             self = .user(userId)
@@ -97,6 +111,18 @@ enum AloDeepLinkTarget: Equatable {
 
     static func postURL(postId: Int) -> URL? {
         linkURL(kind: "p", value: String(postId))
+    }
+
+    /// The link to share: by the post's random code, so nobody can walk through posts by number.
+    /// Falls back to the number only for a server that sends no code yet.
+    static func postURL(post: AloPost) -> URL? {
+        isPostCode(post.shareCode) ? linkURL(kind: "p", value: post.shareCode) : postURL(postId: post.id)
+    }
+
+    /// 12 letters, digits, "-" or "_", never digits only (the server's post-share-code.js).
+    static func isPostCode(_ value: String) -> Bool {
+        value.range(of: #"^[A-Za-z0-9_-]{12}$"#, options: .regularExpression) != nil
+            && value.range(of: #"^[0-9]+$"#, options: .regularExpression) == nil
     }
 
     static func userURL(userId: Int) -> URL? {

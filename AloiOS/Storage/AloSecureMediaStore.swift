@@ -297,7 +297,7 @@ final class AloSecureMediaStore: @unchecked Sendable {
     }
 
     private struct Entry: Codable, Equatable {
-        let encryptedPath: String
+        var encryptedPath: String
         var algorithm: String?
         var key: String
         var iv: String
@@ -439,13 +439,14 @@ final class AloSecureMediaStore: @unchecked Sendable {
     /// Compatibility with older, non-E2EE audio/video messages: the transport
     /// may be plain, but their offline file is still encrypted on this device.
     func registerRemotePlaintext(_ remote: String, type: String, name: String, size: Int64?, ownerUserId: Int,
-                                 scope: AloMediaCacheScope = .privateChats) throws -> URL {
+                                 scope: AloMediaCacheScope = .privateChats, expiresAt: String = "") throws -> URL {
         let token = SHA256.hash(data: Data("plain:\(ownerUserId):\(remote)".utf8)).map { String(format: "%02x", $0) }.joined()
         lock.lock()
         if entries[token] == nil {
             var entry = Entry(encryptedPath: Self.encryptedCacheRoot().appendingPathComponent("plain-\(token).bin").path,
                 algorithm: nil, key: "", iv: "", noncePrefix: nil, chunkSize: nil, plaintextSize: nil,
-                mime: Self.mime(type: type, name: name), name: name.ifBlank("media.bin"), expiresAt: nil,
+                mime: Self.mime(type: type, name: name), name: name.ifBlank("media.bin"),
+                expiresAt: expiresAt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : expiresAt,
                 remoteURL: remote, mediaType: type, scope: scope, expectedPlaintextSize: size)
             entry.remoteIsPlaintext = true
             entries[token] = entry
@@ -456,6 +457,13 @@ final class AloSecureMediaStore: @unchecked Sendable {
         components.scheme = Self.scheme; components.host = token; components.path = "/media"
         guard let url = components.url else { throw AloSecureMediaError.invalidURL }
         return url
+    }
+
+    /// Downloads a message file before its first frame is read (the preview itself has only a few seconds). Follows
+    /// the automatic download rules: a file the settings keep for a tap stays on the server.
+    static func prefetchForPreview(_ url: URL) async {
+        guard shared.isSecureURL(url), !shared.isAvailableLocally(url) else { return }
+        try? await shared.ensureAvailable(url, intent: .automatic)
     }
 
     func isAvailableLocally(_ url: URL) -> Bool {
@@ -507,7 +515,10 @@ final class AloSecureMediaStore: @unchecked Sendable {
             defer { budget.lease.release() }
             let temporary = file.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).part")
             defer { try? FileManager.default.removeItem(at: temporary) }
-            try await AloAPIClient.shared.downloadCachedMedia(remote, to: temporary, expectedSize: expectedCiphertext,
+            // A cloud file's size comes from the sender's own copy and is only a hint: the server may have changed the
+            // file (a voice recording becomes .ogg), and nothing is decrypted, so a different size is not tampering.
+            try await AloAPIClient.shared.downloadCachedMedia(remote, to: temporary,
+                expectedSize: entry.remoteIsPlaintext == true ? nil : expectedCiphertext,
                 maximumSize: budget.maximumBytes)
             try Task.checkCancellation()
             // Recheck expiry after the suspension before publishing the file.
@@ -632,11 +643,21 @@ final class AloSecureMediaStore: @unchecked Sendable {
             throw AloSecureMediaError.expired
         }
 
-        let encryptedURL = URL(fileURLWithPath: entry.encryptedPath)
+        var encryptedURL = URL(fileURLWithPath: entry.encryptedPath)
             .standardizedFileURL
             .resolvingSymlinksInPath()
         let allowedRoot = Self.encryptedCacheRoot().standardizedFileURL.resolvingSymlinksInPath()
         let allowedPrefix = allowedRoot.path.hasSuffix("/") ? allowedRoot.path : allowedRoot.path + "/"
+        if !encryptedURL.path.hasPrefix(allowedPrefix), let moved = Self.relocatedIntoCurrentContainer(entry.encryptedPath, root: allowedRoot) {
+            // iOS moves an app's data container when the app is reinstalled or updated, so an absolute path saved by an
+            // older install points into a folder that no longer exists. Every circle, video and voice message registered
+            // before the update then failed with «invalidPath» and stayed black. The file keeps its name under the
+            // current cache root (downloaded again when the move lost it).
+            var updated = entry
+            updated.encryptedPath = moved.path
+            try? updateEntry(updated, token: token)
+            encryptedURL = moved
+        }
         guard encryptedURL.path.hasPrefix(allowedPrefix) else { throw AloSecureMediaError.invalidPath }
         AloMediaDiskCache.shared.touch(encryptedURL)
         return (entry, encryptedURL)
@@ -807,6 +828,15 @@ final class AloSecureMediaStore: @unchecked Sendable {
             return data
         }
         return data
+    }
+
+    /// `<old container>/…/AloE2EEMedia/encrypted/x.bin` → the same relative file under today's cache root, or nil.
+    static func relocatedIntoCurrentContainer(_ storedPath: String, root: URL) -> URL? {
+        let marker = "/AloE2EEMedia/encrypted/"
+        guard let range = storedPath.range(of: marker, options: .backwards) else { return nil }
+        let relative = String(storedPath[range.upperBound...])
+        guard !relative.isEmpty, !relative.split(separator: "/").contains("..") else { return nil }
+        return root.appendingPathComponent(relative).standardizedFileURL
     }
 
     private static func encryptedCacheRoot() -> URL {

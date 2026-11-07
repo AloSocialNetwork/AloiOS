@@ -300,7 +300,7 @@ final class AloMessengerDesignUITests: XCTestCase {
         app.staticTexts["alo.message.body.990200"].press(forDuration: 0.6)
         XCTAssertTrue(app.buttons["Ответить"].waitForExistence(timeout: 4))
         app.buttons["Ответить"].tap()
-        let accessory = app.otherElements["alo.composer.accessory.reply"]
+        let accessory = app.otherElements["alo.composer.reply"]
         XCTAssertTrue(accessory.waitForExistence(timeout: 4))
         XCTAssertEqual(accessory.frame.height, 45, accuracy: 1)
         XCTAssertLessThan(accessory.frame.maxY, field(app, "alo.chat.composer").frame.midY)
@@ -708,6 +708,18 @@ final class AloMessengerDesignUITests: XCTestCase {
         }
     }
 
+    /// CPU spent typing in a long chat: a keystroke must not rebuild the history.
+    func testTelegramChatTypingPerformance() {
+        let app = launchChat(content: "telegram-chat")
+        let composer = field(app, "alo.chat.composer")
+        composer.tap()
+        let options = XCTMeasureOptions()
+        options.iterationCount = 3
+        measure(metrics: [XCTCPUMetric(application: app)], options: options) {
+            composer.typeText("Проверка набора текста в длинном чате без задержек ")
+        }
+    }
+
     func testMixedMediaScrollPerformance() {
         let app = launchChat(content: "media-stress")
         let options = XCTMeasureOptions()
@@ -945,7 +957,7 @@ final class AloMessengerDesignUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Завершить и просмотреть кружок"].waitForExistence(timeout: 4))
         let camera = app.descendants(matching: .any).matching(identifier: "alo.circle.recording.camera").firstMatch
         XCTAssertTrue(camera.exists)
-        XCTAssertEqual(camera.frame.width, min(404, app.frame.width - 24), accuracy: 1)
+        XCTAssertEqual(camera.frame.width, min(369, app.frame.width - 24), accuracy: 1) // Telegram VideoMessageCameraScreen
         XCTAssertEqual(camera.frame.width, camera.frame.height, accuracy: 1)
         XCTAssertGreaterThanOrEqual(camera.frame.minY, app.buttons["alo.chat.back"].frame.maxY)
         XCTAssertLessThan(camera.frame.maxY, app.buttons["alo.circle.recording.flip"].frame.minY)

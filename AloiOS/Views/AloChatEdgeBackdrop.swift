@@ -11,8 +11,10 @@ enum AloChatEdge: Equatable {
     var fadeHeight: CGFloat { self == .top ? 80 : 60 }
     var inwardExtension: CGFloat { self == .top ? 28 : 16 }
 
+    /// No dark band under the header and composer (the owner, 2026-10-28, as on the website): the wallpaper copy alone
+    /// dissolves the messages there. Reduced transparency keeps a solid edge.
     func dimmingOpacity(reduceTransparency: Bool, increasedContrast: Bool) -> Double {
-        reduceTransparency || increasedContrast ? 1 : 0.68
+        reduceTransparency || increasedContrast ? 1 : 0
     }
 
     /// Telegram fades the wallpaper copy in at 0.75 over patterned wallpapers.

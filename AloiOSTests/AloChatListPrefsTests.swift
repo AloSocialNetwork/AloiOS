@@ -34,4 +34,22 @@ struct AloChatListPrefsTests {
         AloChatListPrefs(defaults: defaults).setPinned(owner: 3, keys: ["group:9"], pinned: true)
         #expect(AloChatListPrefs(defaults: defaults).isPinned(owner: 3, key: "group:9"))
     }
+
+    @Test func newPinGoesOnTopAndServerListReplacesTheCopy() {
+        let p = prefs()
+        p.setPinned(owner: 1, keys: ["direct:1"], pinned: true)
+        p.setPinned(owner: 1, keys: ["group:2"], pinned: true)
+        #expect(p.state(owner: 1).pinned == ["group:2", "direct:1"])
+        p.setArchived(owner: 1, keys: ["direct:5"], archived: true)
+        p.replacePinned(owner: 1, pinned: ["direct:5", "direct:1"])
+        #expect(p.state(owner: 1) == .init(pinned: ["direct:5", "direct:1"], archived: []))
+        #expect(!p.pinsImported(owner: 1))
+        p.markPinsImported(owner: 1)
+        #expect(p.pinsImported(owner: 1) && !p.pinsImported(owner: 2))
+    }
+
+    @Test func pinsFromTheServerAreCleaned() {
+        #expect(AloChatListPrefs.pins(from: ["pinned": ["group:3", "bad", 7, "direct:4", "group:3"]]) == ["group:3", "direct:4"])
+        #expect(AloChatListPrefs.pins(from: [:]) == nil)
+    }
 }

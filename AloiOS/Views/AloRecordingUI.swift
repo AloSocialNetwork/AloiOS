@@ -3,17 +3,44 @@ import AVFoundation
 import Combine
 
 enum AloCircleRecordingLayout {
+    /// Telegram iOS VideoMessageCameraScreen: `min(369, width − 24)`; a short free area (keyboard, large text) shrinks it.
     static func diameter(viewport: CGSize, topChrome: CGFloat, bottomChrome: CGFloat) -> CGFloat {
-        let side = min(viewport.width, viewport.height)
-        let reference = side <= 320 ? CGFloat(216) : min(404, side - 24)
-        // A keyboard/large accessibility composer can shrink the free area.
+        let reference = min(369, viewport.width - 24)
         return max(1, min(reference, max(1, viewport.height - topChrome - bottomChrome - 96)))
     }
 
+    /// Telegram puts the circle's top at `max(status bar, 40 % of the height − side / 2)`: centred at 40 % of the
+    /// screen, clear of the header above and of the flip button and composer below.
     static func centerY(viewport: CGSize, diameter: CGFloat, topChrome: CGFloat, bottomChrome: CGFloat) -> CGFloat {
         let top = max(topChrome + diameter / 2 + 12, diameter / 2 + 61)
         let bottom = max(top, viewport.height - bottomChrome - diameter / 2 - 84)
-        return min(bottom, max(top, viewport.height / 3 - 20))
+        return min(bottom, max(top, viewport.height * 0.4))
+    }
+
+    /// The flip and flash buttons: 40 pt glass circles 8 pt above the input panel, 8 pt in from the left
+    /// (26 pt on phones without a home indicator), 11 pt apart.
+    static let buttonSize: CGFloat = 40
+    static func buttonSideInset(safeBottom: CGFloat) -> CGFloat { safeBottom <= 32 ? 26 : 8 }
+}
+
+/// Telegram's backdrop behind a circle being recorded: the chat blurred (dark or light with the theme), no dimming,
+/// fading in over 0.4 s. With Reduce Transparency it is the plain page colour.
+struct AloCircleRecordingBackdrop: UIViewRepresentable {
+    var dark: Bool
+    var opaque: Bool
+
+    func makeUIView(context: Context) -> UIVisualEffectView {
+        let view = UIVisualEffectView(effect: nil)
+        view.isUserInteractionEnabled = false
+        update(view)
+        return view
+    }
+
+    func updateUIView(_ view: UIVisualEffectView, context: Context) { update(view) }
+
+    private func update(_ view: UIVisualEffectView) {
+        view.effect = opaque ? nil : UIBlurEffect(style: dark ? .dark : .light)
+        view.backgroundColor = opaque ? (dark ? .black : .white) : .clear
     }
 }
 
@@ -74,6 +101,17 @@ final class AloRecordedAudioPreview: NSObject, ObservableObject, AVAudioPlayerDe
         }
     }
 
+    /// How much of the draft has played (0…1), for the preview's waveform.
+    var progress: Double {
+        if let filePlayer, let item = filePlayer.currentItem {
+            let duration = item.duration.seconds
+            guard duration.isFinite, duration > 0 else { return 0 }
+            return min(1, max(0, filePlayer.currentTime().seconds / duration))
+        }
+        if let player, player.duration > 0 { return min(1, max(0, player.currentTime / player.duration)) }
+        return 0
+    }
+
     func stop() {
         revision += 1
         isPreparing = false
@@ -105,9 +143,9 @@ final class AloRecordedAudioPreview: NSObject, ObservableObject, AVAudioPlayerDe
 struct AloRecordingDrag: Equatable {
     var translation: CGSize = .zero
     // TGModernConversationInputMicButton: drag cancellation at 150 pt,
-    // lock at 110 pt; release intent is evaluated separately below.
+    // lockness = dy / 105 pt; release intent is evaluated separately below.
     static let cancelDistance: CGFloat = 150
-    static let lockDistance: CGFloat = 110
+    static let lockDistance: CGFloat = 105
 
     var cancelProgress: CGFloat { min(1, max(0, -translation.width / Self.cancelDistance)) }
     var lockProgress: CGFloat { min(1, max(0, -translation.height / Self.lockDistance)) }
@@ -119,6 +157,8 @@ struct AloRecordingDrag: Equatable {
         CGSize(width: min(0, max(-Self.cancelDistance, translation.width)),
                height: min(0, max(-Self.lockDistance, translation.height)))
     }
+    /// Telegram's inner circle: 1 → 0.4 over 300 pt to the left.
+    var orbScale: CGFloat { max(0.4, min(1, 1 + min(0, translation.width) / 300)) }
 
     enum ReleaseIntent { case finish, cancel, lock }
 
@@ -132,47 +172,173 @@ struct AloRecordingDrag: Equatable {
     }
 }
 
+/// Telegram iOS geometry of the voice recording panel and mic (TGModernConversationInputMicButton,
+/// ChatTextInputPanelNode, ChatRecordingPreviewInputPanelNode).
+enum AloRecordingMetrics {
+    static let dotSize: CGFloat = 10
+    static let dotX: CGFloat = 16
+    static let timeX: CGFloat = 34
+    static let dotColor = Color(red: 1, green: 0x2D / 255, blue: 0x55 / 255)
+    static let innerCircle: CGFloat = 110
+    static let outerCircle: CGFloat = 160
+    static let lockSize = CGSize(width: 40, height: 72)
+    /// Lock panel centre above the mic centre, and the pause button's after locking.
+    static let lockLift: CGFloat = 122
+    static let pauseLift: CGFloat = 102
+}
+
+/// "0:03,45": Telegram shows hundredths while recording.
+enum AloRecordingClock {
+    static func label(_ elapsed: TimeInterval) -> String {
+        let value = max(0, elapsed)
+        let seconds = Int(value)
+        let hundredths = min(99, Int((value - Double(seconds)) * 100))
+        if seconds >= 3600 {
+            return String(format: "%d:%02d:%02d,%02d", seconds / 3600, seconds / 60 % 60, seconds % 60, hundredths)
+        }
+        return String(format: "%d:%02d,%02d", seconds / 60, seconds % 60, hundredths)
+    }
+
+    /// Telegram's dot: opacity 1 → 1 → 0 over 0.5 s (key times 0, 0.4546, 0.9091), then back.
+    static func dotOpacity(_ elapsed: TimeInterval) -> Double {
+        let cycle = elapsed.truncatingRemainder(dividingBy: 1.0)
+        let t = cycle < 0.5 ? cycle / 0.5 : (1.0 - cycle) / 0.5
+        if t <= 0.4546 { return 1 }
+        if t >= 0.9091 { return 0 }
+        return 1 - (t - 0.4546) / (0.9091 - 0.4546)
+    }
+}
+
 struct AloRecordingTimer: View {
     let startedAt: Date
     let ready: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        TimelineView(.periodic(from: startedAt, by: 1)) { context in
-            let seconds = ready ? max(0, Int(context.date.timeIntervalSince(startedAt))) : 0
-            HStack(spacing: 6) {
-                Circle().fill(.red)
-                    .frame(width: 6, height: 6)
-                    .opacity(!reduceMotion && seconds.isMultiple(of: 2) ? 0.45 : 1)
-                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.5), value: seconds)
-                Text(String(format: "%d:%02d", seconds / 60, seconds % 60))
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !ready)) { context in
+            let elapsed = ready ? max(0, context.date.timeIntervalSince(startedAt)) : 0
+            HStack(spacing: AloRecordingMetrics.timeX - AloRecordingMetrics.dotX - AloRecordingMetrics.dotSize) {
+                Circle().fill(AloRecordingMetrics.dotColor)
+                    .frame(width: AloRecordingMetrics.dotSize, height: AloRecordingMetrics.dotSize)
+                    .opacity(reduceMotion || !ready ? 1 : AloRecordingClock.dotOpacity(elapsed))
+                Text(AloRecordingClock.label(elapsed))
                     .font(.system(size: 15, weight: .regular)).monospacedDigit()
                     .foregroundStyle(AloTheme.text)
             }
             .fixedSize()
         }
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(ready ? "Идёт запись" : "Подготовка записи")
     }
 }
 
-/// A stationary, tappable lock target; only its contents track vertical intent.
+/// Telegram's «‹ Slide to cancel»: centred, swaying 6 pt each second, following the finger left
+/// after 8 pt and fading out before it reaches the timer. Once locked it becomes «Отмена».
+struct AloRecordingCancelIndicator: View {
+    let isLocked: Bool
+    let ready: Bool
+    let drag: AloRecordingDrag
+    let accentColor: Color
+    let onCancel: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        GeometryReader { geometry in
+            content(width: geometry.size.width)
+                .frame(width: geometry.size.width, height: geometry.size.height)
+        }
+    }
+
+    private var translation: CGFloat { max(0, -drag.translation.width - 8) }
+    /// The mic button and its gap, which the panel stops short of.
+    private static let micInset: CGFloat = 52
+    @State private var hintWidth: CGFloat = 130
+
+    @ViewBuilder
+    private func content(width: CGFloat) -> some View {
+        if isLocked {
+            Button(action: onCancel) {
+                Text("Отмена")
+                    .font(.system(size: 17, weight: .regular))
+                    .foregroundStyle(accentColor)
+                    .frame(minHeight: 44)
+                    .padding(.horizontal, 10)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(AloChatPressStyle())
+            .accessibilityLabel("Удалить запись")
+            .transition(.opacity.combined(with: .offset(y: 12)))
+        } else {
+            // Telegram centres the hint on the whole input row (under the mic too), follows the
+            // finger at half its pace and fades it out as it nears the timer (alpha = (minX − 100) / 10).
+            let shift: CGFloat = translation / 2
+            let left: CGFloat = (width + Self.micInset - hintWidth) / 2 - shift
+            hint(swaying: !reduceMotion && translation == 0 && width > 240)
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { hintWidth = $0 }
+                .offset(x: Self.micInset / 2 - shift)
+                .opacity(Double(max(0, min(1, (left - 100) / 10))))
+        }
+    }
+
+    private func hint(swaying: Bool) -> some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !swaying)) { context in
+            Button(action: onCancel) {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(ready ? "Влево — отмена" : "Подготовка…")
+                        .font(.system(size: 14))
+                }
+                .foregroundStyle(AloTheme.muted)
+                .lineLimit(1)
+                .fixedSize()
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(AloChatPressStyle())
+            .offset(x: swaying ? Self.sway(context.date) : 0)
+        }
+        .accessibilityLabel("Отменить запись")
+        .accessibilityHint("Также можно сдвинуть палец влево")
+    }
+
+    /// 0 → 6 pt in one second, ease-in-out, and back (CABasicAnimation autoreverses).
+    private static func sway(_ date: Date) -> CGFloat {
+        let cycle = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 2)
+        let t = cycle < 1 ? cycle : 2 - cycle
+        let eased = t < 0.5 ? 2 * t * t : 1 - pow(-2 * t + 2, 2) / 2
+        return CGFloat(eased) * 6
+    }
+}
+
+/// Telegram's lock panel above a held mic (40×72): as the finger rises it shrinks from the top
+/// to 40 pt, the lock climbs 16 pt and the arrow fades away upwards. A tap locks too.
 struct AloRecordingLock: View {
     let progress: CGFloat
     let onLock: () -> Void
 
     var body: some View {
+        let size = AloRecordingMetrics.lockSize
         Button(action: onLock) {
-            VStack(spacing: 10) {
-                Image(systemName: progress > 0.85 ? "lock.fill" : "lock.open")
+            ZStack(alignment: .top) {
+                Color.clear.frame(width: size.width, height: size.height)
+                Color.clear
+                    .frame(width: size.width, height: size.height - 32 * progress)
+                    .modifier(AloChatGlass())
+                    .offset(y: 40 * progress)
+                Image(systemName: progress > 0.85 ? "lock.fill" : "lock")
                     .font(.system(size: 16, weight: .medium))
+                    .frame(height: 24)
+                    .offset(y: 8 + 24 * progress)
                 Image(systemName: "chevron.up")
                     .font(.system(size: 12, weight: .semibold))
-                    .opacity(1 - progress)
-                    .offset(y: -progress * 8)
+                    .frame(height: 12)
+                    .opacity(Double(max(0, 1 - progress * 1.6)))
+                    .offset(y: 46 + progress)
             }
             .foregroundStyle(progress > 0.6 ? AloTheme.accent : AloTheme.text)
-            .frame(width: 44, height: 72)
-            .modifier(AloChatGlass())
+            .frame(width: size.width, height: size.height)
+            .contentShape(Rectangle())
         }
         .buttonStyle(AloChatPressStyle())
         .accessibilityLabel("Зафиксировать запись")
@@ -180,27 +346,72 @@ struct AloRecordingLock: View {
     }
 }
 
+/// After locking, Telegram turns the lock into a 40 pt pause button (two 5×14 bars) that stops
+/// the recording into a preview.
+struct AloRecordingPauseButton: View {
+    let enabled: Bool
+    let label: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                RoundedRectangle(cornerRadius: 1, style: .continuous).frame(width: 5, height: 14)
+                RoundedRectangle(cornerRadius: 1, style: .continuous).frame(width: 5, height: 14)
+            }
+            .foregroundStyle(AloTheme.text)
+            .frame(width: 40, height: 40)
+            .modifier(AloChatGlass())
+            .contentShape(Circle())
+        }
+        .buttonStyle(AloChatPressStyle())
+        .disabled(!enabled)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier("alo.recording.pause")
+    }
+}
+
+/// Telegram's mic under the finger: a 110 pt accent circle with a 160 pt halo that breathes with
+/// the voice (from 110/160 at silence), shrinking towards 0.4 as the finger slides to cancel.
 struct AloRecordingOrb: View {
     let symbol: String
     let color: Color
     let level: CGFloat
     let cancelProgress: CGFloat
+    var scale: CGFloat? = nil
+    var hitTesting = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    private var effectiveLevel: CGFloat {
+        let value = min(1, max(0, level))
+#if DEBUG
+        // The screenshot fixture has no microphone: show a voice at half volume.
+        if value == 0, UserDefaults.standard.string(forKey: "ALO_UI_VOICE_RECORDING") != nil { return 0.55 }
+#endif
+        return value
+    }
+
     var body: some View {
+        let minimum = AloRecordingMetrics.innerCircle / AloRecordingMetrics.outerCircle
+        let level = effectiveLevel
+        let inner = scale ?? (1 - cancelProgress * 0.5)
         ZStack {
-            Circle().fill(color.opacity(0.18))
-                .scaleEffect(reduceMotion ? 1 : 1 + min(1, max(0, level)) * (50 / 110))
+            Circle().fill(color.opacity(0.2))
+                .frame(width: AloRecordingMetrics.outerCircle, height: AloRecordingMetrics.outerCircle)
+                .scaleEffect(reduceMotion ? minimum : minimum + level * (1 - minimum))
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: level)
-            Circle().fill(color)
-            Image(systemName: symbol)
-                .font(.system(size: 26, weight: .medium)).foregroundStyle(.white)
+            ZStack {
+                Circle().fill(color)
+                Image(systemName: symbol)
+                    .font(.system(size: 26, weight: .medium)).foregroundStyle(.white)
+                    .contentTransition(.symbolEffect(.replace))
+            }
+            .frame(width: AloRecordingMetrics.innerCircle, height: AloRecordingMetrics.innerCircle)
+            .scaleEffect(reduceMotion ? 1 : inner)
         }
-        .frame(width: 110, height: 110)
-        .scaleEffect(reduceMotion ? 1 : 1 - cancelProgress * 0.5)
-        .shadow(color: color.opacity(0.18), radius: 10, y: 3)
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
+        .frame(width: AloRecordingMetrics.innerCircle, height: AloRecordingMetrics.innerCircle)
+        .allowsHitTesting(hitTesting)
+        .accessibilityHidden(!hitTesting)
     }
 }
 

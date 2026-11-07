@@ -98,21 +98,35 @@ struct AloNativeBackSwipe: UIViewControllerRepresentable {
 struct AloSocialSettingsButton: View {
     let label: String
     let identifier: String
+    /// Over a picture (the profile's cover) the gear sits on glass; in a screen's header it is a plain icon, as on the website.
+    var onGlass = true
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: "gearshape")
-                .font(.system(size: 19, weight: .regular))
-                .foregroundStyle(AloTheme.muted)
+                .font(.system(size: onGlass ? 19 : 22, weight: .regular))
+                .foregroundStyle(AloTheme.text)
                 .frame(width: AloSocialMetrics.glassButton, height: AloSocialMetrics.glassButton)
-                .modifier(AloChatGlass(interactive: false, role: .chrome))
+                .modifier(AloOptionalChromeGlass(enabled: onGlass))
                 .frame(width: 44, height: 44)
                 .contentShape(Rectangle())
         }
         .buttonStyle(AloControlPressStyle())
         .accessibilityLabel(label)
         .accessibilityIdentifier(identifier)
+    }
+}
+
+private struct AloOptionalChromeGlass: ViewModifier {
+    let enabled: Bool
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content.modifier(AloChatGlass(interactive: false, role: .chrome))
+        } else {
+            content
+        }
     }
 }
 
@@ -126,15 +140,19 @@ struct AloSocialHeader: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
-            AloSocialTitle(text: title, size: min(titleSize, AloSocialMetrics.maximumTitleSize))
-                .accessibilityIdentifier(identifier + ".title")
-            // The connection state sits beside the title, so it never changes the header height.
+            // The connection state sits on the left of the centred title, so it never changes the header height.
             if !subtitle.isEmpty {
                 Text(subtitle).font(.caption.weight(.medium)).foregroundStyle(AloTheme.accent)
-                    .lineLimit(1).minimumScaleFactor(0.8)
+                    .lineLimit(1).minimumScaleFactor(0.7).frame(maxWidth: 76, alignment: .leading)
             }
             Spacer(minLength: 0)
-            AloSocialSettingsButton(label: settingsLabel, identifier: identifier + ".settings", action: onSettings)
+            AloSocialSettingsButton(label: settingsLabel, identifier: identifier + ".settings", onGlass: false, action: onSettings)
+        }
+        .overlay {
+            AloSocialTitle(text: title, size: min(titleSize, AloSocialMetrics.maximumTitleSize))
+                .accessibilityIdentifier(identifier + ".title")
+                .padding(.horizontal, 52)
+                .allowsHitTesting(false)
         }
         .frame(minHeight: AloSocialMetrics.controlHeight)
         .foregroundStyle(AloTheme.text)

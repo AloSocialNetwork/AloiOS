@@ -108,6 +108,16 @@ final class AloDesignReferenceUITests: XCTestCase {
             result.tap()
             sleep(2)
             capture("ref-user-profile")
+            // Block, report and the secret chat live in «⋯» on the banner, not as big buttons under it (2026-10-27).
+            XCTAssertFalse(app.buttons["Заблокировать"].exists, "no big block button under the card")
+            let more = app.buttons["alo.profile.more"]
+            XCTAssertTrue(more.waitForExistence(timeout: 4))
+            more.tap()
+            XCTAssertTrue(app.buttons["Пожаловаться"].waitForExistence(timeout: 4))
+            sleep(1)
+            capture("ref-user-profile-menu")
+            app.buttons["Пожаловаться"].firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).withOffset(CGVector(dx: 0, dy: -400)).tap()
+            sleep(1)
             app.swipeUp()
             sleep(1)
             capture("ref-user-profile-2")

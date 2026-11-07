@@ -31,12 +31,14 @@ enum AloQRCodeLoginFailure: Error {
     }
 }
 
-/// Scanning only prepares a confirmation. It never grants access on its own.
+/// Scanning only prepares a confirmation. It never grants access on its own: the app first asks the server which
+/// device wants to sign in («Войти на устройстве Chrome · macOS?»), and only the button approves it.
 @MainActor
 final class AloQRCodeApprovalFlow: ObservableObject {
     enum State: Equatable {
         case scanning
-        case confirming(AloQRCodeLoginPayload)
+        case inspecting(AloQRCodeLoginPayload)
+        case confirming(AloQRCodeLoginPayload, AloQRCodeLoginDevice)
         case approving
         case approved
         case failed(String)
@@ -44,13 +46,48 @@ final class AloQRCodeApprovalFlow: ObservableObject {
 
     @Published private(set) var state: State = .scanning
 
+    init() {}
+
+    /// Opened from a link (the system camera, a universal link): skip the camera, go straight to the question.
+    init(opening payload: AloQRCodeLoginPayload) {
+        open(payload)
+    }
+
     func scanned(_ raw: String) {
         guard state == .scanning else { return }
-        guard let payload = AloQRCodeLoginPayload(rawPayload: raw) else {
-            state = .failed("Это не QR-код входа Alo. Отсканируйте код с экрана «Вход по QR».")
+        if AloQRCodeLoginPayload(deviceLinkPayload: raw) != nil {
+            state = .failed("Этот код показывает устройство, где уже выполнен вход. Его сканируют на новом устройстве с экрана входа.")
             return
         }
-        state = .confirming(payload)
+        guard let payload = AloQRCodeLoginPayload(rawPayload: raw) else {
+            state = .failed("Это не QR-код входа Alo. Откройте на компьютере страницу входа Alo и наведите камеру на код.")
+            return
+        }
+        open(payload)
+    }
+
+    private func open(_ payload: AloQRCodeLoginPayload) {
+        guard payload.isFromTrustedHost else {
+            state = .failed("Этот QR-код с другого сайта (\(AloPunycode.displayHost(payload.webHost))). Входите только на сайте Alo.")
+            return
+        }
+        state = .inspecting(payload)
+    }
+
+    /// An older server has no `inspect`: then the question is asked without the device's name.
+    func inspect(load: (AloQRCodeLoginPayload) async throws -> AloQRCodeLoginDevice) async {
+        guard case .inspecting(let payload) = state, !Task.isCancelled else { return }
+        do {
+            let device = try await load(payload)
+            guard !Task.isCancelled, state == .inspecting(payload) else { return }
+            state = .confirming(payload, device)
+        } catch let error as AloAPIError where error.status == 404 && error.code.isEmpty {
+            guard state == .inspecting(payload) else { return }
+            state = .confirming(payload, .unknown)
+        } catch {
+            guard !Task.isCancelled, state == .inspecting(payload) else { return }
+            state = .failed(AloQRCodeLoginFailure.message(for: error))
+        }
     }
 
     func reset() { state = .scanning }
@@ -61,7 +98,7 @@ final class AloQRCodeApprovalFlow: ObservableObject {
     }
 
     func confirm(approve: (AloQRCodeLoginPayload) async throws -> Void) async {
-        guard case .confirming(let payload) = state, !Task.isCancelled else { return }
+        guard case .confirming(let payload, _) = state, !Task.isCancelled else { return }
         state = .approving
         do {
             try await approve(payload)

@@ -54,7 +54,7 @@ struct AlertsView: View {
                             .padding(.top, 48)
                     }
                     ForEach(sections) { section in
-                        Text(section.title).font(.subheadline.weight(.semibold)).foregroundStyle(AloTheme.muted)
+                        Text(section.title).font(.system(size: 20, weight: .bold)).foregroundStyle(AloTheme.text)
                             .padding(.top, 18).padding(.bottom, 4).padding(.horizontal, 16)
                         ForEach(section.items) { item in
                             row(item)

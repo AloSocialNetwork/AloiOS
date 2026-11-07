@@ -136,9 +136,15 @@ struct AloQRCodeFlowTests {
         await flow.confirm { _ in calls += 1 }
         #expect(calls == 0)
         flow.scanned(qrTestPayload)
-        #expect(flow.state == .confirming(try #require(AloQRCodeLoginPayload(rawPayload: qrTestPayload))))
+        let payload = try #require(AloQRCodeLoginPayload(rawPayload: qrTestPayload))
+        #expect(flow.state == .inspecting(payload))
+        await flow.confirm { _ in calls += 1 }
+        #expect(calls == 0, "Approval waits until the device is known")
+        let device = AloQRCodeLoginDevice(label: "Chrome · macOS", ip: "203.0.113.24", deviceType: "desktop")
+        await flow.inspect { _ in device }
+        #expect(flow.state == .confirming(payload, device))
         flow.scannerFailed("Late camera callback after a successful scan")
-        #expect(flow.state == .confirming(try #require(AloQRCodeLoginPayload(rawPayload: qrTestPayload))))
+        #expect(flow.state == .confirming(payload, device))
         #expect(calls == 0)
         await flow.confirm { _ in calls += 1 }
         await flow.confirm { _ in calls += 1 }
@@ -151,14 +157,42 @@ struct AloQRCodeFlowTests {
         guard case .failed = flow.state else { Issue.record("Invalid scan must show error"); return }
         flow.reset()
         flow.scanned(qrTestPayload)
+        await flow.inspect { _ in
+            throw AloAPIError(status: 409, code: "QR_LOGIN_NOT_PENDING", message: "not pending", payload: [:])
+        }
+        #expect(flow.state == .failed(AloQRCodeLoginFailure.message(for: AloQRCodeLoginFailure.expired)))
+        flow.reset()
+        flow.scanned(qrTestPayload)
+        await flow.inspect { _ in .unknown }
         await flow.confirm { _ in
             throw AloAPIError(status: 409, code: "QR_LOGIN_NOT_PENDING", message: "not pending", payload: [:])
         }
         #expect(flow.state == .failed(AloQRCodeLoginFailure.message(for: AloQRCodeLoginFailure.expired)))
         flow.reset()
         flow.scanned(qrTestPayload)
+        // A server without `inspect` still lets the owner confirm, just without the device name.
+        await flow.inspect { _ in throw AloAPIError(status: 404, code: "", message: "Маршрут API не найден", payload: [:]) }
         await flow.confirm { _ in }
         #expect(flow.state == .approved)
+    }
+
+    @Test @MainActor func websiteLinkFromThisServerOpensTheQuestionAndForeignSitesAreRefused() throws {
+        let host = try #require(AloServerConfiguration.baseURLs.first?.host)
+        let link = "https://\(host)/qr#\(qrTestID).\(qrTestSecret)"
+        let payload = try #require(AloQRCodeLoginPayload(rawPayload: link))
+        #expect(payload.requestID == qrTestID && payload.secret == qrTestSecret && payload.isFromTrustedHost)
+        #expect(AloDeepLinkTarget(url: try #require(URL(string: link))) == .qrLogin(payload))
+        #expect(AloQRCodeApprovalFlow(opening: payload).state == .inspecting(payload))
+        let foreign = try #require(AloQRCodeLoginPayload(rawPayload: "https://attacker.invalid/qr#\(qrTestID).\(qrTestSecret)"))
+        #expect(!foreign.isFromTrustedHost)
+        #expect(AloDeepLinkTarget(url: try #require(URL(string: "https://attacker.invalid/qr#\(qrTestID).\(qrTestSecret)"))) == nil)
+        let flow = AloQRCodeApprovalFlow()
+        flow.scanned("https://attacker.invalid/qr#\(qrTestID).\(qrTestSecret)")
+        guard case .failed = flow.state else { Issue.record("A code from another site must not be approved"); return }
+        for raw in ["https://\(host)/qr?x=1#\(qrTestID).\(qrTestSecret)", "https://\(host)/qr#\(qrTestID)",
+                    "https://\(host)/other#\(qrTestID).\(qrTestSecret)", "https://\(host)/qr#\(qrTestID).\(qrTestSecret).x"] {
+            #expect(AloQRCodeLoginPayload(rawPayload: raw) == nil)
+        }
     }
 }
 
@@ -218,6 +252,9 @@ struct AloQRCodeAPIContractTests {
                 let query = URLComponents(url: try #require(request.url), resolvingAgainstBaseURL: false)?.queryItems
                 #expect(query?.first(where: { $0.name == "secret" })?.value == qrTestSecret)
                 return (200, ["status": "approved"])
+            case "POST /api/auth/qr-login/\(qrTestID)/inspect":
+                #expect(try QRContractURLProtocol.jsonBody(request)["secret"] as? String == qrTestSecret)
+                return (200, ["ok": true, "device": ["label": "Chrome · macOS", "ip": "203.0.113.24", "deviceType": "desktop"]])
             case "POST /api/auth/qr-login/\(qrTestID)/approve", "POST /api/auth/qr-login/\(qrTestID)/complete":
                 #expect(try QRContractURLProtocol.jsonBody(request)["secret"] as? String == qrTestSecret)
                 return (200, ["ok": true])
@@ -230,10 +267,13 @@ struct AloQRCodeAPIContractTests {
         let api = AloAPIClient(baseURLs: [URL(string: "http://qr-contract-test.invalid/")!], configuration: configuration)
         let request = try await api.startQRCodeLogin()
         let payload = try #require(AloQRCodeLoginPayload(requestID: request.requestID, rawPayload: request.payload))
+        let device = try await api.inspectQRCodeLogin(requestID: payload.requestID, secret: payload.secret)
+        #expect(device == AloQRCodeLoginDevice(label: "Chrome · macOS", ip: "203.0.113.24", deviceType: "desktop"))
         try await api.approveQRCodeLogin(requestID: payload.requestID, secret: payload.secret)
         #expect(try await api.loadQRCodeLoginStatus(requestID: payload.requestID, secret: payload.secret).isApproved)
         try await api.completeQRCodeLogin(requestID: payload.requestID, secret: payload.secret)
-        #expect(routes == ["POST /api/auth/qr-login/start", "POST /api/auth/qr-login/\(qrTestID)/approve",
+        #expect(routes == ["POST /api/auth/qr-login/start", "POST /api/auth/qr-login/\(qrTestID)/inspect",
+                           "POST /api/auth/qr-login/\(qrTestID)/approve",
                            "GET /api/auth/qr-login/\(qrTestID)", "POST /api/auth/qr-login/\(qrTestID)/complete"])
     }
 }

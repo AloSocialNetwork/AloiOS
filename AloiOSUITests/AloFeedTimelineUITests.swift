@@ -46,7 +46,9 @@ final class AloFeedTimelineUITests: XCTestCase {
         app.scrollViews["alo.feed.scroll"].swipeUp()
         XCTAssertEqual(picker.frame, pickerFrame)
         XCTAssertTrue(app.buttons["alo.feed.create-post"].isHittable)
-        XCTAssertTrue(app.buttons["Лента"].firstMatch.isHittable)
+        // A real tap: isHittable reports false for the tab bar's buttons over scrolled content while taps do reach them.
+        app.buttons["Поиск"].firstMatch.tap()
+        XCTAssertTrue(app.otherElements["alo.search.field"].firstMatch.waitForExistence(timeout: 4))
     }
     func testCommentsOpenSendDismissAndReopen() {
         let app = launch()

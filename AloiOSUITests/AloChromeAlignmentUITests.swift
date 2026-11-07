@@ -57,7 +57,7 @@ final class AloChromeAlignmentUITests: XCTestCase {
         app.terminate()
     }
 
-    func testSettingsUseTextBackAndPreserveNavigationHistory() {
+    func testSettingsUseCircleBackAndPreserveNavigationHistory() {
         let app = launch("social-overview")
         app.buttons["Профиль"].firstMatch.tap()
         XCTAssertTrue(app.buttons["alo.profile.settings"].waitForExistence(timeout: 4))
@@ -65,14 +65,16 @@ final class AloChromeAlignmentUITests: XCTestCase {
         let back = app.buttons["alo.settings.back"]
         XCTAssertTrue(back.waitForExistence(timeout: 4))
         XCTAssertEqual(back.label, "Назад")
-        XCTAssertGreaterThanOrEqual(back.frame.width, 82)
+        // The glass back circle of every full screen (Android, the web), not «‹ Назад».
+        XCTAssertEqual(back.frame.width, back.frame.height, accuracy: 1)
         capture("settings-text-back-root")
         for title in ["Приватность", "Уведомления", "Бизнес-профиль", "Безопасность"] {
             app.buttons[title].firstMatch.tap()
             XCTAssertTrue(back.waitForExistence(timeout: 4))
             XCTAssertTrue(back.isHittable)
             XCTAssertGreaterThanOrEqual(back.frame.height, 44 - 0.01)
-            XCTAssertGreaterThanOrEqual(back.frame.width, 82)
+            // The glass back circle of every full screen (Android, the web), not «‹ Назад».
+        XCTAssertEqual(back.frame.width, back.frame.height, accuracy: 1)
             if title == "Приватность" || title == "Уведомления" {
                 XCTAssertTrue(app.buttons["Сохранить"].exists)
                 XCTAssertFalse(app.buttons["Сохранить"].isEnabled)
@@ -219,7 +221,7 @@ final class AloChromeAlignmentUITests: XCTestCase {
         }
     }
 
-    func testSettingsTextBackWithLargeText() {
+    func testSettingsCircleBackWithLargeText() {
         let app = launch("social-overview", largeText: true)
         app.buttons["Профиль"].firstMatch.tap()
         XCTAssertTrue(app.buttons["alo.profile.settings"].waitForExistence(timeout: 4))
@@ -230,7 +232,8 @@ final class AloChromeAlignmentUITests: XCTestCase {
         XCTAssertTrue(back.waitForExistence(timeout: 4))
         XCTAssertTrue(back.isHittable)
         XCTAssertEqual(back.label, "Назад")
-        XCTAssertGreaterThanOrEqual(back.frame.width, 82)
+        // The glass back circle of every full screen (Android, the web), not «‹ Назад».
+        XCTAssertEqual(back.frame.width, back.frame.height, accuracy: 1)
         XCTAssertGreaterThanOrEqual(back.frame.height, 44 - 0.01)
         XCTAssertTrue(app.buttons["Сохранить"].exists)
         capture("settings-text-back-large-text")
@@ -246,7 +249,7 @@ final class AloChromeAlignmentUITests: XCTestCase {
             XCTAssertTrue(popular.waitForExistence(timeout: 15))
             // The identical shared segment component adds 4pt on both outer
             // edges. Comparing the complete button row compares both ovals.
-            let feedFrame = popular.frame.union(subscriptions.frame)
+            let feedFrame = popular.frame.union(app.buttons["alo.feed.tab.top"].frame)
             capture("aligned-feed-\(largeText ? "large-text" : "regular")")
             app.buttons["Уведы"].firstMatch.tap()
             let all = app.buttons["alo.alerts.filter.all"]

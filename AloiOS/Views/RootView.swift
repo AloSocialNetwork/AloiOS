@@ -75,6 +75,11 @@ struct RootView: View {
             AloStoryExpiredSheet(notice: notice)
                 .environmentObject(app)
         }
+        // The website's sign-in QR read by the system camera: the same question as after an in-app scan.
+        .sheet(item: $app.qrLoginApproval) { payload in
+            AloQRCodeApprovalSheet(flow: AloQRCodeApprovalFlow(opening: payload))
+                .environmentObject(app)
+        }
         .sheet(item: $app.pushFriendRequest) { item in
             AloPushFriendRequestSheet(item: item).environmentObject(app)
         }

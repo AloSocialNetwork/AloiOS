@@ -263,7 +263,8 @@ struct AloAvatar: View {
     }
 }
 
-private enum AloAvatarPalette {
+/// Also the colour of a sender's name in a group (the bright end), so the name matches the avatar beside it.
+enum AloAvatarPalette {
     // The original letter-avatar palette is deliberately bright and distinct.
     // It keeps inbox rows identifiable without adding color to the page chrome.
     private static let pairs: [(UInt32, UInt32)] = [
@@ -394,15 +395,17 @@ struct AloPostCard: View {
                                 size: 40,
                                 colorSeed: String(post.author.id)
                             )
+                            .aloPremiumFrame(userId: post.author.isChannel ? 0 : post.author.id, size: 40)
                             VStack(alignment: .leading, spacing: 2) {
                                 HStack(spacing: 5) {
-                                    Text(post.author.name)
-                                        .font(.system(size: 17, weight: .bold))
+                                    AloPremiumName(text: post.author.name, userId: post.author.isChannel ? 0 : post.author.id,
+                                                   font: .system(size: 17, weight: .bold))
                                     if post.author.verified {
                                         Image(systemName: "checkmark.seal.fill")
                                             .font(.system(size: 15, weight: .bold))
                                             .foregroundStyle(AloTheme.accent)
                                     }
+                                    AloPremiumMark(userId: post.author.isChannel ? 0 : post.author.id, size: 15)
                                 }
                                 Text(postMeta)
                                     .font(.system(size: 13, weight: .semibold))
@@ -502,7 +505,7 @@ struct AloPostCard: View {
     }
 
     private func copyPostLink() {
-        UIPasteboard.general.string = AloDeepLinkTarget.postURL(postId: post.id)?.absoluteString
+        UIPasteboard.general.string = AloDeepLinkTarget.postURL(post: post)?.absoluteString
         app.notice = "Ссылка на пост скопирована."
     }
 
@@ -633,12 +636,12 @@ struct AloPostMediaGrid: View {
                     }
                 }
                 if item.type == "video" {
+                    // The website's .tile .play: the same glass as the rest of the interface.
                     Image(systemName: "play.fill")
-                        .font(.system(size: 22, weight: .bold))
+                        .font(.system(size: 24, weight: .bold))
                         .foregroundStyle(.white)
-                        .frame(width: 52, height: 52)
-                        .background(Color.black.opacity(0.45))
-                        .clipShape(Circle())
+                        .frame(width: 56, height: 56)
+                        .modifier(AloChatGlass(interactive: false, role: .chrome))
                 }
             }
             .frame(width: proxy.size.width, height: proxy.size.height)

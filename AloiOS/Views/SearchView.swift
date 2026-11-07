@@ -48,6 +48,10 @@ struct SearchView: View {
     }
 
     var body: some View {
+        AloLiveTextReader(text: app.liveSearchQuery) { content }
+    }
+
+    private var content: some View {
         AloSocialScrollScreen(identifier: "alo.search.scroll") {
             VStack(spacing: AloSocialMetrics.searchSpacing) {
                 AloSocialHeader(title: "Поиск", subtitle: connectionSubtitle,
@@ -262,11 +266,13 @@ struct SearchView: View {
             if item.relation?.friendStatus == "incoming" {
                 if (item.relation?.incomingRequestId ?? 0) > 0 { incomingRequest = item }
                 else { app.openProfile(item) }
+            } else if followsInsteadOfRequest(item) {
+                app.toggleFollowUser(userId: item.id)
             } else { app.sendFriendRequest(item) }
         } label: {
             Text(friendButtonTitle(for: item)).fixedSize(horizontal: true, vertical: false)
         }
-        .buttonStyle(AloSocialRequestButtonStyle(prominent: friendButtonEnabled(for: item)))
+        .buttonStyle(AloSocialRequestButtonStyle(prominent: friendButtonEnabled(for: item) && !(followsInsteadOfRequest(item) && item.relation?.following == true)))
         .disabled(!friendButtonEnabled(for: item))
     }
 
@@ -278,6 +284,12 @@ struct SearchView: View {
         }
     }
 
+    /// The rule of the profile, the website and Android: a friend request first; following only for a person who closed
+    /// friend requests (a follow back makes friends).
+    private func followsInsteadOfRequest(_ item: AloEntitySummary) -> Bool {
+        (item.relation?.friendStatus ?? "none") == "none" && item.relation?.canSendFriendRequest == false
+    }
+
     private func friendButtonTitle(for item: AloEntitySummary) -> String {
         switch item.relation?.friendStatus {
         case "friends":
@@ -285,8 +297,9 @@ struct SearchView: View {
         case "outgoing":
             return "Отправлено"
         case "incoming":
-            return "Ответить"
+            return "Принять"
         default:
+            if followsInsteadOfRequest(item) { return item.relation?.following == true ? "Вы подписаны" : "Подписаться" }
             return "Добавить"
         }
     }

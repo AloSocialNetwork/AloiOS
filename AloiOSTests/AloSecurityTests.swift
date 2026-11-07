@@ -1,4 +1,5 @@
 import CryptoKit
+import Testing
 import XCTest
 @testable import AloiOS
 
@@ -42,6 +43,28 @@ final class AloSecurityTests: XCTestCase {
         XCTAssertNil(AloDeepLinkTarget(url: try XCTUnwrap(URL(string: "http://\(host)/s/AbCdEf123456")), configuredWebHost: host))
         XCTAssertNotNil(AloDeepLinkTarget.storyURL(code: "AbCdEf123456"))
         XCTAssertNil(AloDeepLinkTarget.storyURL(code: "../../x"))
+    }
+
+    func testPostLinksUseTheRandomCodeAndStillReadOldNumbers() throws {
+        let host = "links.alo.test"
+        XCTAssertEqual(AloDeepLinkTarget(url: try XCTUnwrap(URL(string: "https://\(host)/p/Ab3xY9kLm0Qz")), configuredWebHost: host),
+                       .postCode("Ab3xY9kLm0Qz"))
+        XCTAssertEqual(AloDeepLinkTarget(url: try XCTUnwrap(URL(string: "alo://p/Ab3xY9kLm0Qz")), configuredWebHost: host),
+                       .postCode("Ab3xY9kLm0Qz"))
+        XCTAssertEqual(AloDeepLinkTarget(url: try XCTUnwrap(URL(string: "https://\(host)/p/42")), configuredWebHost: host),
+                       .post(42))
+        XCTAssertNil(AloDeepLinkTarget(url: try XCTUnwrap(URL(string: "https://\(host)/p/short")), configuredWebHost: host))
+        // Digits only are never a code (an old number link at most), so a number can't be mistaken for a code.
+        XCTAssertNotEqual(AloDeepLinkTarget(url: try XCTUnwrap(URL(string: "https://\(host)/p/012345678901")), configuredWebHost: host),
+                          .postCode("012345678901"))
+        XCTAssertFalse(AloDeepLinkTarget.isPostCode("012345678901"))
+        XCTAssertFalse(AloDeepLinkTarget.isPostCode("../../x/abcde"))
+
+        let coded = AloPost(["id": 42, "body": "Тест", "shareCode": "Ab3xY9kLm0Qz"])
+        XCTAssertTrue(AloDeepLinkTarget.postURL(post: coded)?.absoluteString.hasSuffix("/p/Ab3xY9kLm0Qz") == true)
+        XCTAssertEqual(coded.withEngagement(likeCount: 3).shareCode, "Ab3xY9kLm0Qz")
+        let old = AloPost(["id": 42, "body": "Тест"])
+        XCTAssertTrue(AloDeepLinkTarget.postURL(post: old)?.absoluteString.hasSuffix("/p/42") == true)
     }
 
     func testDeepLinksRejectForeignInsecureAndAmbiguousURLs() throws {
@@ -1266,5 +1289,31 @@ final class AloSecurityTests: XCTestCase {
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
+    }
+}
+
+@Suite struct AloTextTameTests {
+    private func marks(_ text: String) -> Int {
+        text.unicodeScalars.filter { $0.properties.generalCategory == .nonspacingMark }.count
+    }
+
+    @Test func aTowerOfMarksIsCut() {
+        let tamed = AloTextTame.text("Т" + String(repeating: "\u{0301}", count: 40) + "ест")
+        #expect(marks(tamed) == 3)
+        #expect(tamed.hasSuffix("ест"))
+    }
+
+    @Test func aTowerBehindJoinersIsCut() {
+        let tamed = AloTextTame.text("И\u{200C}\u{0301}\u{0301}\u{0301}\u{200C}\u{0301}\u{0301}\u{0301}м")
+        #expect(marks(tamed) <= 3)
+    }
+
+    @Test func directionOverridesAreDropped() {
+        #expect(!AloTextTame.text("имя\u{202E}текст").unicodeScalars.contains("\u{202E}"))
+    }
+
+    @Test func ordinaryTextAndEmojiStay() {
+        let text = "Привет, Việt नमस्ते 👨‍👩‍👧 ❤️ 1️⃣"
+        #expect(AloTextTame.text(text) == text)
     }
 }

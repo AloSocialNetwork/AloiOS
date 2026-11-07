@@ -86,6 +86,15 @@ struct AloStoredAccount: Identifiable, Codable, Equatable {
     }
 }
 
+/// Another account saved on this phone, as the switcher shows it (GET /api/auth/session-summary).
+struct AloAccountSummary: Equatable {
+    let userId: Int
+    let name: String
+    let username: String
+    let avatarURL: String
+    let unreadMessages: Int
+}
+
 enum AloAccountSessionStoreError: LocalizedError {
     case missingSession
     case serializationFailed
@@ -112,6 +121,9 @@ final class AloAccountSessionStore {
 
     private let metadataKey = "alo.ios.account-metadata.v1"
     private let keychainService = "com.alo.ios.account-sessions.v1"
+
+    /// Telegram's limit, kept by the server for a browser too (server/src/modules/auth/accounts.js).
+    static let maxAccounts = 3
 
     private init() {}
 

@@ -64,6 +64,10 @@ private final class AloQRFixtureProtocol: URLProtocol {
             status = 200
             json = ["requestId": Self.requestID, "qrPayload": Self.payload,
                     "expiresAt": ISO8601DateFormatter().string(from: Date().addingTimeInterval(120))]
+        } else if path.hasSuffix("/inspect") {
+            status = 200
+            json = ["ok": true, "device": ["label": "Chrome · macOS", "browser": "Chrome", "platform": "macOS",
+                                           "deviceType": "desktop", "ip": "203.0.113.24"]]
         } else if path.hasSuffix("/approve") {
             status = 200; json = ["ok": true]
         } else if path == "/api/auth/qr-login/\(Self.requestID)" {

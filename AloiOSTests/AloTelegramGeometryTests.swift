@@ -90,7 +90,8 @@ struct AloTelegramGeometryTests {
     }
 
     @Test func recordingCameraFitsBetweenChromeAndControls() {
-        for (width, height, expected) in [(375.0, 647.0, 351.0), (402.0, 778.0, 378.0), (320.0, 568.0, 216.0)] {
+        // Telegram VideoMessageCameraScreen: min(369, width − 24).
+        for (width, height, expected) in [(375.0, 647.0, 351.0), (402.0, 778.0, 369.0), (320.0, 568.0, 296.0)] {
             let viewport = CGSize(width: width, height: height)
             let diameter = AloCircleRecordingLayout.diameter(viewport: viewport, topChrome: 64, bottomChrome: 54)
             let center = AloCircleRecordingLayout.centerY(viewport: viewport, diameter: diameter, topChrome: 64, bottomChrome: 54)

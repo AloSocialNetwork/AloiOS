@@ -152,15 +152,16 @@ struct AloAccountSecurityControls: View {
                 isQRApprovalPresented = true
             } label: {
                 AloSecurityRow(
-                    title: "Подтвердить вход по QR-коду",
-                    subtitle: "Сканируйте код, показанный на устройстве, где выполняется вход",
+                    title: "Подключить устройство",
+                    subtitle: "Наведите камеру на QR-код на странице входа Alo на компьютере",
                     icon: "qrcode.viewfinder",
                     tint: AloTheme.accent,
                     showsChevron: true
                 )
             }
             .buttonStyle(AloPressBounceButtonStyle(pressedScale: 0.985))
-            .accessibilityHint("Открыть системный сканер QR-кода")
+            .accessibilityHint("Открыть камеру для QR-кода")
+            .accessibilityIdentifier("alo.qr-approval.entry")
             Button {
                 isDeviceLinkShowPresented = true
             } label: {
@@ -351,7 +352,7 @@ struct AloQRCodeLoginSheet: View {
                             .accessibilityElement(children: .ignore)
                             .accessibilityLabel("QR-код для входа в Alo")
                             .accessibilityIdentifier("alo.qr-login.code")
-                        Text("На устройстве, где уже открыт Alo, перейдите в настройки аккаунта → «Подтвердить вход по QR-коду» и отсканируйте код.")
+                        Text("На телефоне, где уже открыт Alo, откройте Настройки → Безопасность → «Подключить устройство» и наведите камеру на код. Подойдёт и обычная камера телефона.")
                             .font(.body)
                         Text("Код действует 2 минуты. Подтвердите вход только на своём устройстве.")
                             .font(.subheadline)
@@ -474,7 +475,8 @@ struct AloQRCodeApprovalSheet: View {
             .multilineTextAlignment(.center)
             .foregroundStyle(AloTheme.text)
             .background(AloTheme.background)
-            .navigationTitle("Сканировать QR")
+            .navigationTitle("Подключить устройство")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Закрыть") { dismiss() }
@@ -491,6 +493,12 @@ struct AloQRCodeApprovalSheet: View {
             }
         }
         .task(id: cameraAttempt) { await prepareCamera() }
+        .task(id: flow.state) {
+            guard case .inspecting = flow.state else { return }
+            await flow.inspect { payload in
+                try await app.api.inspectQRCodeLogin(requestID: payload.requestID, secret: payload.secret)
+            }
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active, !cameraReady, !isCheckingCamera { cameraAttempt += 1 }
         }
@@ -506,13 +514,23 @@ struct AloQRCodeApprovalSheet: View {
     private var approvalContent: some View {
         VStack(spacing: 24) {
             switch flow.state {
-            case .confirming:
-                Image(systemName: "lock.shield").font(.largeTitle).accessibilityHidden(true)
-                Text("Подключить новое устройство?").font(.title2.weight(.semibold))
+            case .inspecting:
+                ProgressView("Проверяем код…")
+            case .confirming(_, let device):
+                Image(systemName: device.deviceType == "mobile" ? "iphone" : "desktopcomputer")
+                    .font(.system(size: 44)).foregroundStyle(AloTheme.accent).accessibilityHidden(true)
+                // «Chrome · macOS» stays on one line.
+                Text(device.label.isEmpty ? "Подключить новое устройство?" : "Войти на устройстве \(device.label.replacingOccurrences(of: " ", with: "\u{00A0}"))?")
+                    .font(.title2.weight(.semibold))
                     .accessibilityAddTraits(.isHeader)
                     .accessibilityFocused($confirmationFocused)
-                Text("На устройстве с этим QR-кодом будет открыт ваш аккаунт Alo. Подтверждайте вход только на устройстве, которым пользуетесь сами.")
+                    .accessibilityIdentifier("alo.qr-approval.title")
+                Text((device.ip.isEmpty ? "" : "IP \(device.ip) · ") + "запрос только что")
+                    .font(.subheadline.weight(.semibold))
+                    .accessibilityIdentifier("alo.qr-approval.device")
+                Text("На этом устройстве откроется ваш аккаунт Alo. Подтверждайте вход, только если сами сканируете код со своего компьютера.")
                     .font(.body)
+                    .foregroundStyle(AloTheme.muted)
                 Button("Подтвердить вход") {
                     guard !approvalRequested else { return }
                     approvalRequested = true
@@ -524,12 +542,13 @@ struct AloQRCodeApprovalSheet: View {
                     .font(.body.weight(.bold))
                     .disabled(approvalRequested)
                     .accessibilityIdentifier("alo.qr-approval.confirm")
-                Button("Сканировать другой код") { rescan() }.frame(minHeight: 44)
+                Button("Отмена") { dismiss() }.frame(minHeight: 44)
+                    .accessibilityIdentifier("alo.qr-approval.cancel")
             case .approving:
                 ProgressView("Подтверждаем вход…")
             case .approved:
                 Label("Вход подтверждён", systemImage: "checkmark.circle").font(.title2)
-                Text("Другое устройство теперь может открыть ваш аккаунт.").font(.body)
+                Text("Компьютер откроет ваш аккаунт через пару секунд.").font(.body)
                 Button("Готово") { dismiss() }.frame(minHeight: 44).buttonStyle(.borderedProminent).controlSize(.large)
             case .failed(let message):
                 Text(message).font(.body).accessibilityIdentifier("alo.qr-approval.error")
@@ -554,6 +573,14 @@ struct AloQRCodeApprovalSheet: View {
         isCheckingCamera = true
         defer { isCheckingCamera = false }
         guard flow.state == .scanning else { return }
+#if DEBUG
+        // The simulator has no camera: `-ALO_DEBUG_QR_IMAGE <png>` reads a real screenshot of the sign-in page through Vision.
+        if let path = UserDefaults.standard.string(forKey: "ALO_DEBUG_QR_IMAGE"),
+           let value = Self.debugReadQR(path: path) {
+            flow.scanned(value)
+            return
+        }
+#endif
         guard DataScannerViewController.isSupported else { return }
         if AVCaptureDevice.authorizationStatus(for: .video) == .notDetermined {
             let granted = await AVCaptureDevice.requestAccess(for: .video)
@@ -562,6 +589,19 @@ struct AloQRCodeApprovalSheet: View {
         guard !Task.isCancelled else { return }
         cameraReady = AloQRCodeScanner.isAvailable
     }
+
+#if DEBUG
+    private static func debugReadQR(path: String) -> String? {
+        guard let image = UIImage(contentsOfFile: path)?.cgImage else { return nil }
+        let detect = VNDetectBarcodesRequest()
+        // As in AloQRCodeLoginTests: the simulated runtime has no newer ML inference context.
+        detect.revision = VNDetectBarcodesRequestRevision1
+        detect.usesCPUOnly = true
+        detect.symbologies = [.qr]
+        try? VNImageRequestHandler(cgImage: image).perform([detect])
+        return detect.results?.first?.payloadStringValue
+    }
+#endif
 }
 
 struct AloQRCodeImage: View {
@@ -871,14 +911,15 @@ private struct AloStoredAccountRow: View {
     }
 }
 
-private struct AloAccountAvatar: View {
+struct AloAccountAvatar: View {
+    @EnvironmentObject private var app: AloAppModel
     let account: AloStoredAccount
     let size: CGFloat
 
     var body: some View {
         Group {
-            if let url = URL(string: account.avatarURL),
-               !account.avatarURL.isEmpty {
+            // The server gives a path (/uploads/…): it is resolved against the API address.
+            if !account.avatarURL.isEmpty, let url = app.api.absoluteURL(account.avatarURL) {
                 AsyncImage(url: url) { image in
                     image.resizable().scaledToFill()
                 } placeholder: {

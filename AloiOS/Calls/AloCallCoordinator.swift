@@ -47,6 +47,7 @@ final class AloCallCoordinator: NSObject, ObservableObject {
     private var videoSourcePreviewGeneration = 0
     private var pendingPreviewFrontCamera: Bool?
     private var securityHandshake: AloCallSecurityHandshake?
+    private var acceptingCallId = 0
 
     init(api: AloAPIClient, app: AloAppModel) {
         self.api = api
@@ -340,6 +341,7 @@ final class AloCallCoordinator: NSObject, ObservableObject {
                 )
                 return
             }
+            acceptingCallId = call.id
             do {
                 try await api.acceptDirectCall(callId: call.id)
                 ringTimeoutTask?.cancel()
@@ -778,6 +780,20 @@ final class AloCallCoordinator: NSObject, ObservableObject {
 
     private func process(_ signals: [AloDirectCallSignal]) async {
         for signal in signals {
+            // Signals of another call are not for this one: after a reinstall the first poll returns the history of
+            // ended calls, and an old «ice» showed «The remote description was null», an old «decline» could end the
+            // current call. Only an invite starts a call, and only one that is still ringing.
+            if signal.kind == "invite" {
+                if ["ended", "missed", "declined", "cancelled", "busy", "failed"].contains(signal.callStatus.lowercased()) { continue }
+            } else if activeCall?.id != signal.callId {
+                continue
+            }
+            // The caller sends the offer only after someone answered. If it was not this iPhone, the person took the
+            // call on another device: stop ringing here without ending the call for everyone.
+            if ["offer", "ice", "security-confirm", "reconnect-offer"].contains(signal.kind), answeredElsewhere(signal.callId) {
+                finish(reason: .answeredElsewhere, terminalTone: nil)
+                continue
+            }
             switch signal.kind {
             case "invite":
                 await handleInvite(signal)
@@ -1480,13 +1496,25 @@ final class AloCallCoordinator: NSObject, ObservableObject {
         created.setSpeakerOn(call.isSpeakerOn)
         client = created
         if call.isVideoEnabled {
-            let result = await withCheckedContinuation { continuation in
-                created.setVideoEnabled(true, frontCamera: call.isFrontCamera) {
-                    continuation.resume(returning: $0)
+            // A missing or failing camera must not end a video call: it goes on with the camera off (the peer's video
+            // still shows, and the peer learns «camera off» when the call connects). It used to fail the whole call.
+            let result: Result<Void, Error>
+            if AloWebRTCCallClient.hasAnyCamera {
+                result = await withCheckedContinuation { continuation in
+                    created.setVideoEnabled(true, frontCamera: call.isFrontCamera) {
+                        continuation.resume(returning: $0)
+                    }
                 }
+            } else {
+                result = .failure(AloAPIError(status: 0, code: "NO_CAMERA", message: "", payload: [:]))
             }
-            if case let .failure(error) = result {
-                throw error
+            if case .failure = result {
+                created.setVideoEnabled(false)
+                if let latest = activeCall, latest.id == call.id {
+                    let cameraOff = latest.updating(isVideoEnabled: false)
+                    activeCall = cameraOff
+                    reportMediaCapabilityChange(cameraOff)
+                }
             }
         }
     }
@@ -1729,7 +1757,16 @@ final class AloCallCoordinator: NSObject, ObservableObject {
         return fingerprint
     }
 
+    private func answeredElsewhere(_ callId: Int) -> Bool {
+        guard let call = activeCall, call.id == callId else { return false }
+        return call.isIncoming && call.phase == .incoming && acceptingCallId != callId && securityHandshake?.didAccept != true
+    }
+
     private func failCallSecurity() async {
+        if let call = activeCall, answeredElsewhere(call.id) {
+            finish(reason: .answeredElsewhere, terminalTone: nil)
+            return
+        }
         await endNetworkCall(
             message: "Проверка защищённого соединения звонка не прошла.",
             terminalTone: .failed
@@ -1756,6 +1793,12 @@ final class AloCallCoordinator: NSObject, ObservableObject {
             )
             return true
         } catch let error as AloAPIError {
+            // 409: the call is already over on the server (the other side hung up, or another device of ours ended it).
+            // An ordinary end of the call, not a failed security check.
+            if error.status == 409 {
+                if activeCall?.id == callId { finish(reason: .remoteEnded, terminalTone: .ended) }
+                return false
+            }
             failureMessage = error.message
             failureIsRetryable = isRetryableSecurityBootstrapFailure(error)
         } catch {
@@ -2184,7 +2227,7 @@ final class AloCallCoordinator: NSObject, ObservableObject {
     private func scheduleDisconnectTimeout(callId: Int) {
         guard disconnectTimeoutTask == nil else { return }
         disconnectTimeoutTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 30_000_000_000)
+            try? await Task.sleep(nanoseconds: 60_000_000_000)
             guard !Task.isCancelled,
                   let self,
                   let call = self.activeCall,
@@ -2206,7 +2249,8 @@ final class AloCallCoordinator: NSObject, ObservableObject {
             }
         }
         guard microphone else { return false }
-        guard video else { return true }
+        // Without a camera there is nothing to allow: the video call starts with the camera off.
+        guard video, AloWebRTCCallClient.hasAnyCamera else { return true }
         if AVCaptureDevice.authorizationStatus(for: .video) == .authorized { return true }
         return await AVCaptureDevice.requestAccess(for: .video)
     }

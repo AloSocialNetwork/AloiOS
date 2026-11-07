@@ -182,6 +182,15 @@ final class AloLibSignalStore: IdentityKeyStore, PreKeyStore, SignedPreKeyStore,
         }
     }
 
+    /// The session and the remembered identity of one remote address. Used when the server says another device
+    /// (other keys) now holds that address, so the next message starts a fresh session from its bundle.
+    func forgetRemoteAddress(_ address: ProtocolAddress) throws {
+        try synchronized {
+            try removeRecord(sessionStorageKey(address))
+            try removeRecord(remoteIdentityStorageKey(address))
+        }
+    }
+
     func storeSession(_ record: SessionRecord, for address: ProtocolAddress, context: StoreContext) throws {
         try synchronized { try writeRecord(record.serialize(), key: sessionStorageKey(address)) }
     }
@@ -225,6 +234,12 @@ final class AloLibSignalStore: IdentityKeyStore, PreKeyStore, SignedPreKeyStore,
             return nil
         }
         return try synchronized { try readRecord(messagePlaintextStorageKey(contextId)) }
+    }
+
+    /// A secret message that is gone (its timer ended, its chat was deleted) leaves no text on this device.
+    func forgetMessagePlaintext(contextId: String) {
+        guard contextId.range(of: "^[a-zA-Z0-9_-]{12,160}$", options: .regularExpression) != nil else { return }
+        try? synchronized { try removeRecord(messagePlaintextStorageKey(contextId)) }
     }
 
     private func sessionStorageKey(_ address: ProtocolAddress) -> String {

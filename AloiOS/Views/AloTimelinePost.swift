@@ -82,7 +82,9 @@ struct AloTimelinePost: View, Equatable {
     private var authorAvatar: some View {
         Button(action: onAuthor) {
             AloAvatar(name: post.author.name, url: post.author.avatarUrl,
-                      size: 42, colorSeed: String(post.author.id)).frame(width: 44, height: 44)
+                      size: 42, colorSeed: String(post.author.id))
+                .aloPremiumFrame(userId: post.author.isChannel ? 0 : post.author.id, size: 42)
+                .frame(width: 44, height: 44)
         }
         .buttonStyle(AloFeedPressStyle())
         .accessibilityLabel("Профиль: \(post.author.name)")
@@ -124,7 +126,7 @@ struct AloTimelinePost: View, Equatable {
             .buttonStyle(.plain)
             .padding(.top, 2)
             Menu {
-                if let link = AloDeepLinkTarget.postURL(postId: post.id) {
+                if let link = AloDeepLinkTarget.postURL(post: post) {
                     ShareLink(item: link) { Label("Поделиться", systemImage: "square.and.arrow.up") }
                     Button {
                         UIPasteboard.general.string = link.absoluteString
@@ -174,12 +176,14 @@ struct AloTimelinePost: View, Equatable {
 
     private var authorName: some View {
         HStack(spacing: 4) {
-            Text(post.author.name).font(.system(size: presentation == .detail ? detailBodySize : bodySize, weight: .bold))
-                .foregroundStyle(AloTheme.text).lineLimit(1)
+            AloPremiumName(text: post.author.name, userId: post.author.isChannel ? 0 : post.author.id,
+                           font: .system(size: presentation == .detail ? detailBodySize : bodySize, weight: .bold))
+                .lineLimit(1)
             if post.author.verified {
                 Image(systemName: "checkmark.seal.fill").font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(AloTheme.accent)
             }
+            AloPremiumMark(userId: post.author.isChannel ? 0 : post.author.id, size: 14)
         }
     }
 

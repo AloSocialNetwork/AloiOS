@@ -10,6 +10,7 @@ struct AloModerationPanel: View {
     @EnvironmentObject private var app: AloAppModel
     @State private var reportCount: Int?
     @State private var appealCount: Int?
+    @State private var verificationCount: Int?
 
     var body: some View {
         let me = app.bootstrap?.me
@@ -32,6 +33,16 @@ struct AloModerationPanel: View {
                         }
                         .buttonStyle(AloPressBounceButtonStyle(pressedScale: 0.985))
                         .accessibilityIdentifier("alo.moderation.appeals")
+                    }
+                }
+                if can.contains("verification") {
+                    AloModerationCard(title: "Верификация") {
+                        NavigationLink { AloVerificationQueue(onCount: { verificationCount = $0 }) } label: {
+                            AloModerationNavRow(title: "Галочки", subtitle: "Заявки на галочку у страниц и сообществ",
+                                                symbol: "checkmark.seal.fill", tint: AloTheme.accent, badge: verificationCount)
+                        }
+                        .buttonStyle(AloPressBounceButtonStyle(pressedScale: 0.985))
+                        .accessibilityIdentifier("alo.moderation.verification")
                     }
                 }
                 if can.contains("moderation") {
@@ -75,6 +86,9 @@ struct AloModerationPanel: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
         .task {
+            if can.contains("verification") {
+                verificationCount = (try? await app.api.verificationQueue(status: "pending"))?.count
+            }
             if can.contains("reports") {
                 reportCount = (try? await app.moderationReports())?.count
                 appealCount = (try? await app.moderationAppeals())?.count

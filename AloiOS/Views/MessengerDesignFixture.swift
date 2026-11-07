@@ -518,8 +518,12 @@ enum AloMessengerSampleMedia {
         }
         let longVideo = UserDefaults.standard.string(forKey: "ALO_UI_MESSENGER_CONTENT") == "circle-flow"
         let video = directory.appendingPathComponent(longVideo ? "motion-long.mp4" : "motion.mp4")
+        // Written next to its name and moved in once finished: an app closed mid-write (a test ending) left a movie
+        // without its index that every later launch reused and could not play («Не удалось воспроизвести кружок»).
+        let partial = video.deletingPathExtension().appendingPathExtension("partial.mp4")
+        try? FileManager.default.removeItem(at: partial)
         if !FileManager.default.fileExists(atPath: video.path),
-           let writer = try? AVAssetWriter(outputURL: video, fileType: .mp4) {
+           let writer = try? AVAssetWriter(outputURL: partial, fileType: .mp4) {
             let input = AVAssetWriterInput(mediaType: .video, outputSettings: [AVVideoCodecKey: AVVideoCodecType.h264,
                 AVVideoWidthKey: 320, AVVideoHeightKey: 240])
             let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
@@ -548,6 +552,7 @@ enum AloMessengerSampleMedia {
             }
             input.markAsFinished()
             await writer.finishWriting()
+            if writer.status == .completed { try? FileManager.default.moveItem(at: partial, to: video) }
         }
         return (uri, FileManager.default.fileExists(atPath: audio.path) ? audio : nil,
             FileManager.default.fileExists(atPath: video.path) ? video : nil)

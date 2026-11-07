@@ -1280,7 +1280,8 @@ private extension ConversationView {
                     try? await Task.sleep(for: .seconds(3))
                 }
             }
-            .onChange(of: app.messageText) { _, newValue in
+            // The publisher fires before the text is stored; on the next turn `app.messageText` is the new text.
+            .onReceive(app.liveMessageText.$text.dropFirst().removeDuplicates().receive(on: DispatchQueue.main)) { newValue in
                 app.sendTypingIfNeeded()
                 app.scheduleForumTopicDraftSync(
                     conversation: conversation,
@@ -1336,6 +1337,21 @@ private extension ConversationView {
                    UserDefaults.standard.string(forKey: "ALO_UI_MESSENGER_CONTENT") == "appearance" {
                     isChatAppearancePresented = true
                 }
+                // Screenshot fixture of the voice recording states (no microphone is opened):
+                // -ALO_UI_VOICE_RECORDING held|slide|lift|locked
+                if UserDefaults.standard.bool(forKey: "ALO_UI_MESSENGER_PREVIEW"),
+                   let state = UserDefaults.standard.string(forKey: "ALO_UI_VOICE_RECORDING") {
+                    recordingMode = .voice
+                    recordingStartedAt = Date().addingTimeInterval(-3.42)
+                    isRecorderReady = true
+                    activeRecordingMode = .voice
+                    switch state {
+                    case "slide": recordingDrag = AloRecordingDrag(translation: CGSize(width: -45, height: 0))
+                    case "lift": recordingDrag = AloRecordingDrag(translation: CGSize(width: 0, height: -62))
+                    case "locked": isRecordingLocked = true
+                    default: break
+                    }
+                }
                 guard UserDefaults.standard.bool(forKey: "ALO_UI_MESSENGER_PREVIEW"),
                       UserDefaults.standard.string(forKey: "ALO_UI_MESSENGER_CONTENT") == "circle-draft",
                       localAttachments.isEmpty else { return }
@@ -1350,7 +1366,7 @@ private extension ConversationView {
             }
 #endif
             .animation(.spring(response: 0.28, dampingFraction: 0.9), value: selectionMode)
-            .animation(.spring(response: 0.26, dampingFraction: 0.86), value: voicePlayback.attachmentId)
+            .animation(.spring(response: 0.26, dampingFraction: 0.86), value: playingVoiceId)
             .sheet(isPresented: forwardPickerBinding) {
                 ForwardTargetSheet(
                     conversations: app.bootstrap?.conversations ?? [],
@@ -1959,8 +1975,12 @@ struct ConversationView: View {
     @State private var recordingStartedAt = Date()
     @State private var recordedDurations = [UUID: TimeInterval]()
     @State private var recordedWaveforms = [UUID: [CGFloat]]()
-    @ObservedObject private var voicePlayback = AloVoicePlayback.shared
-    @ObservedObject private var musicPlayback = AloMusicPlayback.shared
+    /// Not observed: the players publish their clock several times a second, which redrew the whole chat while a
+    /// voice message or a song played. The chat keeps only whether a bar shows; the bubbles and bars watch the clock.
+    private var voicePlayback: AloVoicePlayback { .shared }
+    private var musicPlayback: AloMusicPlayback { .shared }
+    @State private var playingVoiceId: String?
+    @State private var hasMusicTrack = false
     private let circlePlayback = AloCirclePlayback.shared
     @State private var historyProjectionCache = AloChatHistoryProjectionCache()
     /// Joins and leaves of a group, drawn between the messages (AloGroupServiceEvents.swift).
@@ -2022,7 +2042,7 @@ struct ConversationView: View {
     /// title/presence capsule, or below the voice/circle player when it is
     /// shown in that same slot.
     private var hasTopPlaybackChrome: Bool {
-        circlePlayback.item != nil || voicePlayback.attachmentId != nil || musicPlayback.track != nil
+        circlePlayback.item != nil || playingVoiceId != nil || hasMusicTrack
     }
 
     private var conversationTopChromeHeight: CGFloat {
@@ -2454,13 +2474,13 @@ struct ConversationView: View {
                     .padding(.horizontal, 18)
                     .padding(.bottom, 7)
                     .transition(.opacity)
-            } else if voicePlayback.attachmentId != nil {
+            } else if playingVoiceId != nil {
                 // The clip may come from another chat: it goes on wherever the person goes (AloVoicePlayback.swift).
                 VoicePlaybackTopBar(playback: voicePlayback)
                 .padding(.horizontal, 18)
                 .padding(.bottom, 7)
                 .transition(.move(edge: .top).combined(with: .opacity))
-            } else if musicPlayback.track != nil {
+            } else if hasMusicTrack {
                 // A song: the same oval, with «назад» / «далее» through the chat's tracks (AloMusicPlayer.swift).
                 AloMusicPlaybackBar { requestedMessageScrollId = $0 }
                     .padding(.horizontal, 18)
@@ -2471,6 +2491,8 @@ struct ConversationView: View {
         }
         // The chat's songs make the queue of the music player (a song starting closes the voice bar: AloVoicePlayback).
         .onAppear { musicPlayback.enter(scope: "\(conversation.peerId)") }
+        .onReceive(AloVoicePlayback.shared.$attachmentId.removeDuplicates()) { playingVoiceId = $0 }
+        .onReceive(AloMusicPlayback.shared.$track.map { $0 != nil }.removeDuplicates()) { hasMusicTrack = $0 }
         // Joins and leaves are read again when the history changes (someone joined, a message arrived).
         .task(id: "\(conversation.roomId)-\(conversation.items.count)-\(conversation.groupMembers.count)") {
             guard showsGroupServiceLines, conversation.roomId > 0 else { return }
@@ -2626,7 +2648,7 @@ struct ConversationView: View {
                     blockedPeerUnavailableBar
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 } else if canComposeMessages {
-                    composer
+                    AloLiveTextReader(text: app.liveMessageText) { composer }
                         .aloChatSwipeControl()
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 } else if isChannelConversation {
@@ -3648,24 +3670,38 @@ struct ConversationView: View {
                     .allowsHitTesting(!isRecordingLocked && !isFinalizingCircle && !isFinalizingVoice)
                     .accessibilityHidden(isRecordingLocked)
                     if isRecordingLocked {
-                        Button { finishRecording(sendImmediately: true) } label: {
-                            Image(systemName: "arrow.up")
-                                .font(.system(size: 21, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .frame(width: 44, height: 44)
-                                .background(chatAppearance.outgoingColor, in: Circle())
+                        // Telegram keeps the big circle after locking; it now sends.
+                        AloRecordingLevelsView(recorder: audioRecorder) { levels in
+                            Button { finishRecording(sendImmediately: true) } label: {
+                                AloRecordingOrb(symbol: "arrow.up", color: chatAppearance.outgoingColor,
+                                                level: levels.last ?? 0, cancelProgress: 0, hitTesting: true)
+                                    .frame(width: 44, height: 44)
+                                    .contentShape(Circle().inset(by: -33))
+                            }
+                            .buttonStyle(AloControlPressStyle())
+                            .accessibilityLabel("Отправить запись")
+                            .accessibilityIdentifier("alo.recording.send")
+                            .disabled(!isRecorderReady)
                         }
-                        .buttonStyle(AloControlPressStyle())
-                        .accessibilityLabel("Отправить запись")
-                        .disabled(!isRecorderReady)
                         .transition(.opacity)
                     }
                 }
                 .overlay(alignment: .bottom) {
+                    // Telegram: the lock panel 122 pt above the mic centre rises with the finger;
+                    // once locked, a pause button 102 pt above it stops into a preview.
+                    let micCentre = ChatComposerMetrics.controlSize / 2
                     if activeRecordingMode != nil && !isRecordingLocked {
                         AloRecordingLock(progress: recordingDrag.lockProgress, onLock: lockRecording)
-                            .offset(y: -108)
+                            .offset(y: -(AloRecordingMetrics.lockLift + micCentre - AloRecordingMetrics.lockSize.height / 2)
+                                    + recordingDrag.offset.height)
                             .transition(.opacity.combined(with: .offset(y: 12)))
+                    } else if let mode = activeRecordingMode, isRecordingLocked {
+                        AloRecordingPauseButton(enabled: isRecorderReady,
+                                                label: mode == .voice ? "Завершить и прослушать запись" : "Завершить и просмотреть кружок") {
+                            finishRecording(sendImmediately: false)
+                        }
+                        .offset(y: -(AloRecordingMetrics.pauseLift + micCentre - 20))
+                        .transition(.opacity.combined(with: .scale(scale: 0.6)))
                     }
                 }
             }
@@ -8224,7 +8260,8 @@ private extension AloChatMessage {
 
 private extension ChatCallLogMeta {
     init?(rawJSON: String) {
-        guard rawJSON.contains("call") || rawJSON.contains("callType") else { return nil }
+        // Read for every message on every list update: plain text (even with «call» in it) never reaches the JSON parser.
+        guard rawJSON.first(where: { !$0.isWhitespace }) == "{", rawJSON.contains("call") else { return nil }
         guard let data = rawJSON.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
@@ -8303,7 +8340,7 @@ struct ChatRecordSendButton: View {
         .overlay {
             if isRecording && !isLocked {
                 AloRecordingOrb(symbol: mode.systemImage, color: accentColor,
-                    level: level, cancelProgress: drag.cancelProgress)
+                    level: level, cancelProgress: drag.cancelProgress, scale: drag.orbScale)
                     .offset(drag.offset)
                     .transition(reduceMotion ? .opacity : .asymmetric(
                         insertion: .scale(scale: 0.4).combined(with: .opacity)
@@ -8799,50 +8836,20 @@ struct RecordingComposerPanel: View {
     let onStop: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    var body: some View {
-        HStack(spacing: 8) {
-            if isLocked {
-                Button(action: onCancel) {
-                    Image(systemName: "trash").font(.system(size: 19))
-                        .foregroundStyle(.red).frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(AloControlPressStyle())
-                .accessibilityLabel("Удалить запись")
-            }
+    // Telegram iOS records a circle with the same panel as a voice message (ChatTextInputPanelNode).
+    var body: some View { voiceBody }
+
+    /// Telegram iOS: the red dot 16 pt in (where the paperclip was), the time at 34 pt, and
+    /// «‹ Влево — отмена» centred; locked, the hint turns into an accent «Отмена».
+    private var voiceBody: some View {
+        ZStack(alignment: .leading) {
+            AloRecordingCancelIndicator(isLocked: isLocked, ready: ready, drag: drag,
+                                        accentColor: accentColor, onCancel: onCancel)
             AloRecordingTimer(startedAt: startedAt, ready: ready)
-                .padding(.leading, isLocked ? 0 : 14)
-            if isLocked {
-                if mode == .voice {
-                    VoiceWaveform(levels: levels, activeColor: accentColor)
-                        .frame(height: 20)
-                } else {
-                    Spacer(minLength: 0)
-                }
-                Button(action: onStop) {
-                    Image(systemName: "stop.fill").font(.system(size: 15))
-                        .foregroundStyle(accentColor).frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(AloControlPressStyle())
-                .accessibilityLabel(mode == .voice ? "Завершить и прослушать запись" : "Завершить и просмотреть кружок")
-                .disabled(!ready)
-            } else {
-                Spacer(minLength: 0)
-                Button(action: onCancel) {
-                    Label(ready ? "Отмена" : "Подготовка…", systemImage: "chevron.left")
-                        .font(.system(size: 14)).foregroundStyle(AloTheme.muted)
-                        .lineLimit(1).frame(minHeight: 44)
-                        .offset(x: -drag.cancelProgress * 24)
-                        .opacity(1 - Double(drag.cancelProgress) * 0.65)
-                }
-                .buttonStyle(AloChatPressStyle())
-                .padding(.trailing, 12)
-                .accessibilityLabel("Отменить запись")
-                .accessibilityHint("Также можно сдвинуть палец влево")
-            }
+                .padding(.leading, AloRecordingMetrics.dotX)
+                .allowsHitTesting(false)
         }
-        .frame(maxWidth: .infinity, minHeight: 44)
+        .frame(maxWidth: .infinity, minHeight: 44, maxHeight: 44)
         .modifier(AloChatPanelGlass(radius: 22, role: .control))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("alo.recording.panel")
@@ -8859,15 +8866,35 @@ struct CircleRecordingOverlay: View {
     let bottomChrome: CGFloat
     let onSend: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorScheme) private var colorScheme
     @State private var appeared = false
+    @State private var backdropShown = false
+    /// Telegram's front flash: the screen glows warm yellow at full brightness while the front camera records.
+    @State private var frontFlash = false
+    @State private var brightnessBefore: CGFloat?
 
     var body: some View {
         GeometryReader { geometry in
             let diameter = AloCircleRecordingLayout.diameter(viewport: geometry.size, topChrome: topChrome, bottomChrome: bottomChrome)
             let centerY = AloCircleRecordingLayout.centerY(viewport: geometry.size, diameter: diameter,
                 topChrome: topChrome, bottomChrome: bottomChrome)
+            let safeBottom = AloCallSafeArea.resolved(geometry.safeAreaInsets).bottom
+            let side = AloCircleRecordingLayout.buttonSideInset(safeBottom: safeBottom)
+            let button = AloCircleRecordingLayout.buttonSize
+            let buttonY = geometry.size.height - bottomChrome - 8 - button / 2
+            let flashOn = recorder.isFrontCamera ? frontFlash : recorder.isTorchEnabled
             ZStack {
-                AloChatModalBackdrop(darkness: 0.32)
+                AloCircleRecordingBackdrop(dark: colorScheme == .dark, opaque: reduceTransparency)
+                    .ignoresSafeArea()
+                    .opacity(backdropShown ? 1 : 0)
+                    .accessibilityHidden(true)
+                if frontFlash && recorder.isFrontCamera {
+                    Color(red: 1, green: 0.929, blue: 0.549)
+                        .ignoresSafeArea()
+                        .transition(.opacity)
+                        .accessibilityHidden(true)
+                }
                     CircleCameraPreview(session: recorder.session, mirrored: recorder.isFrontCamera,
                                         transitioning: recorder.isSwitchingCamera)
                         .frame(width: diameter, height: diameter)
@@ -8881,43 +8908,70 @@ struct CircleRecordingOverlay: View {
                         .accessibilityHint("Сведите или разведите два пальца для изменения масштаба")
                         .overlay {
                             if ready {
+                                // RecordingProgressView: white at 60 %, 4 pt, round ends, inset by its width.
                                 CircleRecordingProgress(startedAt: startedAt, color: .white.opacity(0.6))
                             } else {
                                 ProgressView().tint(.white)
                             }
                         }
-                        .shadow(color: .black.opacity(0.3), radius: 21, y: 10)
-                        .scaleEffect(appeared || reduceMotion ? 1 : 0.3)
                         .position(x: geometry.size.width / 2, y: centerY)
-                        .offset(y: appeared || reduceMotion ? 0 : geometry.size.height + diameter * 0.3 - centerY)
-                        .opacity(appeared ? 1 : 0)
-                    HStack(spacing: 20) {
-                        CircleIconButton(systemName: "camera.rotate", action: { recorder.switchCamera() })
-                            .accessibilityLabel("Переключить камеру")
-                            .accessibilityIdentifier("alo.circle.recording.flip")
-                            .disabled(!ready || recorder.isSwitchingCamera)
-                        if !recorder.isFrontCamera {
-                            CircleIconButton(systemName: recorder.isTorchEnabled ? "bolt.fill" : "bolt.slash",
-                                             action: { recorder.toggleTorch() })
-                                .accessibilityLabel("Вспышка")
+                        // animateIn: from below the screen, spring 0.5 s, damping 0.8.
+                        .offset(y: appeared || reduceMotion ? 0 : geometry.size.height + diameter / 2 - centerY)
+                        .opacity(appeared || reduceMotion ? 1 : 0.1)
+                HStack(spacing: 11) {
+                    CircleIconButton(systemName: "arrow.triangle.2.circlepath.camera", action: { recorder.switchCamera() })
+                        .accessibilityLabel("Переключить камеру")
+                        .accessibilityIdentifier("alo.circle.recording.flip")
+                        .disabled(!ready || recorder.isSwitchingCamera)
+                    CircleIconButton(systemName: flashOn ? "bolt.fill" : "bolt.slash.fill", tint: flashOn ? Color(red: 1, green: 0.8, blue: 0) : .white) {
+                        if recorder.isFrontCamera {
+                            withAnimation(.easeInOut(duration: 0.2)) { frontFlash.toggle() }
+                            setFullBrightness(frontFlash)
+                        } else {
+                            recorder.toggleTorch()
                         }
                     }
-                    .position(x: geometry.size.width / 2, y: centerY + diameter / 2 + 34)
-                    .opacity(appeared ? 1 : 0)
+                    .accessibilityLabel(flashOn ? "Выключить вспышку" : "Включить вспышку")
+                    .accessibilityIdentifier("alo.circle.recording.flash")
+                    .disabled(!ready)
+                }
+                .position(x: side + button + 11 / 2, y: buttonY)
+                .opacity(appeared ? 1 : 0)
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
             .onAppear {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.4)) { backdropShown = true }
                 withAnimation(reduceMotion ? nil : .spring(response: 0.5, dampingFraction: 0.8)) {
                     appeared = true
                 }
             }
+            .onChange(of: recorder.isFrontCamera) { _, front in
+                if !front, frontFlash {
+                    frontFlash = false
+                    setFullBrightness(false)
+                }
+            }
+            .onDisappear { setFullBrightness(false) }
         }
         .task(id: startedAt) {
             guard ready else { return }
-            let remaining = max(0, 60 - Date().timeIntervalSince(startedAt))
+            // Telegram stops a circle at 59.5 s.
+            let remaining = max(0, 59.5 - Date().timeIntervalSince(startedAt))
             try? await Task.sleep(for: .seconds(remaining))
             guard !Task.isCancelled else { return }
             onSend()
+        }
+    }
+
+    private func setFullBrightness(_ on: Bool) {
+        let screen = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen }.first
+        guard let screen else { return }
+        if on {
+            if brightnessBefore == nil { brightnessBefore = screen.brightness }
+            screen.brightness = 1
+        } else if let before = brightnessBefore {
+            screen.brightness = before
+            brightnessBefore = nil
         }
     }
 }
@@ -8932,7 +8986,7 @@ private struct CircleRecordingProgress: View {
         TimelineView(.periodic(from: startedAt, by: 1)) { context in
             let progress = min(1, max(0, context.date.timeIntervalSince(startedAt) / 60))
             Circle().trim(from: 0, to: progress)
-                .stroke(color, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                .stroke(color, style: StrokeStyle(lineWidth: 4, lineCap: .round))
                 .rotationEffect(.degrees(-90))
                 .animation(reduceMotion ? nil : .linear(duration: 1), value: progress)
         }
@@ -8941,19 +8995,21 @@ private struct CircleRecordingProgress: View {
     }
 }
 
+/// Telegram's camera buttons: a 40 pt glass circle with a 30 pt icon.
 private struct CircleIconButton: View {
     let systemName: String
+    var tint: Color = .white
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 18, weight: .bold))
-                .foregroundStyle(Color.white)
-                .frame(width: 46, height: 46)
-                .background(Color.black.opacity(0.38))
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: AloCircleRecordingLayout.buttonSize, height: AloCircleRecordingLayout.buttonSize)
+                .background { Color.clear.modifier(AloChatGlass()) }
                 .clipShape(Circle())
-                .overlay(Circle().stroke(Color.white.opacity(0.12), lineWidth: 1))
+                .contentShape(Circle())
         }
         .buttonStyle(AloControlPressStyle())
     }
@@ -9124,6 +9180,84 @@ struct RecordedDraftComposerPanel: View {
     @State private var playbackError: String?
 
     var body: some View {
+        Group {
+            if attachment.isLocalVoiceLike && !attachment.isLocalCircleLike {
+                voiceBody
+            } else {
+                circleBody
+            }
+        }
+        .onDisappear { playback.stop() }
+        .alert("Не удалось воспроизвести запись", isPresented: Binding(
+            get: { playbackError != nil }, set: { if !$0 { playbackError = nil } }
+        )) {
+            Button("Ок", role: .cancel) { playbackError = nil }
+        } message: {
+            Text(playbackError ?? "")
+        }
+    }
+
+    /// Telegram iOS (ChatRecordingPreviewInputPanelNode): the bin where the paperclip was, then the
+    /// field filled with the accent 3 pt in, a white waveform 21 pt from its ends and, centred on
+    /// it, a 63×22 play/duration plate. The whole strip plays and pauses.
+    private var voiceBody: some View {
+        HStack(alignment: .bottom, spacing: AloInputMetrics.spacing) {
+            Button(action: onRemove) {
+                Image(systemName: "trash")
+                    .font(.system(size: 19, weight: .regular))
+                    .foregroundStyle(AloTheme.text)
+                    .frame(width: ChatComposerMetrics.visualSize, height: ChatComposerMetrics.visualSize)
+                    .modifier(AloChatGlass())
+                    .frame(width: ChatComposerMetrics.controlSize, height: ChatComposerMetrics.controlSize)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(AloControlPressStyle())
+            .accessibilityLabel("Удалить черновик записи")
+
+            Button(action: togglePlayback) {
+                TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !playback.isPlaying)) { _ in
+                    let progress = playback.progress
+                    ZStack {
+                        Capsule(style: .continuous).fill(accentColor).padding(3)
+                        Canvas { context, size in
+                            let width = max(0, size.width - 42)
+                            let samples = AloVoiceWaveform.samples(levels, width: width)
+                            for (index, value) in samples.enumerated() {
+                                let x = 21 + CGFloat(index) * 5
+                                let height = max(2, 13 * value)
+                                let rect = CGRect(x: x, y: (size.height - height) / 2, width: 3, height: height)
+                                let played = width > 0 && (x - 21) / width < progress
+                                context.fill(Path(roundedRect: rect, cornerRadius: 1.5),
+                                             with: .color(.white.opacity(played ? 1 : 0.5)))
+                            }
+                        }
+                        .padding(.vertical, 3)
+                        HStack(spacing: 2) {
+                            Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
+                                .font(.system(size: 10, weight: .bold))
+                                .frame(width: 16)
+                            Text(formatTime(duration))
+                                .font(.system(size: 13, weight: .semibold)).monospacedDigit()
+                        }
+                        .foregroundStyle(.white)
+                        .frame(width: 63, height: 22)
+                        .background(Capsule(style: .continuous).fill(Color.black.opacity(0.22)))
+                    }
+                    .frame(maxWidth: .infinity, minHeight: ChatComposerMetrics.visualSize, maxHeight: ChatComposerMetrics.visualSize)
+                }
+                .modifier(AloChatPanelGlass(radius: ChatComposerMetrics.visualSize / 2, role: .control))
+                .frame(minHeight: ChatComposerMetrics.controlSize)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(AloChatPressStyle())
+            .accessibilityLabel(playback.isPlaying ? "Приостановить предпросмотр" : "Прослушать запись")
+            .accessibilityIdentifier("alo.recording.preview-play")
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("alo.recording.preview")
+    }
+
+    private var circleBody: some View {
         HStack(spacing: 12) {
             if attachment.isLocalCircleLike {
                 LocalCircleDraftPreview(attachment: attachment, accentColor: accentColor)
@@ -9177,14 +9311,6 @@ struct RecordedDraftComposerPanel: View {
         .modifier(AloChatPanelGlass(radius: 26))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("alo.recording.preview")
-        .onDisappear { playback.stop() }
-        .alert("Не удалось воспроизвести запись", isPresented: Binding(
-            get: { playbackError != nil }, set: { if !$0 { playbackError = nil } }
-        )) {
-            Button("Ок", role: .cancel) { playbackError = nil }
-        } message: {
-            Text(playbackError ?? "")
-        }
     }
 
     private var buttonIcon: String {
@@ -9279,6 +9405,7 @@ private struct LocalCircleDraftPreview: View {
         if isPlaying {
             player.pause()
         } else {
+            AloPlaybackAudioSession.activate()
             player.play()
         }
         isPlaying.toggle()

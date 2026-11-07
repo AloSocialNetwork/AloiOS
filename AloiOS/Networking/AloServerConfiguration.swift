@@ -15,11 +15,11 @@ final class AloServerConfiguration {
     #if targetEnvironment(simulator)
     static let debugLocalDevelopmentHost = "127.0.0.1"
     #else
-    /// Current Wi-Fi address of the development Mac. Do not use 198.18.0.1:
-    /// it is a local VPN tunnel, not an address reachable by the iPhone.
-    /// Run `ifconfig en0 | grep 'inet '` after changing networks, update this
-    /// value, then rebuild the Debug app.
-    static let debugLocalDevelopmentHost = "192.168.0.19"
+    /// A physical iPhone uses the Alo test VPS (HTTPS, so it works on any network). To use the
+    /// development Mac instead, put its current Wi-Fi address here (`ifconfig en0 | grep 'inet '`;
+    /// never 198.18.0.1, a local VPN tunnel an iPhone cannot reach) and rebuild the Debug app.
+    /// The simulator above stays on the local server, which holds the signed-in account.
+    static let debugLocalDevelopmentHost = "https://test.xn--80awj.online"
     #endif
     private static let localDevelopmentPort = 3000
     private static let localDevelopmentBaseURL = developmentURL(from: debugLocalDevelopmentHost)
@@ -62,6 +62,11 @@ final class AloServerConfiguration {
             .compactMap { URL(string: String($0).trimmingCharacters(in: .whitespacesAndNewlines)) }
 
         #if DEBUG
+        // Cross-client checks start the app against a throwaway server: `-ALO_DEBUG_API_BASE_URL http://127.0.0.1:port/`.
+        if let override = UserDefaults.standard.string(forKey: "ALO_DEBUG_API_BASE_URL"),
+           let url = developmentURL(from: override) {
+            return [url]
+        }
         return configured.isEmpty ? [localDevelopmentBaseURL] : configured
         #else
         return configured

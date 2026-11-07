@@ -13,8 +13,14 @@ struct AloFeedModePicker: View {
 
     var body: some View {
         AloSocialSegments(values: AloFeedMode.allCases, selected: $selected,
-            title: { $0 == .popular ? "Для вас" : "Подписки" },
-            identifier: { "alo.feed.tab.\($0 == .popular ? "popular" : "subscriptions")" })
+            title: { mode in
+                switch mode {
+                case .popular: "Для вас"
+                case .subscriptions: "Подписки"
+                case .top: "Популярное"
+                }
+            },
+            identifier: { "alo.feed.tab.\($0.rawValue)" })
             .padding(.horizontal, AloSocialMetrics.inset)
     }
 }
@@ -26,7 +32,6 @@ struct FeedView: View {
     @State private var selectedStoryGroup: AloStoryGroup?
     @State private var visibleNotice = ""
     @State private var noticeTask: Task<Void, Never>?
-    @State private var settingsPresented = false
     @State private var whyShownPost: AloPost?
     @State private var reportTarget: AloReportTarget?
     private var visualAccessibility = AloVisualAccessibility()
@@ -40,7 +45,11 @@ struct FeedView: View {
 
     private var posts: [AloPost] {
         guard let data = app.bootstrap else { return [] }
-        return app.feedMode == .popular ? data.feedPopular : data.feedSubscriptions
+        switch app.feedMode {
+        case .popular: return data.feedPopular
+        case .subscriptions: return data.feedSubscriptions
+        case .top: return app.feedTopPosts
+        }
     }
 
     var body: some View {
@@ -52,6 +61,7 @@ struct FeedView: View {
                     }
                 } rows: {
                     LazyVStack(spacing: 0) {
+                        quickCompose
                         storiesTray
                         if !app.publicationJobs.isEmpty || !app.publications.restorationError.isEmpty {
                             AloPublicationStatusView().padding(.horizontal, 16).padding(.vertical, 8)
@@ -89,8 +99,10 @@ struct FeedView: View {
                                     .transition(.opacity)
                             }
                         }
-                        AloLoadMoreRow(list: app.feedMode == .popular ? .feedPopular : .feedSubscriptions, loaded: posts.count)
-                        if posts.isEmpty {
+                        if app.feedMode != .top {
+                            AloLoadMoreRow(list: app.feedMode == .popular ? .feedPopular : .feedSubscriptions, loaded: posts.count)
+                        }
+                        if posts.isEmpty, app.feedMode != .top || app.feedTopLoaded {
                             ContentUnavailableView(app.feedMode == .subscriptions ? "Пока нет публикаций" : "Лента пока пуста",
                                 systemImage: "text.bubble", description: Text(app.feedMode == .subscriptions
                                     ? "Здесь появятся посты людей, на которых ты подписан." : "Создай первый пост кнопкой +."))
@@ -98,24 +110,6 @@ struct FeedView: View {
                         }
                     }
                 }
-
-            Button {
-                isComposerPresented = true
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 21, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 52, height: 52)
-                    .background(AloTheme.accent, in: Circle())
-                    .overlay(Circle().stroke(.white.opacity(0.16), lineWidth: 0.5))
-                    .shadow(color: .black.opacity(0.24), radius: 8, y: 4)
-            }
-            .buttonStyle(AloFeedPressStyle())
-            .contentShape(Circle())
-            .accessibilityLabel("Создать пост")
-            .accessibilityIdentifier("alo.feed.create-post")
-            .padding(.trailing, 18)
-            .padding(.bottom, 76)
         }
         .overlay(alignment: .bottom) {
             if !visibleNotice.isEmpty {
@@ -142,6 +136,10 @@ struct FeedView: View {
         .refreshable {
             await app.loadBootstrap()
             await app.loadFeedAds()
+            if app.feedMode == .top { await app.loadFeedTop(force: true) }
+        }
+        .onChange(of: app.feedMode, initial: true) { _, mode in
+            if mode == .top { Task { await app.loadFeedTop() } }
         }
         .task {
             await app.loadFeedAds()
@@ -161,9 +159,6 @@ struct FeedView: View {
         .fullScreenCover(item: $selectedStoryGroup) { group in
             AloStoryViewer(groups: app.stories, startGroupID: group.id)
                 .environmentObject(app)
-        }
-        .navigationDestination(isPresented: $settingsPresented) {
-            AloSocialSettingsSheet().environmentObject(app)
         }
         .sheet(item: $whyShownPost) { post in
             AloWhyShownSheet(post: post) { app.hideFeedPost(post, reason: $0) }
@@ -194,23 +189,37 @@ struct FeedView: View {
 
     private var feedHeader: some View {
         HStack {
-            Button { app.activeTab = .profile } label: {
-                if let me = app.bootstrap?.me {
-                    AloAvatar(name: me.name, url: me.avatarUrl, size: 34, colorSeed: String(me.id))
-                        .frame(width: 44, height: 44)
+            Button {
+                Task {
+                    await app.loadBootstrap()
+                    if app.feedMode == .top { await app.loadFeedTop(force: true) }
                 }
+            } label: {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 19, weight: .regular))
+                    .foregroundStyle(AloTheme.text)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(AloFeedPressStyle())
-            .accessibilityLabel("Мой профиль")
+            .accessibilityLabel("Обновить")
+            .accessibilityIdentifier("alo.feed.refresh")
             Spacer()
-            AloSocialSettingsButton(label: "Настройки", identifier: "alo.feed.settings") {
-                settingsPresented = true
+            Button { isComposerPresented = true } label: {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 21, weight: .regular))
+                    .foregroundStyle(AloTheme.accent)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(AloFeedPressStyle())
+            .accessibilityLabel("Создать пост")
+            .accessibilityIdentifier("alo.feed.create-post")
         }
         .overlay {
             if app.connectionState == .connected {
-                AloSocialTitle(text: "ало", rounded: true)
-                    .foregroundStyle(AloTheme.text).accessibilityLabel("Ало")
+                AloSocialTitle(text: "Лента")
+                    .foregroundStyle(AloTheme.text)
                     .allowsHitTesting(false)
             } else {
                 Button(action: app.retryInitialBootstrap) {
@@ -230,32 +239,61 @@ struct FeedView: View {
         .accessibilityIdentifier("alo.feed.header")
     }
 
+    /// The website's «Что нового?» field over the stories (web/css/views.css .quick-compose).
+    @ViewBuilder
+    private var quickCompose: some View {
+        if let me = app.bootstrap?.me {
+            Button { isComposerPresented = true } label: {
+                HStack(spacing: 12) {
+                    AloAvatar(name: me.name, url: me.avatarUrl, size: 40, colorSeed: String(me.id))
+                    Text("Что нового?")
+                        .font(.system(size: 17))
+                        .foregroundStyle(AloTheme.muted)
+                    Spacer(minLength: 0)
+                    Image(systemName: "photo")
+                        .font(.system(size: 20))
+                        .foregroundStyle(AloTheme.accent)
+                }
+                .padding(.leading, 12).padding(.trailing, 16).padding(.vertical, 10)
+                .background(AloTheme.quickComposeFill, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(AloTheme.separator, lineWidth: 0.7))
+                .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            }
+            .buttonStyle(AloFeedPressStyle())
+            .accessibilityLabel("Что нового?")
+            .accessibilityIdentifier("alo.feed.quick-compose")
+            .padding(.horizontal, 20).padding(.top, 4).padding(.bottom, 10)
+        }
+    }
+
     @ViewBuilder
     private var storiesTray: some View {
         if app.bootstrap?.me != nil {
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
+                HStack(spacing: 14) {
                     Button {
                         isStoryComposerPresented = true
                     } label: {
                         VStack(spacing: 6) {
                             ZStack(alignment: .bottomTrailing) {
                                 if let me = app.bootstrap?.me {
-                                    AloAvatar(name: me.name, url: me.avatarUrl, size: 56, colorSeed: String(me.id))
+                                    AloAvatar(name: me.name, url: me.avatarUrl, size: 64, colorSeed: String(me.id))
+                                        .padding(5)
                                 }
                                 Image(systemName: "plus")
-                                    .font(.system(size: 11, weight: .black))
+                                    .font(.system(size: 12, weight: .black))
                                     .foregroundStyle(.white)
-                                    .frame(width: 22, height: 22)
+                                    .frame(width: 24, height: 24)
                                     .background(Circle().fill(AloTheme.accent))
-                                    .overlay(Circle().stroke(AloTheme.background, lineWidth: 2))
+                                    .overlay(Circle().stroke(AloTheme.background, lineWidth: 2.5))
                             }
-                            Text("История")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(AloTheme.muted)
-                                .lineLimit(1)
+                            Text("Ваша история")
+                                .font(.system(size: 13))
+                                .foregroundStyle(AloTheme.text)
+                                .multilineTextAlignment(.center)
+                                .lineLimit(2)
                         }
-                        .frame(width: 68)
+                        .frame(width: 76)
                     }
                     .buttonStyle(AloFeedPressStyle())
                     .accessibilityLabel("Добавить историю")
@@ -268,30 +306,31 @@ struct FeedView: View {
                             VStack(spacing: 6) {
                                 ZStack {
                                     Circle()
-                                        .stroke(
-                                            group.hasUnseen ? AloTheme.accent : AloTheme.border,
-                                            lineWidth: 2
+                                        .strokeBorder(
+                                            group.hasUnseen ? AloTheme.accent : AloTheme.separator,
+                                            lineWidth: group.hasUnseen ? 2.5 : 1.5
                                         )
-                                        .frame(width: 60, height: 60)
+                                        .frame(width: 74, height: 74)
                                     AloAvatar(
                                         name: group.user.name,
                                         url: group.user.avatarUrl,
-                                        size: 54,
+                                        size: 64,
                                         colorSeed: String(group.user.id)
                                     )
                                 }
                                 Text(group.user.name)
-                                    .font(.system(size: 12, weight: .medium))
+                                    .font(.system(size: 13))
                                     .foregroundStyle(AloTheme.text)
-                                    .lineLimit(1)
+                                    .multilineTextAlignment(.center)
+                                    .lineLimit(2)
                             }
-                            .frame(width: 68)
+                            .frame(width: 76)
                         }
                         .buttonStyle(AloFeedPressStyle())
                         .accessibilityLabel("История: \(group.user.name)")
                     }
                 }
-                .padding(.horizontal, 16)
+                .padding(.horizontal, 20)
                 .padding(.top, 2)
                 .padding(.bottom, 12)
             }
@@ -374,7 +413,7 @@ enum AloFeedMediaImport {
 
 /// "Новый пост": full screen like the rest of Alo's chrome, the app's header (glass close, centred
 /// title, a filled publish button), large media previews and a glass tool bar above the keyboard.
-private struct PostComposerSheet: View {
+struct PostComposerSheet: View {
     @EnvironmentObject private var app: AloAppModel
     @Environment(\.dismiss) private var dismiss
     @FocusState private var isComposerFocused: Bool
@@ -407,6 +446,10 @@ private struct PostComposerSheet: View {
     }
 
     var body: some View {
+        AloLiveTextReader(text: app.livePostText) { content }
+    }
+
+    private var content: some View {
         VStack(spacing: 0) {
             header
 
@@ -921,7 +964,7 @@ struct AloPostDetailScreen: View {
                 .padding(.horizontal, 16)
             }
 
-            commentComposer
+            AloLiveTextReader(text: app.liveCommentText) { commentComposer }
         }
         .background(AloTheme.background.ignoresSafeArea())
         .navigationTitle("Публикация")

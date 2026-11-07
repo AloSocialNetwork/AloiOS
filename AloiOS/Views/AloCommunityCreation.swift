@@ -46,6 +46,8 @@ struct AloNewMessageSheet: View {
     @State private var joinCode = ""
     @State private var isWorking = false
     @State private var errorMessage = ""
+    /// «Новый секретный чат»: the next person tapped gets a secret chat instead of the ordinary one.
+    @State private var isPickingSecret = false
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -65,17 +67,29 @@ struct AloNewMessageSheet: View {
 
     private var root: some View {
         VStack(spacing: 0) {
-            AloCreationHeader(title: "Новое сообщение", leading: .close, onLeading: { dismiss() })
+            AloCreationHeader(title: isPickingSecret ? "Новый секретный чат" : "Новое сообщение", leading: .close, onLeading: {
+                if isPickingSecret { isPickingSecret = false } else { dismiss() }
+            })
             AloSocialSearchField(text: $query, identifier: "alo.compose.search")
                 .padding(.horizontal, AloSocialMetrics.inset)
                 .padding(.bottom, 10)
             ScrollView {
                 VStack(spacing: 0) {
-                    if query.isEmpty {
+                    if query.isEmpty && isPickingSecret {
+                        Text("Выберите, с кем начать секретный чат. Он будет только на этом устройстве и на устройстве собеседника, которое его примет.")
+                            .font(.system(size: 14)).foregroundStyle(AloTheme.muted)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 4).padding(.bottom, 14)
+                    } else if query.isEmpty {
                         AloCreationCard {
                             AloCreationActionRow(title: "Новая группа", systemImage: "person.2.fill",
                                                  identifier: "alo.compose.group") { start("group") }
                             AloCreationDivider(leading: 58)
+                            if app.secretChats.available {
+                                AloCreationActionRow(title: "Новый секретный чат", systemImage: "lock.fill",
+                                                     identifier: "alo.compose.secret") { isPickingSecret = true }
+                                AloCreationDivider(leading: 58)
+                            }
                             AloCreationActionRow(title: "Новый канал", systemImage: "megaphone.fill",
                                                  identifier: "alo.compose.channel") { start("channel") }
                             AloCreationDivider(leading: 58)
@@ -94,7 +108,9 @@ struct AloNewMessageSheet: View {
                         AloCreationCard {
                             ForEach(Array(people.enumerated()), id: \.element.id) { index, person in
                                 if index > 0 { AloCreationDivider(leading: 70) }
-                                Button { openChat(with: person) } label: {
+                                Button {
+                                    if isPickingSecret { startSecretChat(with: person) } else { openChat(with: person) }
+                                } label: {
                                     AloCandidateRow(person: person, selection: nil)
                                 }
                                 .buttonStyle(AloChatRowPressStyle())
@@ -140,6 +156,16 @@ struct AloNewMessageSheet: View {
     }
 
     // MARK: Actions
+
+    private func startSecretChat(with person: AloCommunityCandidate) {
+        guard !isWorking else { return }
+        isWorking = true
+        Task {
+            let problem = await app.secretChats.start(userId: person.id)
+            isWorking = false
+            if let problem { errorMessage = problem } else { dismiss() }
+        }
+    }
 
     private func start(_ kind: String) {
         draft = AloCommunityDraft(kind: kind)

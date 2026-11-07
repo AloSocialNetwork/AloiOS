@@ -31,16 +31,17 @@ final class AloSocialConsistencyUITests: XCTestCase {
 
     func testSharedGeometrySettingsAndAllMenus() {
         let app = launch()
-        let feedRail = rail(app, identifiers: ["alo.feed.tab.popular", "alo.feed.tab.subscriptions"])
+        let feedRail = rail(app, identifiers: ["alo.feed.tab.popular", "alo.feed.tab.subscriptions", "alo.feed.tab.top"])
         XCTAssertEqual(feedRail.height, 44, accuracy: 0.01)
         XCTAssertEqual(feedRail.width + 8, app.windows.firstMatch.frame.width - 32, accuracy: 1)
-        let gear = app.buttons["alo.feed.settings"].frame
-        XCTAssertEqual(gear.size, CGSize(width: 44, height: 44))
         capture("01-feed")
-        app.buttons["alo.feed.settings"].tap()
-        XCTAssertTrue(app.buttons["Закрыть настройки"].waitForExistence(timeout: 4))
+        // As on the website, settings live in the profile, not in the feed's header.
+        app.buttons["Профиль"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["alo.profile.settings"].waitForExistence(timeout: 4))
+        app.buttons["alo.profile.settings"].tap()
+        XCTAssertTrue(app.buttons["alo.settings.back"].waitForExistence(timeout: 4))
         capture("06-settings")
-        app.buttons["Закрыть настройки"].tap()
+        app.buttons["alo.settings.back"].tap()
 
         app.buttons["Поиск"].firstMatch.tap()
         let field = app.otherElements["alo.search.field"].firstMatch
@@ -50,11 +51,11 @@ final class AloSocialConsistencyUITests: XCTestCase {
         XCTAssertEqual(fieldSurface.width, feedRail.width + 8, accuracy: 1)
         XCTAssertEqual(fieldSurface.minX, 16, accuracy: 1)
         let title = app.staticTexts["alo.search.title"].frame
-        XCTAssertEqual(app.buttons["alo.search.settings"].frame.size, gear.size)
+        XCTAssertEqual(app.buttons["alo.search.settings"].frame.size, CGSize(width: 44, height: 44))
         capture("02-search")
         app.buttons["alo.search.settings"].tap()
-        XCTAssertTrue(app.buttons["Закрыть настройки"].waitForExistence(timeout: 4))
-        app.buttons["Закрыть настройки"].tap()
+        XCTAssertTrue(app.buttons["alo.settings.back"].waitForExistence(timeout: 4))
+        app.buttons["alo.settings.back"].tap()
         let input = app.textFields["alo.search.input"]
         input.tap(); input.typeText("Александр")
         XCTAssertTrue(app.buttons["Очистить поиск"].waitForExistence(timeout: 3))
@@ -68,7 +69,7 @@ final class AloSocialConsistencyUITests: XCTestCase {
         XCTAssertEqual(alertsRail.height, feedRail.height, accuracy: 1)
         XCTAssertEqual(alertsRail.width, feedRail.width, accuracy: 1)
         XCTAssertEqual(app.staticTexts["alo.alerts.title"].frame.height, title.height, accuracy: 1)
-        XCTAssertEqual(app.buttons["alo.alerts.settings"].frame.size, gear.size)
+        XCTAssertEqual(app.buttons["alo.alerts.settings"].frame.size, CGSize(width: 44, height: 44))
         for text in ["Принять", "Отклонить"] {
             XCTAssertGreaterThanOrEqual(app.buttons[text].frame.height + 0.01, 44)
             XCTAssertLessThanOrEqual(app.buttons[text].frame.height, 44.01)
@@ -80,15 +81,17 @@ final class AloSocialConsistencyUITests: XCTestCase {
         app.buttons["alo.alerts.filter.all"].tap()
 
         app.buttons["Профиль"].firstMatch.tap()
-        XCTAssertTrue(app.buttons["alo.profile.tab.posts"].waitForExistence(timeout: 4))
-        let profileRail = rail(app, identifiers: ["alo.profile.tab.posts", "alo.profile.tab.likes"])
-        XCTAssertEqual(profileRail.height, feedRail.height, accuracy: 1)
-        XCTAssertEqual(profileRail.width, feedRail.width, accuracy: 1)
-        XCTAssertEqual(app.buttons["alo.profile.settings"].frame.size, gear.size)
+        // The website's own page: «Редактировать» and «Новая запись» (44pt) over «Записи», no «Посты / Нравится» switch.
+        XCTAssertTrue(app.buttons["Редактировать"].waitForExistence(timeout: 4))
+        XCTAssertEqual(app.buttons["Редактировать"].frame.height, 44, accuracy: 1)
+        XCTAssertEqual(app.buttons["Новая запись"].frame.height, 44, accuracy: 1)
+        XCTAssertTrue(app.staticTexts["Записи"].exists)
+        XCTAssertFalse(app.buttons["alo.profile.tab.likes"].exists)
+        XCTAssertEqual(app.buttons["alo.profile.settings"].frame.size, CGSize(width: 44, height: 44))
         capture("04-profile")
         app.buttons["alo.profile.settings"].tap()
-        XCTAssertTrue(app.buttons["Закрыть настройки"].waitForExistence(timeout: 4))
-        app.buttons["Закрыть настройки"].tap()
+        XCTAssertTrue(app.buttons["alo.settings.back"].waitForExistence(timeout: 4))
+        app.buttons["alo.settings.back"].tap()
         let lastLike = app.buttons["alo.post.like.990411"]
         let profile = app.scrollViews["alo.profile.scroll"]
         for _ in 0..<16 {
@@ -123,7 +126,7 @@ final class AloSocialConsistencyUITests: XCTestCase {
         capture("accessibility-notifications")
         app.buttons["Профиль"].firstMatch.tap()
         XCTAssertTrue(app.buttons["alo.profile.settings"].waitForExistence(timeout: 4))
-        XCTAssertTrue(app.buttons["alo.profile.tab.posts"].exists)
+        XCTAssertTrue(app.staticTexts["Записи"].exists)
         capture("accessibility-profile")
     }
 
@@ -162,7 +165,7 @@ final class AloSocialConsistencyUITests: XCTestCase {
         if alerts.exists { alerts.swipeUp(velocity: .slow) }
         capture("d-notifications-scrolled")
         app.buttons["Профиль"].firstMatch.tap()
-        _ = app.buttons["alo.profile.tab.posts"].waitForExistence(timeout: 4)
+        _ = app.staticTexts["Записи"].waitForExistence(timeout: 4)
         capture("e-profile")
     }
 
@@ -1133,9 +1136,9 @@ final class AloSocialConsistencyUITests: XCTestCase {
         app.alerts.buttons["Скрыть рекламу"].tap()
         XCTAssertFalse(ad.waitForExistence(timeout: 2), "a hidden ad leaves the feed")
 
-        scroll.swipeDown(velocity: .fast)
-        scroll.swipeDown(velocity: .fast)
-        app.buttons["alo.feed.settings"].tap()
+        app.buttons["Профиль"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["alo.profile.settings"].waitForExistence(timeout: 4))
+        app.buttons["alo.profile.settings"].tap()
         let moderation = app.buttons["alo.settings.moderation"]
         XCTAssertTrue(moderation.waitForExistence(timeout: 4))
         moderation.tap()

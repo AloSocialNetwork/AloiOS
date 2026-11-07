@@ -161,6 +161,9 @@ struct AloPostDiscussion {
     let roomId: Int
     let peerId: Int
     let topicId: Int
+    /// For the comments screen (Telegram): how many comments there are and the post shown on top of them.
+    var commentCount = 0
+    var post: AloPost?
 }
 
 struct AloForumTopicLink {
@@ -225,11 +228,14 @@ final class AloAPIClient {
     private var libSignalStore: AloLibSignalStore?
     private var libSignalEngine: AloLibSignalSessionEngine?
     private var didCleanDecodedMediaCache = false
+    /// Whether ordinary chats on this server are cloud chats (`GET /api/config`); see AloCloudMessages.swift.
+    let messagingPolicyCache: AloMessagingPolicyCache
 
     init(baseURLs: [URL] = AloServerConfiguration.baseURLs, configuration: URLSessionConfiguration = .default) {
         let normalizedBaseURLs = AloServerConfiguration.normalizedBaseURLs(baseURLs)
         self.baseURLs = normalizedBaseURLs
         self.activeBaseURL = normalizedBaseURLs[0]
+        self.messagingPolicyCache = AloMessagingPolicyCache(scope: normalizedBaseURLs[0].absoluteString)
         let configuration = configuration.copy() as! URLSessionConfiguration
         configuration.httpShouldSetCookies = true
         configuration.httpCookieAcceptPolicy = .always
@@ -357,6 +363,62 @@ final class AloAPIClient {
                 "appVersion": appVersion
             ]
         )
+    }
+
+    /// Another account saved on this phone, asked with its own cookies (Telegram's account switcher): name, avatar and
+    /// unread messages. Nil when that session is over (signed out, expired, another server); a network failure throws.
+    /// The shared cookie storage is neither read nor changed.
+    func accountSummary(cookies: [HTTPCookie]) async throws -> AloAccountSummary? {
+        let json: [String: Any]
+        do {
+            json = try await request(as: cookies, "GET", "/api/auth/session-summary")
+        } catch let error as AloAPIError where error.status == 401 || error.status == 403 {
+            return nil
+        }
+        guard let account = json["account"] as? [String: Any] else { return nil }
+        let summary = AloAccountSummary(
+            userId: account.int("id"),
+            name: account.string("name"),
+            username: account.string("username"),
+            avatarURL: account.string("avatarUrl"),
+            unreadMessages: max(0, account.int("unreadMessages"))
+        )
+        return summary.userId > 0 ? summary : nil
+    }
+
+    /// The push token of this phone for another saved account, so each account of the phone gets its pushes.
+    func registerPushToken(as cookies: [HTTPCookie], platform: String, token: String, deviceId: String, appVersion: String) async throws {
+        _ = try await request(as: cookies, "PUT", "/api/push/device-token", body: [
+            "platform": platform, "token": token, "deviceId": deviceId, "appVersion": appVersion
+        ])
+    }
+
+    /// A JSON request as another saved account: its cookies go in the header, and what the server sets is not kept.
+    private func request(as cookies: [HTTPCookie], _ method: String, _ path: String, body: [String: Any]? = nil) async throws -> [String: Any] {
+        guard let url = URL(string: path, relativeTo: activeBaseURL)?.absoluteURL else {
+            throw AloAPIError(status: 0, code: "BAD_URL", message: "Некорректный адрес API.", payload: [:])
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.timeoutInterval = 15
+        request.httpShouldHandleCookies = false
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("AloiOS", forHTTPHeaderField: "X-Requested-With")
+        request.setValue(AloDeviceIdentity.shared.identifier, forHTTPHeaderField: "X-Alo-Device-ID")
+        for (name, value) in HTTPCookie.requestHeaderFields(with: cookies) {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        if let body {
+            request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        }
+        let (data, response) = try await session.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        guard (200..<300).contains(status) else {
+            throw AloAPIError(status: status, code: json.string("code"), message: json.string("error").ifBlank("Ошибка сервера."), payload: json)
+        }
+        return json
     }
 
     func unregisterPushToken(platform: String, token: String, deviceId: String) async throws {
@@ -742,6 +804,22 @@ final class AloAPIClient {
                             dataLines.append(
                                 line.dropFirst(5).trimmingCharacters(in: .whitespaces)
                             )
+                            // `bytes.lines` never yields the blank line that ends an SSE event, so the branch above
+                            // never ran and no call event reached the app (it only learned of a call from the
+                            // 20-second poll). The server writes one JSON data line per event: dispatch it here.
+                            let data = Data(dataLines.joined(separator: "\n").utf8)
+                            let payload = (try? JSONSerialization.jsonObject(with: data))
+                                as? [String: Any] ?? [:]
+                            continuation.yield(
+                                AloChatStreamEvent(
+                                    id: eventId,
+                                    name: eventName,
+                                    payload: payload
+                                )
+                            )
+                            eventId = 0
+                            eventName = "message"
+                            dataLines.removeAll(keepingCapacity: true)
                         }
                     }
 
@@ -887,6 +965,21 @@ final class AloAPIClient {
         return response.bool("muted")
     }
 
+    /// The account's pinned chats ("direct:<userId>", "group:<roomId>"), top first, the same on every device.
+    func chatPins() async throws -> [String] {
+        AloChatListPrefs.pins(from: try await request("GET", "/api/chat/pins")) ?? []
+    }
+
+    /// The whole new list of pinned chats (pin, unpin or a new order); the server answers with what it saved.
+    func saveChatPins(_ keys: [String]) async throws -> [String] {
+        AloChatListPrefs.pins(from: try await request("PUT", "/api/chat/pins", body: ["pinned": keys])) ?? []
+    }
+
+    /// Once per device: the pins it kept before the server did join the account's list.
+    func importChatPins(_ keys: [String]) async throws -> [String] {
+        AloChatListPrefs.pins(from: try await request("POST", "/api/chat/pins/import", body: ["pinned": keys])) ?? []
+    }
+
     func directChatAutoDeleteSeconds(peerId: Int) async throws -> Int {
         let response = try await request("GET", "/api/direct-chats/\(peerId)/settings")
         return max(0, response.int("autoDeleteSeconds"))
@@ -980,6 +1073,34 @@ final class AloAPIClient {
         )
     }
 
+    /// «Забыли пароль?»: a code to the address if such an account exists (the answer is the same either way).
+    func forgotPassword(email: String, captchaToken: String? = nil, resend: Bool = false) async throws -> String {
+        let json = try await request(
+            "POST",
+            "/api/auth/forgot-password",
+            body: compactBody([
+                "email": email,
+                "captchaToken": resend ? nil : captchaToken,
+                "resend": resend ? true : nil
+            ])
+        )
+        return json.string("message").ifBlank("Если аккаунт существует, код отправлен.")
+    }
+
+    /// The code from the letter and a new password. False when the account is blocked: password changed, no session.
+    func resetPassword(email: String, code: String, password: String) async throws -> Bool {
+        let json = try await request(
+            "POST",
+            "/api/auth/reset-password",
+            body: [
+                "email": email,
+                "code": code,
+                "password": password
+            ]
+        )
+        return (json["signedIn"] as? Bool) ?? true
+    }
+
     func loadBootstrap(peerId: Int = 0) async throws -> AloBootstrapData {
         try await loadBootstrapSnapshot(peerId: peerId).data
     }
@@ -987,6 +1108,12 @@ final class AloAPIClient {
     func loadChannelProfile(channelId: Int) async throws -> AloChannelProfile {
         let json = try await request("GET", "/api/channels/\(channelId)/profile")
         return AloChannelProfile(json)
+    }
+
+    /// Follows or unfollows a channel (the server toggles); returns the new state and the subscriber count.
+    func toggleChannelSubscription(channelId: Int) async throws -> (subscribed: Bool, subscribersCount: Int) {
+        let json = try await request("POST", "/api/channels/\(channelId)/subscribe")
+        return (json.bool("subscribed"), json.int("subscribersCount"))
     }
 
     func updateChannelSettings(
@@ -1029,6 +1156,12 @@ final class AloAPIClient {
             "/api/channels/\(channelId)/admin-log?\(query.joined(separator: "&"))"
         )
         return json.array("events").map(AloChannelAdminEvent.init)
+    }
+
+    /// Joins and leaves of a group, shown as lines among its messages (AloGroupServiceEvents.swift).
+    func loadGroupServiceEvents(roomId: Int) async throws -> [AloGroupServiceEvent] {
+        let json = try await request("GET", "/api/group-chats/\(roomId)/service-events")
+        return json.array("events").map(AloGroupServiceEvent.init)
     }
 
     func loadGroupAdminLog(
@@ -1303,6 +1436,15 @@ final class AloAPIClient {
         return AloPost(json.object("post"))
     }
 
+    /// A post opened by the random code of its public link (https://ало.online/p/<code>).
+    func loadPost(shareCode: String) async throws -> AloPost {
+        guard AloDeepLinkTarget.isPostCode(shareCode) else {
+            throw AloAPIError(status: 404, code: "post_not_found", message: "Пост не найден.", payload: [:])
+        }
+        let json = try await request("GET", "/api/post-links/\(shareCode)")
+        return AloPost(json.object("post"))
+    }
+
     func resolveAppLink(handle: String) async throws -> AloResolvedAppLink {
         let normalized = handle.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "@", with: "")
@@ -1352,7 +1494,9 @@ final class AloAPIClient {
         let result = AloPostDiscussion(
             roomId: discussion.int("roomId"),
             peerId: discussion.int("peerId"),
-            topicId: discussion.int("topicId")
+            topicId: discussion.int("topicId"),
+            commentCount: max(0, discussion.int("commentCount")),
+            post: json.optionalObject("post").map(AloPost.init)
         )
         guard result.roomId > 0, result.peerId > 0, result.topicId > 0 else {
             throw AloAPIError(
@@ -1396,6 +1540,11 @@ final class AloAPIClient {
 
     func loadFeedPage(subscriptions: Bool, offset: Int) async throws -> AloPage<AloPost> {
         postPage(try await request("GET", "/api/feed/posts?mode=\(subscriptions ? "subs" : "popular")&limit=50&offset=\(offset)"))
+    }
+
+    /// The website's «Популярное»: ranked by the server over the last month.
+    func loadTopPosts() async throws -> AloPage<AloPost> {
+        postPage(try await request("GET", "/api/feed/popular?period=month&limit=30"))
     }
 
     func loadUserPostsPage(userId: Int, offset: Int) async throws -> AloPage<AloPost> {
@@ -1443,8 +1592,10 @@ final class AloAPIClient {
         return AloCurrentUser(json.object("user"))
     }
 
-    func loadConversation(peerId: Int) async throws -> AloConversationDetail {
-        let raw = try await request("GET", "/api/messages/\(peerId)")
+    /// `markRead: false` for reads the person does not see (search index, a long-press preview, muting from the list):
+    /// the server then leaves the messages unread, here and for the sender.
+    func loadConversation(peerId: Int, markRead: Bool = true) async throws -> AloConversationDetail {
+        let raw = try await request("GET", "/api/messages/\(peerId)" + (markRead ? "" : "?markRead=0"))
         let decryptedMessages = await decryptE2EEMessages(inConversation: raw)
         let decryptedTopics = await decryptForumTopicStates(inConversation: decryptedMessages)
         let decrypted = await attachCanonicalPollStates(to: decryptedTopics)
@@ -1523,7 +1674,7 @@ final class AloAPIClient {
             // A conversation that has never been opened has no encrypted
             // index yet. Seed it once, then walk older pages below. This keeps
             // the eventual global search entirely device-local.
-            let seed = try await loadConversation(peerId: peerId)
+            let seed = try await loadConversation(peerId: peerId, markRead: false)
             guard !seed.items.isEmpty else {
                 store.markSearchHistoryComplete(peerId: peerId, ownerUserId: ownerUserId)
                 return
@@ -1662,6 +1813,14 @@ final class AloAPIClient {
                             eventName = line.dropFirst(6).trimmingCharacters(in: .whitespaces)
                         } else if line.hasPrefix("data:") {
                             dataLines.append(line.dropFirst(5).trimmingCharacters(in: .whitespaces))
+                            // `bytes.lines` never yields the blank line that ends an SSE event; the server writes one JSON
+                            // data line per event, so it is dispatched here (otherwise updates waited for a poll).
+                            let data = Data(dataLines.joined(separator: "\n").utf8)
+                            let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+                            continuation.yield(AloChatStreamEvent(id: eventId, name: eventName, payload: payload))
+                            eventId = 0
+                            eventName = "message"
+                            dataLines.removeAll(keepingCapacity: true)
                         }
                     }
 
@@ -1990,7 +2149,7 @@ final class AloAPIClient {
         )
     }
 
-    private func uploadResumable(
+    func uploadResumable(
         fileURL: URL,
         size: Int64,
         checksum: String,
@@ -1998,7 +2157,8 @@ final class AloAPIClient {
         mime: String,
         resumeCheckpoint: AloResumableUploadCheckpoint? = nil,
         onCheckpoint: ((AloResumableUploadCheckpoint) -> Void)? = nil,
-        expectedOwnerId: Int? = nil
+        expectedOwnerId: Int? = nil,
+        keepOriginal: Bool = false
     ) async throws -> [String: Any] {
         guard size > 0,
               size <= AloChunkedMediaCrypto.expectedCiphertextSize(
@@ -2064,7 +2224,8 @@ final class AloAPIClient {
                     "purpose": purpose,
                     "mime": mime.ifBlank("application/octet-stream"),
                     "size": size,
-                    "sha256": checksum
+                    "sha256": checksum,
+                    "keepOriginal": keepOriginal ? true : nil
                 ])
             )
             let upload = created.object("upload")
@@ -2213,7 +2374,7 @@ final class AloAPIClient {
         return json
     }
 
-    private static func sha256(of fileURL: URL) throws -> String {
+    static func sha256(of fileURL: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: fileURL)
         defer { try? handle.close() }
         var hasher = SHA256()
@@ -2230,7 +2391,17 @@ final class AloAPIClient {
     }
 
     func loadBlockedUserIds() async throws -> Set<Int> {
-        AloBlockedUserList.userIds(from: try await request("GET", "/api/users/blocks"))
+        try await loadBlockedUsers().ids
+    }
+
+    /// Everyone this account blocked, with names and avatars: not only the people it has a chat with.
+    func loadBlockedUsers() async throws -> (ids: Set<Int>, users: [AloEntitySummary]) {
+        let json = try await request("GET", "/api/users/blocks")
+        let users = ((json["blocks"] as? [[String: Any]]) ?? [])
+            .compactMap { $0["user"] as? [String: Any] }
+            .map(AloEntitySummary.init)
+            .filter { $0.id > 0 }
+        return (AloBlockedUserList.userIds(from: json), users)
     }
 
     func blockUser(userId: Int) async throws {
@@ -2251,6 +2422,12 @@ final class AloAPIClient {
             body: body
         )
         return AloCurrentUser(json.object("user"))
+    }
+
+    /// The reaction a double tap sends; the server keeps it for the account and answers with the one it saved.
+    func setFavoriteReaction(_ emoji: String) async throws -> String {
+        let json = try await request("PUT", "/api/profile/favorite-reaction", body: ["emoji": emoji])
+        return json.string("favoriteReaction").ifBlank(emoji)
     }
 
     func updateProfileAvatar(avatarUrl: String) async throws -> AloCurrentUser {
@@ -2937,6 +3114,16 @@ final class AloAPIClient {
         )
     }
 
+    /// Which device asks to sign in with this QR (the website's browser and IP). Also tells the website it was scanned.
+    func inspectQRCodeLogin(requestID: String, secret: String) async throws -> AloQRCodeLoginDevice {
+        let requestID = requestID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? requestID
+        return AloQRCodeLoginDevice(try await request(
+            "POST",
+            "/api/auth/qr-login/\(requestID)/inspect",
+            body: ["secret": secret]
+        ))
+    }
+
     func approveQRCodeLogin(requestID: String, secret: String) async throws {
         let requestID = requestID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? requestID
         _ = try await request(
@@ -3241,6 +3428,15 @@ final class AloAPIClient {
         captchaToken: String? = nil,
         clientMessageId: String = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     ) async throws {
+        if await usesCloudMessages(kind: kind, roomId: roomId) {
+            _ = try await sendCloudMessage(AloCloudSendRequest(
+                peerId: peerId, roomId: roomId, kind: kind, body: body, attachments: attachments,
+                forwardFrom: forwardFrom, replyToMessageId: replyToMessageId, topicId: topicId,
+                selfDestructSeconds: selfDestructSeconds, silent: silent, scheduledAt: scheduledAt,
+                sendWhenOnline: sendWhenOnline, captchaToken: captchaToken, clientMessageId: clientMessageId
+            ))
+            return
+        }
         let encryptedPayload = try await prepareEncryptedMessagePayload(
             peerId: peerId,
             roomId: roomId,
@@ -3321,26 +3517,12 @@ final class AloAPIClient {
             payload["peerId"] = peerId
             response = try await request("POST", "/api/messages/send", body: compactBody(payload))
         }
-        let message = response.object("message")
-        guard message.int("id") > 0 || (response.bool("scheduled") && response.object("scheduledMessage").int("id") > 0) else {
-            throw AloAPIError(status: 502, code: "MESSAGE_ACK_INVALID",
-                message: "Сервер не подтвердил отправку. Сообщение сохранено, можно повторить попытку.", payload: [:])
-        }
+        let acknowledgement = try Self.sendAcknowledgement(from: response)
         AloE2EECrypto.shared.markRatchetSessionsConfirmed(encryptedPayload: encryptedPayload)
-        return AloMessageSendAcknowledgement(
-            messageId: message.int("id"),
-            createdAt: message.string("createdAt"),
-            scheduled: response.bool("scheduled"),
-            scheduledMessageId: response.object("scheduledMessage").int("id"),
-            scheduledAt: message.string("scheduledAt")
-                .ifBlank(response.object("scheduledMessage").string("scheduledAt")),
-            sendWhenOnline: message.bool("sendWhenOnline")
-                || response.object("scheduledMessage").bool("sendWhenOnline")
-                || response.bool("sendWhenOnline")
-        )
+        return acknowledgement
     }
 
-    private func pollRegistrationPayload(_ definition: AloPollDefinition) -> [String: Any] {
+    func pollRegistrationPayload(_ definition: AloPollDefinition) -> [String: Any] {
         var payload: [String: Any] = [
             "pollId": definition.id,
             "optionIds": definition.options.map(\.id),
@@ -3551,11 +3733,10 @@ final class AloAPIClient {
             sourceAttachments = []
         }
         let rawAttachments = sourceAttachments.map(messageAttachmentJSON)
-        let resolved = await resolveDecryptedMediaAttachments(
-            rawAttachments,
-            expiresAt: expiry.expiresAt,
-            scope: conversation.entityType == "channel" ? .channels : conversation.roomId > 0 ? .groups : .privateChats
-        )
+        let scope: AloMediaCacheScope = conversation.entityType == "channel" ? .channels : conversation.roomId > 0 ? .groups : .privateChats
+        let decrypted = await resolveDecryptedMediaAttachments(rawAttachments, expiresAt: expiry.expiresAt, scope: scope)
+        // A cloud message holds its file as a server address: register it with the expiry, as a decrypted one.
+        let resolved = await registerPlainMedia(decrypted, expiresAt: expiry.expiresAt, scope: scope)
             .map(AloMessageAttachment.init)
         return (
             message.replacingMedia(
@@ -3666,8 +3847,16 @@ final class AloAPIClient {
         return json.string("status")
     }
 
+    func cancelFriendRequest(requestId: Int) async throws {
+        try await request("POST", "/api/friends/\(requestId)/cancel", body: [:])
+    }
+
+    func removeFriend(userId: Int) async throws {
+        try await request("POST", "/api/friends/remove", body: ["userId": userId])
+    }
+
     @discardableResult
-    private func request(_ method: String, _ path: String, body: [String: Any]? = nil, timeout: TimeInterval = 15) async throws -> [String: Any] {
+    func request(_ method: String, _ path: String, body: [String: Any]? = nil, timeout: TimeInterval = 15) async throws -> [String: Any] {
         let candidates = candidateURLs(for: path)
         guard !candidates.isEmpty else {
             throw AloAPIError(status: 0, code: "BAD_URL", message: "Некорректный адрес API.", payload: [:])
@@ -3701,6 +3890,8 @@ final class AloAPIClient {
                 if let baseURL = candidate.baseURL {
                     activeBaseURL = baseURL
                 }
+                // Alo Премиум: remember who has it and how it looks (AloPremiumDirectory).
+                AloPremiumDirectory.shared.absorb(json)
                 return json
             } catch let error as AloAPIError {
                 throw error
@@ -4199,8 +4390,10 @@ final class AloAPIClient {
               $0.deviceId == AloE2EECrypto.shared.deviceId &&
               $0.protocolDeviceId == libSignalProtocolDeviceId)
         }
+        // A session made with other keys than the server now shows (a new browser in a revoked one's slot) is dropped
+        // by `sessionMatches`, so that device is fetched with a fresh bundle like one never written to.
         let missing = base.filter {
-            !engine.hasSession(remoteUserId: $0.userId, remoteDeviceId: $0.protocolDeviceId)
+            !engine.sessionMatches(remoteUserId: $0.userId, remoteDeviceId: $0.protocolDeviceId, identityKey: $0.identityKey)
         }
         guard !missing.isEmpty else { return base }
 
@@ -4500,6 +4693,106 @@ final class AloAPIClient {
         ]
     }
 
+    // MARK: Secret chats (stage 2): the parts that need this client's libsignal state
+
+    /// The libsignal device of this install once the server knows it: only such a device can start or accept a secret chat.
+    func secretDeviceId() -> String? {
+        guard libSignalEngine != nil, currentUserId > 0, (1...127).contains(libSignalProtocolDeviceId) else { return nil }
+        guard UserDefaults.standard.bool(forKey: "alo.ios.libsignal.v1.registered.\(currentUserId).\(libSignalProtocolDeviceId)") else {
+            return nil
+        }
+        let deviceId = AloE2EECrypto.shared.deviceId
+        return deviceId.isEmpty ? nil : deviceId
+    }
+
+    /// The libsignal envelope of a secret message: ONE recipient, the device at the other end of the chat. Unlike a
+    /// direct message it has no copies for the sender's other devices and none for the person's other devices.
+    func sealSecretMessage(
+        peerUserId: Int,
+        remoteDeviceId: String,
+        body: String,
+        attachments: [AloMessageAttachment]
+    ) async throws -> [String: Any] {
+        guard let engine = libSignalEngine, let store = libSignalStore else {
+            throw AloAPIError(status: -1, code: "E2EE_UNAVAILABLE",
+                message: "Шифрование сообщений недоступно на этом устройстве.", payload: [:])
+        }
+        guard var device = try await loadLibSignalUserDevices(userId: peerUserId, includePreKeys: false)
+            .first(where: { $0.deviceId == remoteDeviceId }) else {
+            throw AloAPIError(status: 410, code: "SECRET_PEER_DEVICE_GONE",
+                message: "Устройство собеседника больше не доступно: этот секретный чат закончился.", payload: [:])
+        }
+        try validateLibSignalIdentity(device)
+        if !engine.hasSession(remoteUserId: peerUserId, remoteDeviceId: device.protocolDeviceId) {
+            device = try await loadLibSignalUserDevices(userId: peerUserId, includePreKeys: true, targets: [device])
+                .first(where: { $0.deviceId == remoteDeviceId }) ?? device
+            try validateLibSignalIdentity(device)
+            guard let bundle = device.preKeyBundle else {
+                throw AloAPIError(status: -1, code: "LIBSIGNAL_PREKEYS_MISSING",
+                    message: "У устройства собеседника закончились одноразовые ключи. Попросите открыть Alo.", payload: [:])
+            }
+            try engine.processRemotePreKeyBundle(remoteUserId: peerUserId, bundle: bundle)
+        }
+        let contextId = "msg_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
+        let markup = AloCloudMessage.trimmedMarkup(body)
+        let content: [String: Any] = [
+            "v": 3,
+            "body": markup.body,
+            "entities": markup.entities.map(\.payload),
+            "attachments": attachments.map(messageAttachmentPayload),
+            "sentAt": ISO8601DateFormatter().string(from: Date())
+        ]
+        let plaintext = try JSONSerialization.data(withJSONObject: content)
+        let ciphertext = try engine.encrypt(remoteUserId: peerUserId, remoteDeviceId: device.protocolDeviceId, plaintext: plaintext)
+        var recipient: [String: Any] = [
+            "userId": peerUserId,
+            "deviceId": device.deviceId,
+            "protocolDeviceId": Int(device.protocolDeviceId),
+            "ciphertextType": Int(ciphertext.type),
+            "ciphertext": ciphertext.bytes.base64EncodedString()
+        ]
+        if ciphertext.type == CiphertextMessage.MessageType.preKey.rawValue, let bundle = device.preKeyBundle {
+            recipient["preKeyId"] = Int(bundle.preKeyId)
+            recipient["kyberPreKeyId"] = Int(bundle.kyberPreKeyId)
+        }
+        // This device's own copy stays here, the way every encrypted chat keeps what it sent.
+        try store.storeMessagePlaintext(contextId: contextId, plaintext: plaintext)
+        return [
+            "scheme": "alo-libsignal-v1",
+            "mode": "direct",
+            "protocolVersion": 1,
+            "purpose": "message",
+            "contextId": contextId,
+            "senderUserId": currentUserId,
+            "senderDeviceId": AloE2EECrypto.shared.deviceId,
+            "senderProtocolDeviceId": Int(libSignalProtocolDeviceId),
+            "recipients": [recipient]
+        ]
+    }
+
+    /// Opens the envelope of a secret message with this device's libsignal state (our own messages come from the local
+    /// plaintext store, as in every encrypted chat). The ordinary reader waits for a tap when a message has a timer;
+    /// here the timer runs from the read mark, so it reads a copy without the timer and always has the files.
+    func openSecretMessage(_ raw: [String: Any]) async -> AloSecretMessage {
+        var shim = raw
+        shim["selfDestructSeconds"] = 0
+        shim["selfDestructStartedAt"] = ""
+        shim["encryptionScheme"] = raw.object("encryptedPayload").string("scheme")
+        let opened = await decryptE2EEMessageJSON(shim, cacheScope: .privateChats)
+        return AloSecretChatCodec.parseMessage(opened, original: raw)
+    }
+
+    /// What a secret message left on this device (its own copy of the text, the decrypted files) goes with the message.
+    func forgetSecretMessageData(_ messages: [AloSecretMessage]) {
+        for message in messages {
+            if !message.contextId.isEmpty { libSignalStore?.forgetMessagePlaintext(contextId: message.contextId) }
+            let urls = message.attachments.flatMap { [$0.url, $0.posterUrl] }
+                .compactMap { URL(string: $0) }
+                .filter { AloSecureMediaStore.shared.isSecureURL($0) }
+            if !urls.isEmpty { AloSecureMediaStore.shared.remove(urls: urls) }
+        }
+    }
+
     private func prepareLibSignalDirectCallPayload(
         peerId: Int,
         payload: [String: Any]
@@ -4519,18 +4812,18 @@ final class AloAPIClient {
         ]
         let plaintext = try JSONSerialization.data(withJSONObject: content)
         var envelopes = [[String: Any]]()
+        var skippedKeyless = 0
         for recipient in recipients {
             if !engine.hasSession(
                 remoteUserId: recipient.userId,
                 remoteDeviceId: recipient.protocolDeviceId
             ) {
                 guard let bundle = recipient.preKeyBundle else {
-                    throw AloAPIError(
-                        status: -1,
-                        code: "LIBSIGNAL_PREKEYS_MISSING",
-                        message: "На устройстве собеседника закончились одноразовые ключи звонка.",
-                        payload: [:]
-                    )
+                    // A device with no keys left (a forgotten browser, an app not opened for a long time) cannot start a
+                    // session. It is left out of this call and the person's other devices still ring, as on the website;
+                    // the call fails only when none of the person's devices can be reached.
+                    skippedKeyless += 1
+                    continue
                 }
                 try engine.processRemotePreKeyBundle(remoteUserId: recipient.userId, bundle: bundle)
             }
@@ -4552,6 +4845,16 @@ final class AloAPIClient {
                 envelope["kyberPreKeyId"] = Int(bundle.kyberPreKeyId)
             }
             envelopes.append(envelope)
+        }
+        guard envelopes.contains(where: { ($0["userId"] as? Int) == peerId }) else {
+            throw AloAPIError(
+                status: -1,
+                code: "LIBSIGNAL_PREKEYS_MISSING",
+                message: skippedKeyless > 0
+                    ? "Ни одно устройство собеседника сейчас не может принять звонок: у них закончились ключи. Как только собеседник откроет Alo, звонок заработает."
+                    : "Не удалось подготовить защищённый сигнал для собеседника.",
+                payload: [:]
+            )
         }
         try store.storeMessagePlaintext(contextId: contextId, plaintext: plaintext)
         return [
@@ -5036,6 +5339,17 @@ final class AloAPIClient {
         if type == "call" { return "Звонок" }
         if type == "image" || type.hasPrefix("image/") { return "Фото" }
         if type == "video" || type.hasPrefix("video/") { return "Видео" }
+        if type == "location" { return "Геопозиция" }
+        if type == "contact" {
+            let name = firstAttachment?.object("metadata").string("displayName")
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return name.isEmpty ? "Контакт" : "Контакт: \(name)"
+        }
+        if type == "sticker" { return "Стикер" }
+        // A document is named by its file, as on the website and in Telegram.
+        let fileName = (firstAttachment?.string("name") ?? message.string("attachmentName"))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if type == "file", !fileName.isEmpty, fileName != "encrypted.bin" { return fileName }
         if !type.isEmpty || firstAttachment != nil { return "Вложение" }
         return ""
     }
@@ -5155,6 +5469,18 @@ final class AloAPIClient {
         if attachments.isEmpty, !raw.string("attachmentUrl").isEmpty {
             attachments = [["url": raw.string("attachmentUrl"), "type": raw.string("attachmentType"), "name": raw.string("attachmentName")]]
         }
+        let converted = await registerPlainMedia(attachments, scope: scope)
+        guard !converted.isEmpty else { return raw }
+        var result = raw
+        result["attachments"] = converted
+        result["attachmentUrl"] = converted[0].string("url")
+        return result
+    }
+
+    /// Cloud (and older plain) messages carry their files as server addresses. Voice, circles, video and documents
+    /// are registered like decrypted ones, so players and viewers treat every message the same way and the offline
+    /// copy on this device is encrypted. Photos and cards stay addresses.
+    func registerPlainMedia(_ attachments: [[String: Any]], expiresAt: String = "", scope: AloMediaCacheScope) async -> [[String: Any]] {
         var converted = [[String: Any]]()
         for var attachment in attachments {
             let type = attachment.string("type").lowercased()
@@ -5164,18 +5490,17 @@ final class AloAPIClient {
                remote.hasPrefix("/") || remote.hasPrefix("http://") || remote.hasPrefix("https://") {
                 let owner = currentUserId
                 let source = attachment
+                // The bytes decide the type: a recording the server turned into .ogg is played as .ogg.
+                let name = AloCloudMessage.name(source.string("name"), matching: remote.components(separatedBy: "?")[0])
                 if let url = try? await Task.detached(priority: .utility, operation: {
-                    try AloSecureMediaStore.shared.registerRemotePlaintext(remote, type: type, name: source.string("name"),
-                        size: Int64(source.object("metadata").string("size")), ownerUserId: owner, scope: scope)
+                    try AloSecureMediaStore.shared.registerRemotePlaintext(remote, type: type, name: name,
+                        size: Int64(source.object("metadata").string("size")), ownerUserId: owner, scope: scope,
+                        expiresAt: expiresAt)
                 }).value { attachment["url"] = url.absoluteString }
             }
             converted.append(attachment)
         }
-        guard !converted.isEmpty else { return raw }
-        var result = raw
-        result["attachments"] = converted
-        result["attachmentUrl"] = converted[0].string("url")
-        return result
+        return converted
     }
 
     private func messageAttachmentJSON(_ attachment: AloMessageAttachment) -> [String: Any] {

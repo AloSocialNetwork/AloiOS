@@ -44,8 +44,7 @@ final class AloTelegramGeometryUITests: XCTestCase {
         let media = app.descendants(matching: .any).matching(identifier: "alo.message.media.990200").firstMatch
         XCTAssertTrue(media.waitForExistence(timeout: 4))
         media.press(forDuration: 0.65)
-        // The chat list behind the chat has its own "Изменить"; this is the message menu's.
-        let edit = app.buttons.matching(NSPredicate(format: "label == 'Изменить' AND identifier != 'alo.chats.select.begin'")).firstMatch
+        let edit = app.buttons["Изменить"].firstMatch
         XCTAssertTrue(edit.waitForExistence(timeout: 4))
         edit.tap()
         let accessory = app.descendants(matching: .any).matching(identifier: "alo.composer.accessory.edit").firstMatch

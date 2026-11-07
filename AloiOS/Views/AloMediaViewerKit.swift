@@ -257,6 +257,8 @@ final class AloVideoPlayerModel: NSObject, ObservableObject, AVPictureInPictureC
     @Published private(set) var isEnded = false
     @Published private(set) var currentTime: Double = 0
     @Published private(set) var duration: Double = 0
+    /// How far the file has come down (the lighter part of the seek bar, as in Telegram).
+    @Published private(set) var loadedTime: Double = 0
     @Published var rate: Float = 1
     @Published private(set) var isMuted = false
 
@@ -271,7 +273,17 @@ final class AloVideoPlayerModel: NSObject, ObservableObject, AVPictureInPictureC
         player.automaticallyWaitsToMinimizeStalling = true
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { [weak self] time in
             MainActor.assumeIsolated {
-                guard let self, !self.isScrubbing else { return }
+                guard let self else { return }
+                if let ranges = self.player.currentItem?.loadedTimeRanges {
+                    let now = time.seconds
+                    let end = ranges.map(\.timeRangeValue)
+                        .filter { $0.start.seconds <= now + 0.5 }
+                        .map { CMTimeRangeGetEnd($0).seconds }
+                        .filter(\.isFinite)
+                        .max() ?? 0
+                    if abs(end - self.loadedTime) > 0.1 { self.loadedTime = end }
+                }
+                guard !self.isScrubbing else { return }
                 self.currentTime = max(0, time.seconds.isFinite ? time.seconds : 0)
             }
         }
@@ -297,6 +309,7 @@ final class AloVideoPlayerModel: NSObject, ObservableObject, AVPictureInPictureC
 
     func play() {
         if isEnded { seek(to: 0); isEnded = false }
+        AloPlaybackAudioSession.activate()
         player.playImmediately(atRate: rate)
     }
 
@@ -468,12 +481,24 @@ struct AloVideoPlayerView: View {
                     .allowsHitTesting(false)
             }
 
-            if model.isBuffering && !model.isEnded {
-                AloVideoSpinner().allowsHitTesting(false)
+            // The round button and the loading ring share one point, the middle of the screen, where the picture is
+            // (Telegram: the ring turns inside the button). The bottom bar lives separately.
+            Group {
+                if showsControls {
+                    playButton.transition(.opacity)
+                } else if isLoading {
+                    AloVideoSpinner().allowsHitTesting(false)
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .ignoresSafeArea()
 
             if showsControls {
-                controls.transition(.opacity)
+                VStack(spacing: 0) {
+                    Spacer()
+                    bottomBar
+                }
+                .transition(.opacity)
             }
         }
         .background(Color.black)
@@ -526,29 +551,32 @@ struct AloVideoPlayerView: View {
             }
     }
 
-    private var controls: some View {
-        VStack(spacing: 0) {
-            Spacer()
-            Button(action: { model.toggle(); scheduleHide() }) {
-                Image(systemName: model.isEnded ? "arrow.counterclockwise" : (model.isPlaying ? "pause.fill" : "play.fill"))
-                    .font(.system(size: 28, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .contentTransition(.symbolEffect(.replace.downUp))
-                    .animation(.spring(response: 0.26, dampingFraction: 0.8), value: model.isPlaying)
-                    .frame(width: 72, height: 72)
-                    .modifier(AloChatGlass(interactive: false, role: .chrome))
+    private var isLoading: Bool { model.isBuffering && !model.isEnded }
+
+    private var playButton: some View {
+        Button(action: { model.toggle(); scheduleHide() }) {
+            ZStack {
+                if isLoading {
+                    AloVideoSpinner(background: false)
+                } else {
+                    Image(systemName: model.isEnded ? "arrow.counterclockwise" : (model.isPlaying ? "pause.fill" : "play.fill"))
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .contentTransition(.symbolEffect(.replace.downUp))
+                        .animation(.spring(response: 0.26, dampingFraction: 0.8), value: model.isPlaying)
+                }
             }
-            .buttonStyle(AloControlPressStyle())
-            .accessibilityLabel(model.isPlaying ? "Пауза" : "Воспроизвести")
-            .accessibilityIdentifier("alo.video.play")
-            Spacer()
-            bottomBar
+            .frame(width: 72, height: 72)
+            .modifier(AloChatGlass(interactive: false, role: .chrome))
         }
+        .buttonStyle(AloControlPressStyle())
+        .accessibilityLabel(model.isPlaying ? "Пауза" : "Воспроизвести")
+        .accessibilityIdentifier("alo.video.play")
     }
 
     private var bottomBar: some View {
         VStack(spacing: 6) {
-            AloVideoScrubber(value: displayedTime, duration: model.duration,
+            AloVideoScrubber(value: displayedTime, duration: model.duration, loaded: model.loadedTime,
                 onScrub: { scrubValue = $0; model.isScrubbing = true },
                 onEnd: { value in
                     model.seek(to: value)
@@ -618,6 +646,7 @@ struct AloVideoPlayerView: View {
 struct AloVideoScrubber: View {
     let value: Double
     let duration: Double
+    var loaded: Double = 0
     let onScrub: (Double) -> Void
     let onEnd: (Double) -> Void
     @State private var dragging = false
@@ -627,6 +656,10 @@ struct AloVideoScrubber: View {
             let progress = duration > 0 ? min(1, max(0, value / duration)) : 0
             ZStack(alignment: .leading) {
                 Capsule().fill(Color.white.opacity(0.28)).frame(height: dragging ? 8 : 4)
+                // What has already been downloaded.
+                Capsule().fill(Color.white.opacity(0.5))
+                    .frame(width: duration > 0 ? proxy.size.width * min(1, max(0, loaded / duration)) : 0, height: dragging ? 8 : 4)
+                    .animation(.easeOut(duration: 0.3), value: loaded)
                 Capsule().fill(Color.white).frame(width: max(0, proxy.size.width * progress), height: dragging ? 8 : 4)
                 Circle().fill(Color.white)
                     .frame(width: dragging ? 18 : 12, height: dragging ? 18 : 12)
@@ -656,7 +689,10 @@ struct AloVideoScrubber: View {
     }
 }
 
+/// The loading ring: alone it has its own dark 72 pt circle, the same size and place as the play button; inside the
+/// button (`background: false`) it turns in the button's glass.
 struct AloVideoSpinner: View {
+    var background = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -666,8 +702,8 @@ struct AloVideoSpinner: View {
                 .stroke(Color.white.opacity(0.92), style: StrokeStyle(lineWidth: 3, lineCap: .round))
                 .frame(width: 34, height: 34)
                 .rotationEffect(.degrees(angle))
-                .frame(width: 64, height: 64)
-                .background(Color.black.opacity(0.42), in: Circle())
+                .frame(width: 72, height: 72)
+                .background(background ? Color.black.opacity(0.42) : Color.clear, in: Circle())
         }
     }
 }

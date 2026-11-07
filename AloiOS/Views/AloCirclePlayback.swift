@@ -85,10 +85,17 @@ enum AloCirclePresentation {
     }
 }
 
-/// One decoder per conversation. Scrolling transfers presentation, not ownership.
+/// One decoder for the app (ordinary chats; a secret chat keeps its own). Scrolling transfers presentation, not
+/// ownership; leaving the chat keeps the circle playing with its bar in the other chats, as voice messages and songs do
+/// (the owner, 2026-10-31: «только полоса» — the floating circle stays in the chat it came from).
 @MainActor @Observable
 final class AloCirclePlayback {
+    static let shared = AloCirclePlayback()
+
     private(set) var item: AloCircleQueueItem?
+    /// The chat on screen (set by it when it appears) and the chat the playing circle came from.
+    var activeScope = ""
+    private(set) var scope = ""
     private(set) var player: AVPlayer?
     private(set) var isPlaying = false
     private(set) var progress = 0.0
@@ -107,13 +114,25 @@ final class AloCirclePlayback {
     @ObservationIgnored private var isFloatingInteracting = false
     @ObservationIgnored private var lastInlineFrame: CGRect?
     @ObservationIgnored var floatingCorner = CGPoint(x: 1, y: 0)
+    @ObservationIgnored private var mediaObserver: NSObjectProtocol?
+
+    init() {
+        // Another sound (a voice message, a song, a video) stops the circle; it used to be the open chat that did it.
+        mediaObserver = NotificationCenter.default.addObserver(forName: Notification.Name("aloMediaPlaybackDidStart"), object: nil, queue: .main) { [weak self] note in
+            let source = note.object as? String
+            MainActor.assumeIsolated {
+                guard let self, let id = self.item?.id, source != id else { return }
+                self.stop()
+            }
+        }
+    }
 
     func setQueue(_ items: [AloCircleQueueItem]) { queue = items }
 
     func toggle(_ requested: AloCircleQueueItem, startsInline: Bool = false) {
         if item?.id == requested.id {
             if isPlaying { player?.pause(); isPlaying = false }
-            else { player?.play(); isPlaying = true }
+            else { AloPlaybackAudioSession.activate(); player?.play(); isPlaying = true }
         } else {
             play(requested, startsInline: startsInline)
             if !startsInline { focusRequest += 1 }
@@ -122,7 +141,11 @@ final class AloCirclePlayback {
 
     func play(_ requested: AloCircleQueueItem, startsInline: Bool = false) {
         stop()
+        // A circle takes the voice message's or the song's place: one bar under the header.
+        AloVoicePlayback.shared.stop()
+        AloMusicPlayback.shared.stop()
         item = requested
+        scope = activeScope
         inlineVisible = startsInline
         surfaceOwner = startsInline ? .inline : .floating
         let currentGeneration = generation
@@ -160,6 +183,7 @@ final class AloCirclePlayback {
                 }
             }
         }
+        AloPlaybackAudioSession.activate()
         prepared.play()
         isPlaying = true
     }
@@ -210,6 +234,7 @@ final class AloCirclePlayback {
         failureObserver = nil
         player = nil
         item = nil
+        scope = ""
         progress = 0
         isPlaying = false
         inlineVisible = false

@@ -21,6 +21,9 @@ final class AloWebRTCCallClient: NSObject {
     private let onConnectionStateChanged: (AloWebRTCConnectionState) -> Void
     private let onError: (String) -> Void
 
+    /// Candidates that arrive before the other side's description: WebRTC refuses them («The remote description was
+    /// null») and the phone showed that as an error in the middle of a working call. They are added once it is set.
+    private var pendingRemoteCandidates = [RTCIceCandidate]()
     private var audioSource: RTCAudioSource?
     private var audioTrack: RTCAudioTrack?
     private var videoSource: RTCVideoSource?
@@ -165,6 +168,7 @@ final class AloWebRTCCallClient: NSObject {
                 }
                 return
             }
+            self.flushPendingRemoteCandidates()
             self.peerConnection.answer(for: self.mediaConstraints()) { description, error in
                 if let error {
                     if !reconnecting {
@@ -203,21 +207,39 @@ final class AloWebRTCCallClient: NSObject {
         peerConnection.setRemoteDescription(
             RTCSessionDescription(type: .answer, sdp: sdp)
         ) { [weak self] error in
-            if let error, !reconnecting {
-                self?.onError(error.localizedDescription)
+            if let error {
+                if !reconnecting { self?.onError(error.localizedDescription) }
+                return
             }
+            self?.flushPendingRemoteCandidates()
         }
     }
 
     func addRemoteIceCandidate(sdpMid: String, lineIndex: Int32, candidate: String) {
-        peerConnection.add(
-            RTCIceCandidate(
-                sdp: candidate,
-                sdpMLineIndex: lineIndex,
-                sdpMid: sdpMid
-            )
-        ) { [weak self] error in
-            if let error { self?.onError(error.localizedDescription) }
+        let remote = RTCIceCandidate(sdp: candidate, sdpMLineIndex: lineIndex, sdpMid: sdpMid)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard self.peerConnection.remoteDescription != nil else {
+                self.pendingRemoteCandidates.append(remote)
+                return
+            }
+            self.addRemote(remote)
+        }
+    }
+
+    private func flushPendingRemoteCandidates() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.peerConnection.remoteDescription != nil else { return }
+            let pending = self.pendingRemoteCandidates
+            self.pendingRemoteCandidates.removeAll()
+            pending.forEach(self.addRemote)
+        }
+    }
+
+    /// A candidate the connection does not take (one for a network the other side already left) is not a failed call.
+    private func addRemote(_ candidate: RTCIceCandidate) {
+        peerConnection.add(candidate) { error in
+            if let error { NSLog("Alo call: remote ICE candidate ignored: %@", error.localizedDescription) }
         }
     }
 
@@ -496,7 +518,7 @@ final class AloWebRTCCallClient: NSObject {
         }
         guard let device = cameraDevice(for: preferredCameraPosition),
               let format = preferredFormat(for: device) else {
-            let error = AloCallCaptureError.cameraUnavailable
+            let error = Self.hasAnyCamera ? AloCallCaptureError.cameraUnavailable : AloCallCaptureError.noCamera
             onError(error.localizedDescription)
             completion?(.failure(error))
             return
@@ -600,6 +622,12 @@ final class AloWebRTCCallClient: NSObject {
                 return left.width * left.height < right.width * right.height
             }
             ?? RTCCameraVideoCapturer.supportedFormats(for: device).first
+    }
+
+    /// Whether the device has any camera at all (the simulator and some iPads have none). Without one a video call
+    /// still starts, with the camera off.
+    static var hasAnyCamera: Bool {
+        AVCaptureDevice.default(for: .video) != nil || !RTCCameraVideoCapturer.captureDevices().isEmpty
     }
 
     private func cameraDevice(
@@ -777,6 +805,7 @@ private final class AloReplayKitVideoCapturer: RTCVideoCapturer {
 private enum AloCallCaptureError: LocalizedError {
     case cameraBusy
     case cameraUnavailable
+    case noCamera
     case operationSuperseded
     case screenShareActive
 
@@ -786,6 +815,8 @@ private enum AloCallCaptureError: LocalizedError {
             "Камера ещё переключается."
         case .cameraUnavailable:
             "На устройстве не найдена другая камера."
+        case .noCamera:
+            "На этом устройстве нет камеры — звонок идёт без вашего видео."
         case .operationSuperseded:
             "Операция с камерой была отменена."
         case .screenShareActive:

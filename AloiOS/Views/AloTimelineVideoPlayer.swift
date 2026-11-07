@@ -10,10 +10,12 @@ struct AloTimelineVideoPlayer: View {
     @State private var player: AVPlayer?
 
     var body: some View {
-        Group {
+        // One stable container: on a Group onAppear / onDisappear would go to each branch and release the new player.
+        ZStack {
+            Color.black
             if let player { AloVideoPlayerView(player: player, dismiss: dismiss) }
-            else { Color.black }
         }
+        .accessibilityElement(children: .contain)
         .onAppear { updatePlayback() }
         .onChange(of: isActive) { _, _ in updatePlayback() }
         .onDisappear { releasePlayer() }

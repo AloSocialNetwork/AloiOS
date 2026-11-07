@@ -15,6 +15,8 @@ final class AloAppModel: ObservableObject {
         case register
         case verifyLogin
         case verifyEmail
+        /// «Забыли пароль?»: the code from the letter, then a new password (the site's reset steps).
+        case resetPassword
     }
 
     struct HumanChallenge: Identifiable {
@@ -141,11 +143,14 @@ final class AloAppModel: ObservableObject {
     @Published var authMode: AuthMode = .login
     @Published var email = ""
     @Published var password = ""
+    @Published var newPassword = ""
     @Published var name = ""
     @Published var username = ""
     @Published var code = ""
     @Published var notice = ""
     @Published var errorMessage = ""
+    /// The last reset attempt failed on the code, so the sign-in screen goes back to the code step.
+    @Published var passwordResetCodeRejected = false
     @Published var shouldOfferAppSettings = false
     @Published var isBusy = false
     @Published private(set) var connectionState: ConnectionState = .connected
@@ -172,7 +177,11 @@ final class AloAppModel: ObservableObject {
     @Published var feedMode: AloFeedMode = .popular
     @Published private(set) var feedTopPosts: [AloPost] = []
     @Published private(set) var feedTopLoaded = false
-    @Published var composeText = ""
+    let livePostText = AloLiveText()
+    var composeText: String {
+        get { livePostText.text }
+        set { livePostText.text = newValue }
+    }
     @Published private(set) var isCreatingPost = false
     @Published private(set) var postPublishingError = ""
     @Published private(set) var lastPublishedPostId = 0
@@ -256,14 +265,26 @@ final class AloAppModel: ObservableObject {
     @Published private(set) var storyPublishingError = ""
     @Published private(set) var businessProfileData: AloBusinessProfileData?
     @Published private(set) var isBusinessProfileLoading = false
-    @Published var searchQuery = ""
+    let liveSearchQuery = AloLiveText()
+    var searchQuery: String {
+        get { liveSearchQuery.text }
+        set { liveSearchQuery.text = newValue }
+    }
     @Published var activeConversation: AloConversationDetail? {
         didSet {
             let sameChat = oldValue?.peerId == activeConversation?.peerId && oldValue?.kind == activeConversation?.kind
             switchChatDraft(to: activeConversation, topicId: sameChat ? composerTopicId : 0)
         }
     }
-    @Published var messageText = "" { didSet { saveCurrentChatDraft() } }
+    /// The composer's text (AloLiveText): a typed letter redraws the input bar, not the chat and the chat list.
+    let liveMessageText = AloLiveText()
+    var messageText: String {
+        get { liveMessageText.text }
+        set {
+            liveMessageText.text = newValue
+            saveCurrentChatDraft()
+        }
+    }
     @Published var pendingForwardDraft: AloForwardMeta? { didSet { saveCurrentChatDraft() } }
     @Published var pendingForwardTitle = "" { didSet { saveCurrentChatDraft() } }
     @Published var composerAttachments = [AloLocalAttachment]() { didSet { saveCurrentChatDraft() } }
@@ -297,7 +318,11 @@ final class AloAppModel: ObservableObject {
     @Published var pushFriendRequest: AloNotificationItem?
     private var processingPushOpen = false
     @Published var comments = [AloPostComment]()
-    @Published var commentText = ""
+    let liveCommentText = AloLiveText()
+    var commentText: String {
+        get { liveCommentText.text }
+        set { liveCommentText.text = newValue }
+    }
     /// The comment a reply is being written to; the composer shows "Ответ для …".
     @Published var commentReplyTarget: AloPostComment?
     @Published var commentsLoading = false
@@ -331,6 +356,8 @@ final class AloAppModel: ObservableObject {
     private var commentsReturnConversation: AloConversationDetail?
     @Published private(set) var requestedForumTopicId = 0
     @Published private(set) var blockedUserIds = Set<Int>()
+    /// Names and avatars of the blocked people for «Чёрный список» (the search index knows only some of them).
+    @Published private(set) var blockedUsers: [AloEntitySummary] = []
     @Published private(set) var blockingUserIds = Set<Int>()
     @Published private(set) var storedAccounts = AloAccountSessionStore.shared.accounts
     /// Unread messages of the other accounts saved on this phone, by user id (Telegram's account switcher).
@@ -746,6 +773,79 @@ final class AloAppModel: ObservableObject {
             verifyLogin()
         case .verifyEmail:
             verifyEmail()
+        case .resetPassword:
+            resetPassword()
+        }
+    }
+
+    /// «Забыли пароль?» on the password step: a code to the address entered before (Cloudflare check first).
+    func requestPasswordReset(captchaToken: String? = nil) {
+        let address = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard address.contains("@") else {
+            errorMessage = "Сначала введите почту."
+            return
+        }
+        email = address
+        runAuthTask {
+            do {
+                self.notice = try await self.api.forgotPassword(email: address, captchaToken: captchaToken)
+                self.code = ""
+                self.newPassword = ""
+                self.authMode = .resetPassword
+            } catch let error as AloAPIError {
+                if self.handleChallenge(error, retry: { token in self.requestPasswordReset(captchaToken: token) }) { return }
+                self.errorMessage = error.message
+            } catch {
+                self.errorMessage = "Не удалось подключиться к серверу."
+            }
+        }
+    }
+
+    func resendPasswordResetCode() {
+        runAuthTask {
+            do {
+                self.notice = try await self.api.forgotPassword(email: self.email, resend: true)
+            } catch let error as AloAPIError {
+                self.errorMessage = error.message
+            } catch {
+                self.errorMessage = "Не удалось подключиться к серверу."
+            }
+        }
+    }
+
+    func resetPassword() {
+        guard code.trimmingCharacters(in: .whitespacesAndNewlines).count == 6 else {
+            errorMessage = "Код должен состоять из 6 цифр."
+            return
+        }
+        guard newPassword.count >= 8 else {
+            errorMessage = "Новый пароль должен быть не меньше 8 символов."
+            return
+        }
+        runAuthTask {
+            do {
+                let signedIn = try await self.api.resetPassword(
+                    email: self.email,
+                    code: self.code.trimmingCharacters(in: .whitespacesAndNewlines),
+                    password: self.newPassword
+                )
+                self.password = ""
+                if signedIn {
+                    self.newPassword = ""
+                    await self.loadBootstrap()
+                } else {
+                    // A blocked account gets its new password but no session until the block ends.
+                    self.code = ""
+                    self.newPassword = ""
+                    self.authMode = .login
+                    self.notice = "Пароль изменён. Войти можно будет, когда закончится блокировка аккаунта."
+                }
+            } catch let error as AloAPIError {
+                self.errorMessage = error.message
+                self.passwordResetCodeRejected = error.code == "INVALID_VERIFICATION_CODE" || error.code == "VERIFICATION_CODE_LOCKED"
+            } catch {
+                self.errorMessage = "Не удалось подключиться к серверу."
+            }
         }
     }
 
@@ -3632,6 +3732,7 @@ final class AloAppModel: ObservableObject {
         blockedUsersStateRevision = 0
         blockedUserStateOwnerUserId = ownerUserId
         blockedUserIds = []
+        blockedUsers = []
         blockingUserIds = []
     }
 
@@ -3642,6 +3743,7 @@ final class AloAppModel: ObservableObject {
         blockedUsersStateRevision = 0
         blockedUserStateOwnerUserId = 0
         blockedUserIds = []
+        blockedUsers = []
         blockingUserIds = []
     }
 
@@ -3669,7 +3771,7 @@ final class AloAppModel: ObservableObject {
                 return
             }
             do {
-                let userIds = try await self.api.loadBlockedUserIds()
+                let (userIds, users) = try await self.api.loadBlockedUsers()
                 guard !Task.isCancelled,
                       self.blockedUserStateOwnerUserId == ownerUserId,
                       self.blockedUsersRefreshToken == refreshToken,
@@ -3677,6 +3779,7 @@ final class AloAppModel: ObservableObject {
                     return
                 }
                 self.blockedUserIds = userIds
+                self.blockedUsers = users
                 userIds.forEach { self.discardPendingChatOperations(forBlockedPeerId: $0) }
             } catch {
                 // Keep the last known local state until the next refresh succeeds.

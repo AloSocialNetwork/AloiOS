@@ -48,6 +48,8 @@ final class AloLibSignalSessionEngine {
     private let senderKeyStore: any SenderKeyStore
     private let localUserId: Int
     let localDeviceId: UInt32
+    /// Drops the session and identity of one address (only the app's own store can; test stores keep everything).
+    private let forgetAddress: ((ProtocolAddress) throws -> Void)?
 
     private let context = AloLibSignalStoreContext()
     private let lock = NSRecursiveLock()
@@ -66,6 +68,11 @@ final class AloLibSignalSessionEngine {
         self.senderKeyStore = store
         self.localUserId = localUserId
         self.localDeviceId = localDeviceId
+        if let appStore = store as? AloLibSignalStore {
+            self.forgetAddress = { address in try appStore.forgetRemoteAddress(address) }
+        } else {
+            self.forgetAddress = nil
+        }
     }
 
     func generatePreKeyBundle() throws -> AloLibSignalPreKeyBundle {
@@ -174,6 +181,21 @@ final class AloLibSignalSessionEngine {
                 identityStore: identityStore,
                 context: context
             )
+        }
+    }
+
+    /// True when this device's session at the address was made with these keys. A different identity means the
+    /// server gave the address to another device (a new browser in a revoked one's slot): the old session and
+    /// identity are dropped, so the caller fetches the new device's bundle instead of encrypting for keys nobody holds.
+    func sessionMatches(remoteUserId: Int, remoteDeviceId: UInt32, identityKey: Data) -> Bool {
+        synchronized {
+            guard let address = try? protocolAddress(userId: remoteUserId, deviceId: remoteDeviceId),
+                  (try? sessionStore.loadSession(for: address, context: context)) != nil else { return false }
+            guard let stored = try? identityStore.identity(for: address, context: context) else { return true }
+            if stored.serialize() == identityKey { return true }
+            guard let forgetAddress else { return true }
+            try? forgetAddress(address)
+            return false
         }
     }
 

@@ -111,6 +111,21 @@ struct MainTabView: View {
         .animation(.spring(response: 0.24, dampingFraction: 0.9), value: app.isProfileLoading)
     }
 
+    private func badgeCount(for tab: AloAppTab) -> Int {
+        guard let data = app.bootstrap else { return 0 }
+        switch tab {
+        case .messages:
+            return data.conversations.reduce(0) { $0 + (app.isChatArchived($1) ? 0 : app.unreadCount(for: $1)) }
+        case .alerts:
+            return data.notifications.reduce(0) { $0 + ($1.isRead ? 0 : 1) }
+        case .profile:
+            // Unread messages of the other accounts on this phone, as on Telegram's Settings tab.
+            return app.otherAccountsUnread
+        default:
+            return 0
+        }
+    }
+
     private var bottomBar: some View {
         HStack(spacing: 0) {
             ForEach(AloAppTab.allCases) { tab in
@@ -118,24 +133,39 @@ struct MainTabView: View {
                     select(tab)
                 } label: {
                     VStack(spacing: 2) {
-                        ZStack {
+                        ZStack(alignment: .topLeading) {
                             Image(systemName: tab.systemImage)
                                 .font(.system(size: 22, weight: .regular))
+                                .frame(height: 28)
+                            // The website's red counter on «Чаты» and «Уведы».
+                            let count = badgeCount(for: tab)
+                            if count > 0 {
+                                Text(count > 99 ? "99+" : "\(count)")
+                                    .font(.system(size: 11, weight: .bold).monospacedDigit())
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 5)
+                                    .frame(minWidth: 18, minHeight: 18)
+                                    .background(Color(red: 1, green: 77 / 255, blue: 95 / 255), in: Capsule())
+                                    .overlay(Capsule().stroke(AloTheme.background, lineWidth: 1.5))
+                                    .fixedSize(horizontal: true, vertical: true)
+                                    .frame(width: 0, height: 0, alignment: .topLeading)
+                                    .offset(x: 14, y: -4)
+                                    .accessibilityLabel("Непрочитанных: \(count)")
+                            }
                         }
-                        .frame(height: 28)
 
                         Text(tab.title)
                             .font(.system(size: 11, weight: .medium))
                             .lineLimit(1)
                             .minimumScaleFactor(0.82)
                     }
-                    .foregroundStyle(app.activeTab == tab ? AloTheme.accent : AloTheme.muted)
+                    .foregroundStyle(app.activeTab == tab ? AloTheme.accent : AloTheme.text.opacity(0.86))
                     .frame(maxWidth: .infinity)
                     .frame(height: 52)
                     .background {
-                        // One highlight travels between tabs, like the segmented controls.
+                        // One highlight travels between tabs; the website's blue --accent-soft.
                         if app.activeTab == tab {
-                            Capsule().fill(.white.opacity(0.10))
+                            Capsule().fill(AloTheme.accent.opacity(0.18))
                                 .matchedGeometryEffect(id: "tab.selection", in: tabSelection)
                         }
                     }
@@ -144,6 +174,7 @@ struct MainTabView: View {
                 .buttonStyle(AloControlPressStyle())
                 .accessibilityLabel(tab.title)
                 .accessibilityAddTraits(app.activeTab == tab ? .isSelected : [])
+                .modifier(AloAccountsMenu(enabled: tab == .profile))
             }
         }
         .padding(.horizontal, 4)
@@ -196,6 +227,45 @@ struct MainTabView: View {
 
 /// Hides a control that something opaque currently covers (the tab bar behind a chat or a
 /// profile) from VoiceOver.
+/// A hold on «Профиль» lists the accounts of this phone and «Добавить аккаунт», as a hold on Telegram's Settings tab.
+struct AloAccountsMenu: ViewModifier {
+    @EnvironmentObject private var app: AloAppModel
+    let enabled: Bool
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content.contextMenu {
+                if let me = app.bootstrap?.me {
+                    Button {
+                        app.activeTab = .profile
+                    } label: {
+                        Label(me.name.isEmpty ? "@\(me.username)" : me.name, systemImage: "checkmark")
+                    }
+                }
+                ForEach(app.otherStoredAccounts) { account in
+                    Button {
+                        app.switchToStoredAccount(account)
+                    } label: {
+                        let unread = app.accountUnread[account.userId] ?? 0
+                        Label(unread > 0 ? "\(account.name) · \(unread > 99 ? "99+" : "\(unread)")" : account.name, systemImage: "person.crop.circle")
+                    }
+                }
+                if app.canAddAccount {
+                    Divider()
+                    Button {
+                        app.addAnotherAccount()
+                    } label: {
+                        Label("Добавить аккаунт", systemImage: "plus")
+                    }
+                }
+            }
+            .accessibilityHint("Удерживайте, чтобы переключить аккаунт")
+        } else {
+            content
+        }
+    }
+}
+
 struct AloCoveredFromAccessibility: ViewModifier {
     let covered: Bool
 

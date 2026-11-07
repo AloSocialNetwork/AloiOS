@@ -63,6 +63,17 @@ struct AuthView: View {
         .onChange(of: app.authMode) { _, _ in
             normalizeStepForMode()
         }
+        .onChange(of: app.code) { _, value in
+            // Codes are six digits: the field keeps nothing else (as on Android).
+            let digits = String(value.filter(\.isNumber).prefix(6))
+            if digits != value { app.code = digits }
+        }
+        .onChange(of: app.passwordResetCodeRejected) { _, rejected in
+            // A wrong or stale code is fixed on the code step, as on the site.
+            guard rejected, isReset else { return }
+            app.passwordResetCodeRejected = false
+            withAnimation(.smooth(duration: 0.24)) { step = .code }
+        }
         .sheet(isPresented: $isQRCodeLoginPresented) {
             AloDeviceLinkScanSheet()
                 .environmentObject(app)
@@ -110,7 +121,7 @@ struct AuthView: View {
                     .foregroundStyle(Color.primary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text(step.subtitle(for: app.authMode))
+                Text(isReset && step == .code ? "Введите код из письма, которое пришло на \(app.email)." : step.subtitle(for: app.authMode))
                     .font(.system(size: 17, weight: .regular))
                     .foregroundStyle(Color.secondary)
                     .lineSpacing(2)
@@ -121,12 +132,37 @@ struct AuthView: View {
                 .focused($focusedField, equals: step)
                 .submitLabel(step == stepsForCurrentMode.last ? .done : .next)
                 .onSubmit(advance)
+
+            // The site's «Забыли пароль?» under the password, and a new code on the reset code step.
+            if app.authMode == .login && step == .password {
+                textLink("Забыли пароль?", identifier: "alo.auth.forgot-password") {
+                    focusedField = nil
+                    app.requestPasswordReset()
+                }
+            } else if isReset && step == .code {
+                textLink("Отправить код снова", identifier: "alo.auth.reset-resend") {
+                    app.resendPasswordResetCode()
+                }
+            }
         }
         .id("step-\(app.authModeKey)-\(step)")
         .transition(.asymmetric(
             insertion: .move(edge: .trailing).combined(with: .opacity),
             removal: .move(edge: .leading).combined(with: .opacity)
         ))
+    }
+
+    private func textLink(_ title: String, identifier: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(app.isBusy ? Color.secondary : AloTheme.accent)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(app.isBusy)
+        .accessibilityIdentifier(identifier)
     }
 
     private var verificationStep: some View {
@@ -179,7 +215,7 @@ struct AuthView: View {
                 }
             )
 
-            if !isVerification {
+            if !isVerification && !isReset {
                 if app.authMode == .login {
                     HStack(spacing: 10) {
                         Button {
@@ -266,7 +302,7 @@ struct AuthView: View {
     @ViewBuilder
     private func authField(for step: AuthStep) -> some View {
         Group {
-            if step == .password {
+            if step == .password || step == .newPassword {
                 SecureField(step.placeholder, text: binding(for: step))
             } else {
                 TextField(step.placeholder, text: binding(for: step))
@@ -293,8 +329,16 @@ struct AuthView: View {
         app.authMode == .verifyLogin || app.authMode == .verifyEmail
     }
 
+    private var isReset: Bool {
+        app.authMode == .resetPassword
+    }
+
     private var stepsForCurrentMode: [AuthStep] {
-        app.authMode == .register ? [.name, .username, .email, .password] : [.email, .password]
+        switch app.authMode {
+        case .register: return [.name, .username, .email, .password]
+        case .resetPassword: return [.code, .newPassword]
+        default: return [.email, .password]
+        }
     }
 
     private var indicatorSteps: [AuthStep] {
@@ -307,19 +351,21 @@ struct AuthView: View {
 
     private var modeTitle: String {
         if isVerification { return "Проверка" }
+        if isReset { return "Новый пароль" }
         return app.authMode == .register ? "Регистрация" : "Вход"
     }
 
     private var bottomButtonTitle: String {
         if isVerification { return "Продолжить" }
         if step == stepsForCurrentMode.last {
+            if isReset { return "Сменить пароль" }
             return app.authMode == .register ? "Создать аккаунт" : "Войти"
         }
         return "Продолжить"
     }
 
     private var canShowBackButton: Bool {
-        isVerification || canGoBack
+        isVerification || isReset || canGoBack
     }
 
     private var canGoBack: Bool {
@@ -344,6 +390,8 @@ struct AuthView: View {
             return app.password.count >= 8
         case .code:
             return !app.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .newPassword:
+            return app.newPassword.count >= 8
         }
     }
 
@@ -351,6 +399,10 @@ struct AuthView: View {
         app.errorMessage = ""
         guard isStepValid(step) else { return }
         guard let index = stepsForCurrentMode.firstIndex(of: step) else { return }
+        if isReset && step == .code && app.code.trimmingCharacters(in: .whitespacesAndNewlines).count != 6 {
+            app.errorMessage = "Код должен состоять из 6 цифр."
+            return
+        }
 
         if index < stepsForCurrentMode.count - 1 {
             withAnimation(.smooth(duration: 0.24)) {
@@ -365,6 +417,17 @@ struct AuthView: View {
     private func handleBack() {
         if isVerification {
             backFromVerification()
+        } else if isReset && step == .code {
+            // Back to the password step the reset started from.
+            app.code = ""
+            app.newPassword = ""
+            app.notice = ""
+            app.errorMessage = ""
+            withAnimation(.smooth(duration: 0.24)) {
+                app.authMode = .login
+                step = .password
+                focusedField = nil
+            }
         } else {
             goBack()
         }
@@ -424,6 +487,8 @@ struct AuthView: View {
             return $app.password
         case .code:
             return $app.code
+        case .newPassword:
+            return $app.newPassword
         }
     }
 }
@@ -484,6 +549,7 @@ private enum AuthStep: Hashable {
     case email
     case password
     case code
+    case newPassword
 
     var placeholder: String {
         switch self {
@@ -497,6 +563,8 @@ private enum AuthStep: Hashable {
             return "Пароль"
         case .code:
             return "Код из письма"
+        case .newPassword:
+            return "Новый пароль"
         }
     }
 
@@ -523,6 +591,8 @@ private enum AuthStep: Hashable {
             return .password
         case .code:
             return .oneTimeCode
+        case .newPassword:
+            return .newPassword
         }
     }
 
@@ -537,7 +607,9 @@ private enum AuthStep: Hashable {
         case .password:
             return mode == .register ? "Создайте пароль" : "Введите пароль"
         case .code:
-            return "Введите код"
+            return mode == .resetPassword ? "Сброс пароля" : "Введите код"
+        case .newPassword:
+            return "Новый пароль"
         }
     }
 
@@ -553,6 +625,8 @@ private enum AuthStep: Hashable {
             return mode == .register ? "Минимум 8 символов." : "После пароля подтвердим вход кодом из письма."
         case .code:
             return "Код отправлен на почту."
+        case .newPassword:
+            return "Минимум 8 символов. После смены пароля все устройства выйдут из аккаунта."
         }
     }
 }
@@ -568,6 +642,8 @@ private extension AloAppModel {
             return "verify-login"
         case .verifyEmail:
             return "verify-email"
+        case .resetPassword:
+            return "reset-password"
         }
     }
 }

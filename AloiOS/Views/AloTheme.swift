@@ -8,6 +8,8 @@ enum AloTheme {
     static let surface = Color(red: 29.0 / 255.0, green: 29.0 / 255.0, blue: 31.0 / 255.0)
     static let surfaceRaised = Color(red: 40.0 / 255.0, green: 40.0 / 255.0, blue: 42.0 / 255.0)
     static let surfaceInteractive = Color(red: 54.0 / 255.0, green: 54.0 / 255.0, blue: 57.0 / 255.0)
+    /// The website's --surface: the «Что нового?» field in the feed.
+    static let quickComposeFill = Color(red: 22.0 / 255.0, green: 22.0 / 255.0, blue: 24.0 / 255.0)
     static let segmentedBackground = Color(red: 29.0 / 255.0, green: 29.0 / 255.0, blue: 31.0 / 255.0)
     static let segmentedSelection = Color(red: 58.0 / 255.0, green: 58.0 / 255.0, blue: 61.0 / 255.0)
     static let text = Color(red: 245.0 / 255.0, green: 245.0 / 255.0, blue: 247.0 / 255.0)

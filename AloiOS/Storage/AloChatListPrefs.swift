@@ -1,9 +1,9 @@
 import Foundation
 
-/// Pinned and archived chats, kept on this device per account.
+/// Pinned and archived chats per account.
 ///
-/// The server only pins *messages*, not whole chats, and has no archive, so these two lists live
-/// locally and do not follow the account to another device.
+/// Pins belong to the account, as in Telegram: the server keeps their order (`/api/chat/pins`) and
+/// this list is the device's copy of it, replaced by what the server sends. The archive stays on the device.
 final class AloChatListPrefs {
     struct State: Codable, Equatable {
         var pinned: [String] = []
@@ -41,7 +41,8 @@ final class AloChatListPrefs {
         if pinned {
             let fresh = keys.filter { !state.pinned.contains($0) }
             guard state.pinned.count + fresh.count <= Self.maximumPinned else { return false }
-            state.pinned.append(contentsOf: fresh)
+            // A new pin goes on top, as in Telegram.
+            state.pinned.insert(contentsOf: fresh, at: 0)
             state.archived.removeAll { keys.contains($0) }
         } else {
             state.pinned.removeAll { keys.contains($0) }
@@ -59,6 +60,28 @@ final class AloChatListPrefs {
             state.archived.removeAll { keys.contains($0) }
         }
         save(state, owner: owner)
+    }
+
+    /// The account's pins as the server sent them; a pinned chat leaves the archive.
+    func replacePinned(owner: Int, pinned: [String]) {
+        var state = state(owner: owner)
+        guard state.pinned != pinned else { return }
+        state.pinned = pinned
+        state.archived.removeAll { pinned.contains($0) }
+        save(state, owner: owner)
+    }
+
+    /// Pins made before the server kept them are sent once (`/api/chat/pins/import`); this remembers that it happened.
+    func pinsImported(owner: Int) -> Bool { defaults.bool(forKey: "alo.chatlist.pinsImported.\(owner)") }
+    func markPinsImported(owner: Int) { defaults.set(true, forKey: "alo.chatlist.pinsImported.\(owner)") }
+
+    /// `pinned` of /api/chat/pins or of a `chat_pins_updated` update; nil when the field is missing.
+    static func pins(from json: [String: Any]) -> [String]? {
+        guard let list = json["pinned"] as? [Any] else { return nil }
+        var seen = Set<String>()
+        return list.compactMap { $0 as? String }.filter { key in
+            key.range(of: #"^(direct|group):\d+$"#, options: .regularExpression) != nil && seen.insert(key).inserted
+        }
     }
 
     #if DEBUG

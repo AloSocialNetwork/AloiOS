@@ -38,9 +38,14 @@ struct AloChatNavigationAndMediaTests {
         model.applicationDidEnterBackground(at: start)
         model.applicationDidBecomeActive(at: start.addingTimeInterval(seconds))
         #expect(model.activeConversation == nil)
-        #expect(model.messageText == "Неотправленный текст")
         #expect(model.unreadRevision == unreadRevision)
         #expect(model.bootstrap?.conversations.first?.unreadCount == 3)
+        // Drafts are kept per chat: the text is not lost, it comes back when the chat is opened again.
+        model.activeConversation = AloConversationDetail(
+            summary: AloConversationSummary(["peerId": 2, "peer": ["id": 2, "name": "Test peer"]]),
+            items: []
+        )
+        #expect(model.messageText == "Неотправленный текст")
     }
 
     @Test @MainActor func duplicateBackgroundEventsDoNotExtendConversationLifetime() {
